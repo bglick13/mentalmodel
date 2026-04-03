@@ -1,0 +1,1 @@
+"""Deterministic execution harness scaffold."""

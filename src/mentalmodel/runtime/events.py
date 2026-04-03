@@ -1,0 +1,11 @@
+"""Runtime event names."""
+
+NODE_STARTED = "node.started"
+NODE_SUCCEEDED = "node.succeeded"
+NODE_FAILED = "node.failed"
+STATE_READ = "state.read"
+STATE_TRANSITION = "state.transition"
+EFFECT_INVOKED = "effect.invoked"
+EFFECT_COMPLETED = "effect.completed"
+JOIN_RESOLVED = "join.resolved"
+INVARIANT_CHECKED = "invariant.checked"

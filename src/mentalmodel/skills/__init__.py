@@ -1,0 +1,1 @@
+"""Skill support package scaffold."""

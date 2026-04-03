@@ -1,0 +1,1 @@
+"""Mermaid renderer scaffold."""

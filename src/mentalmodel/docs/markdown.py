@@ -1,0 +1,1 @@
+"""Markdown documentation renderer scaffold."""

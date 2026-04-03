@@ -1,0 +1,1 @@
+"""Documentation projection package scaffold."""
