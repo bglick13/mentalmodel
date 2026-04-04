@@ -12,6 +12,7 @@ class ExecutionRecorder:
     """In-memory recorder for semantic execution events."""
 
     records: list[ExecutionRecord] = field(default_factory=list)
+    last_run_id: str | None = None
     _sequence: int = 0
 
     def record(
@@ -23,6 +24,7 @@ class ExecutionRecorder:
         timestamp_ms: int,
         payload: Mapping[str, JsonValue] | None = None,
     ) -> ExecutionRecord:
+        self.last_run_id = run_id
         self._sequence += 1
         record = ExecutionRecord(
             record_id=f"{run_id}:{self._sequence}",

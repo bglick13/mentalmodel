@@ -9,7 +9,7 @@ from mentalmodel.core import Workflow
 from mentalmodel.core.interfaces import JsonValue, NamedPrimitive, RuntimeValue
 from mentalmodel.ir.graph import IRGraph, IRNode
 from mentalmodel.ir.records import ExecutionRecord
-from mentalmodel.observability.tracing import TracingAdapter, create_tracing_adapter
+from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter, create_tracing_adapter
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.errors import ExecutionError
 from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
@@ -26,10 +26,12 @@ from mentalmodel.runtime.recorder import ExecutionRecorder
 class ExecutionResult:
     """Outputs and semantic records from one program run."""
 
+    run_id: str
     graph: IRGraph
     outputs: dict[str, RuntimeValue]
     records: tuple[ExecutionRecord, ...]
     state: dict[str, RuntimeValue]
+    spans: tuple[RecordedSpan, ...]
 
 
 class AsyncExecutor:
@@ -55,10 +57,12 @@ class AsyncExecutor:
         )
         outputs = await self._execute(compiled=compiled, context=context)
         return ExecutionResult(
+            run_id=context.run_id,
             graph=compiled.graph,
             outputs=dict(outputs),
             records=tuple(self.recorder.records),
             state=dict(context.state_store),
+            spans=self.tracing.snapshot_spans(),
         )
 
     async def _execute(

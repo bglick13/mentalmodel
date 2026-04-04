@@ -203,6 +203,8 @@ Runtime responsibilities:
 - Effect invocation wrapping
 - OTel export
 - Replay support
+- Persist per-run debug bundles under `.runs/<graph_id>/<run_id>/` when running
+  verification/debug flows without an external sink
 
 The runtime should remain deterministic where practical:
 

@@ -34,6 +34,18 @@ class BatchState(TypedDict):
     cursor: int
 
 
+class PolicySnapshotInputs(TypedDict):
+    pass
+
+
+class PolicySnapshotState(TypedDict):
+    policy_version: int
+
+
+class PolicySnapshotOutput(TypedDict):
+    current_policy_version: int
+
+
 class PromptRecord(TypedDict):
     prompt_id: str
     prompt_text: str
@@ -41,6 +53,7 @@ class PromptRecord(TypedDict):
 
 class SamplePolicyInputs(TypedDict):
     batch_source: list[PromptRecord]
+    policy_snapshot: PolicySnapshotOutput
 
 
 class SampleRecord(TypedDict):
@@ -51,7 +64,6 @@ class SampleRecord(TypedDict):
 
 class SamplePolicyOutput(TypedDict):
     sampled_policy_version: int
-    current_policy_version: int
     samples: list[SampleRecord]
 
 
@@ -65,6 +77,7 @@ class RewardInputs(TypedDict):
 
 class RolloutJoinInputs(TypedDict):
     sample_policy: SamplePolicyOutput
+    policy_snapshot: PolicySnapshotOutput
     pangram_reward: RewardScores
     quality_reward: RewardScores
     kl_prefetch: KLPrefetchOutput
@@ -105,6 +118,26 @@ class InvariantInputs(TypedDict):
 
 
 @dataclass(slots=True)
+class PolicySnapshot(ActorHandler[PolicySnapshotInputs, PolicySnapshotState, PolicySnapshotOutput]):
+    initial_policy_version: int
+
+    async def handle(
+        self,
+        inputs: PolicySnapshotInputs,
+        state: PolicySnapshotState | None,
+        ctx: ExecutionContext,
+    ) -> ActorResult[PolicySnapshotOutput, PolicySnapshotState]:
+        del inputs, ctx
+        current_version = (
+            self.initial_policy_version if state is None else state["policy_version"]
+        )
+        return ActorResult(
+            output={"current_policy_version": current_version},
+            next_state={"policy_version": current_version},
+        )
+
+
+@dataclass(slots=True)
 class BatchSource(ActorHandler[BatchSourceInputs, BatchState, list[PromptRecord]]):
     async def handle(
         self,
@@ -124,6 +157,7 @@ class BatchSource(ActorHandler[BatchSourceInputs, BatchState, list[PromptRecord]
 @dataclass(slots=True)
 class PolicySampler(EffectHandler[SamplePolicyInputs, SamplePolicyOutput]):
     group_size: int
+    sampler_lag: int
 
     async def invoke(
         self,
@@ -132,6 +166,7 @@ class PolicySampler(EffectHandler[SamplePolicyInputs, SamplePolicyOutput]):
     ) -> SamplePolicyOutput:
         del ctx
         batch_value = inputs["batch_source"]
+        current_version = inputs["policy_snapshot"]["current_policy_version"]
         await asyncio.sleep(0.01)
         samples: list[SampleRecord] = []
         for prompt in batch_value:
@@ -144,8 +179,7 @@ class PolicySampler(EffectHandler[SamplePolicyInputs, SamplePolicyOutput]):
                     }
                 )
         return {
-            "sampled_policy_version": 0,
-            "current_policy_version": 0,
+            "sampled_policy_version": max(0, current_version - self.sampler_lag),
             "samples": samples,
         }
 
@@ -200,7 +234,7 @@ class RolloutJoinReducer(JoinReducer[RolloutJoinInputs, RolloutJoinOutput]):
         sample_payload = inputs["sample_policy"]
         return {
             "sampled_policy_version": sample_payload["sampled_policy_version"],
-            "current_policy_version": sample_payload["current_policy_version"],
+            "current_policy_version": inputs["policy_snapshot"]["current_policy_version"],
             "samples": sample_payload["samples"],
             "pangram_scores": inputs["pangram_reward"],
             "quality_scores": inputs["quality_reward"],
@@ -218,7 +252,9 @@ class LearnerUpdate(ActorHandler[LearnerInputs, LearnerState, LearnerOutput]):
     ) -> ActorResult[LearnerOutput, LearnerState]:
         del ctx
         rollout = inputs["rollout_join"]
-        previous_version = 0 if state is None else state["policy_version"]
+        previous_version = (
+            rollout["current_policy_version"] if state is None else state["policy_version"]
+        )
         next_version = previous_version + 1
         return ActorResult(
             output={
@@ -267,6 +303,7 @@ class PolicyStalenessChecker(InvariantChecker[InvariantInputs, int]):
 
 AsyncRlNode: TypeAlias = (
     RuntimeContext
+    | Actor[PolicySnapshotInputs, PolicySnapshotOutput, PolicySnapshotState]
     | Actor[BatchSourceInputs, list[PromptRecord], BatchState]
     | Effect[SamplePolicyInputs, SamplePolicyOutput]
     | Parallel[Effect[RewardInputs, RewardScores] | Effect[RewardInputs, KLPrefetchOutput]]
@@ -277,7 +314,13 @@ AsyncRlNode: TypeAlias = (
 )
 
 
-def build_program(group_size: int = 4) -> Workflow[AsyncRlNode]:
+def build_program(
+    group_size: int = 4,
+    *,
+    sampler_lag: int = 0,
+    max_off_policy_steps: int = 0,
+    initial_policy_version: int = 3,
+) -> Workflow[AsyncRlNode]:
     """Build the milestone-two async RL authoring model."""
 
     return Workflow(
@@ -288,6 +331,10 @@ def build_program(group_size: int = 4) -> Workflow[AsyncRlNode]:
                 name="local_control_plane",
                 runtime="local",
                 children=[
+                    Actor[PolicySnapshotInputs, PolicySnapshotOutput, PolicySnapshotState](
+                        "policy_snapshot",
+                        handler=PolicySnapshot(initial_policy_version=initial_policy_version),
+                    ),
                     Actor[BatchSourceInputs, list[PromptRecord], BatchState](
                         "batch_source",
                         handler=BatchSource(),
@@ -298,8 +345,11 @@ def build_program(group_size: int = 4) -> Workflow[AsyncRlNode]:
                         children=[
                             Effect[SamplePolicyInputs, SamplePolicyOutput](
                                 "sample_policy",
-                                handler=PolicySampler(group_size=group_size),
-                                inputs=[Ref("batch_source")],
+                                handler=PolicySampler(
+                                    group_size=group_size,
+                                    sampler_lag=sampler_lag,
+                                ),
+                                inputs=[Ref("batch_source"), Ref("policy_snapshot")],
                             )
                         ],
                     ),
@@ -328,6 +378,7 @@ def build_program(group_size: int = 4) -> Workflow[AsyncRlNode]:
                     Join[RolloutJoinInputs, RolloutJoinOutput](
                         "rollout_join",
                         inputs=[
+                            Ref("policy_snapshot"),
                             Ref("sample_policy"),
                             Ref("pangram_reward"),
                             Ref("quality_reward"),
@@ -337,7 +388,9 @@ def build_program(group_size: int = 4) -> Workflow[AsyncRlNode]:
                     ),
                     Invariant[InvariantInputs, int](
                         "staleness_invariant",
-                        checker=PolicyStalenessChecker(max_off_policy_steps=0),
+                        checker=PolicyStalenessChecker(
+                            max_off_policy_steps=max_off_policy_steps
+                        ),
                         inputs=[Ref("rollout_join")],
                     ),
                     Actor[LearnerInputs, LearnerOutput, LearnerState](
@@ -370,7 +423,12 @@ def property_rollout_scores_align(
     assert isinstance(sample_policy, dict)
     samples = sample_policy["samples"]
     assert isinstance(samples, list)
-    expected_count = len(samples)
+    sample_keys = {
+        f"{sample['prompt_id']}:{sample['sample_index']}"
+        for sample in samples
+    }
+    expected_count = len(sample_keys)
+    assert expected_count == len(samples)
 
     rollout_join = result.outputs["rollout_join"]
     assert isinstance(rollout_join, dict)
@@ -380,7 +438,45 @@ def property_rollout_scores_align(
     assert isinstance(pangram_scores, dict)
     assert isinstance(quality_scores, dict)
     assert isinstance(kl_prefetch, dict)
+    assert sample_policy["sampled_policy_version"] == rollout_join["sampled_policy_version"]
 
     assert len(pangram_scores) == expected_count
     assert len(quality_scores) == expected_count
     assert len(kl_prefetch) == expected_count
+    assert set(pangram_scores.keys()) == sample_keys
+    assert set(quality_scores.keys()) == sample_keys
+    assert set(kl_prefetch.keys()) == sample_keys
+
+
+@hypothesis_property_check(
+    "staleness invariant respects configured off-policy budget",
+    group_size=st.integers(min_value=1, max_value=4),
+    sampler_lag=st.integers(min_value=0, max_value=3),
+    max_off_policy_steps=st.integers(min_value=0, max_value=2),
+)
+def property_staleness_budget_is_enforced(
+    program: Workflow[AsyncRlNode],
+    group_size: int,
+    sampler_lag: int,
+    max_off_policy_steps: int,
+) -> None:
+    del program
+    budget_program = build_program(
+        group_size=group_size,
+        sampler_lag=sampler_lag,
+        max_off_policy_steps=max_off_policy_steps,
+    )
+    if sampler_lag <= max_off_policy_steps:
+        result = execute_program(budget_program)
+        invariant = result.outputs["staleness_invariant"]
+        assert isinstance(invariant, InvariantResult)
+        assert invariant.passed
+        return
+
+    from mentalmodel.runtime import InvariantViolationError
+
+    try:
+        execute_program(budget_program)
+    except InvariantViolationError:
+        return
+    raise AssertionError("expected staleness invariant to fail for stale sampler output")

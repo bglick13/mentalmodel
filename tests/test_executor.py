@@ -21,7 +21,7 @@ from mentalmodel.core import (
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import LoweringError
 from mentalmodel.examples.async_rl.demo import LearnerState, RefreshOutput, build_program
-from mentalmodel.observability.tracing import TracingAdapter
+from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter
 from mentalmodel.plugins.runtime_context import RuntimeContext
 from mentalmodel.runtime import compile_program
 from mentalmodel.runtime.context import ExecutionContext
@@ -75,6 +75,7 @@ class AlwaysFailInvariant(InvariantChecker[dict[str, object], JsonValue]):
 class FakeTracingAdapter:
     def __init__(self) -> None:
         self.span_names: list[str] = []
+        self.sink_configured = False
 
     @contextmanager
     def start_span(
@@ -86,6 +87,9 @@ class FakeTracingAdapter:
         del attributes
         self.span_names.append(name)
         yield object()
+
+    def snapshot_spans(self) -> tuple[RecordedSpan, ...]:
+        return tuple()
 
 
 class ExecutorTest(unittest.TestCase):
@@ -99,10 +103,16 @@ class ExecutorTest(unittest.TestCase):
         self.assertIsInstance(sample_policy, CompiledEffectNode)
         self.assertIsInstance(rollout_join, CompiledJoinNode)
         self.assertIsInstance(staleness, CompiledInvariantNode)
-        self.assertEqual(sample_policy.metadata.dependencies, ("batch_source",))
+        self.assertEqual(sample_policy.metadata.dependencies, ("batch_source", "policy_snapshot"))
         self.assertEqual(
             rollout_join.metadata.dependencies,
-            ("kl_prefetch", "pangram_reward", "quality_reward", "sample_policy"),
+            (
+                "kl_prefetch",
+                "pangram_reward",
+                "policy_snapshot",
+                "quality_reward",
+                "sample_policy",
+            ),
         )
 
     def test_compile_program_excludes_container_nodes_from_execution_plan(self) -> None:
@@ -116,10 +126,10 @@ class ExecutorTest(unittest.TestCase):
         result = asyncio.run(AsyncExecutor().run(build_program()))
         self.assertIn("refresh_sampler", result.outputs)
         refresh_output = cast(RefreshOutput, result.outputs["refresh_sampler"])
-        self.assertEqual(refresh_output["refreshed_to_policy_version"], 1)
+        self.assertEqual(refresh_output["refreshed_to_policy_version"], 4)
         self.assertIn("learner_update", result.state)
         learner_state = cast(LearnerState, result.state["learner_update"])
-        self.assertEqual(learner_state["policy_version"], 1)
+        self.assertEqual(learner_state["policy_version"], 4)
 
     def test_execution_records_include_semantic_events(self) -> None:
         result = asyncio.run(AsyncExecutor().run(build_program()))
@@ -149,7 +159,7 @@ class ExecutorTest(unittest.TestCase):
         invoked = next(
             record for record in sample_effect_records if record.event_type == "effect.invoked"
         )
-        self.assertEqual(invoked.payload["input_keys"], ["batch_source"])
+        self.assertEqual(invoked.payload["input_keys"], ["batch_source", "policy_snapshot"])
         completed = next(
             record for record in sample_effect_records if record.event_type == "effect.completed"
         )
@@ -185,7 +195,7 @@ class ExecutorTest(unittest.TestCase):
         )
         self.assertEqual(
             join_record.payload["input_keys"],
-            ["kl_prefetch", "pangram_reward", "quality_reward", "sample_policy"],
+            ["kl_prefetch", "pangram_reward", "policy_snapshot", "quality_reward", "sample_policy"],
         )
 
         invariant_record = next(

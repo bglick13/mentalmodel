@@ -17,6 +17,7 @@ venv/
 .coverage.*
 htmlcov/
 coverage.xml
+.runs/
 
 # Build artifacts
 build/

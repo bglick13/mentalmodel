@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from typing import cast
 
 from mentalmodel.core import InvariantResult
+from mentalmodel.examples.async_rl import (
+    expected_artifact_names,
+    generate_demo_artifacts,
+    read_expected_demo_artifacts,
+    write_demo_artifacts,
+)
 from mentalmodel.examples.async_rl.demo import RolloutJoinOutput, SamplePolicyOutput, build_program
 from mentalmodel.ir.lowering import lower_program
+from mentalmodel.runtime import InvariantViolationError
 from mentalmodel.runtime.executor import AsyncExecutor
 
 
@@ -16,6 +25,7 @@ class AsyncRlDemoTest(unittest.TestCase):
         graph = lower_program(program)
         self.assertEqual(graph.graph_id, "async_rl_demo")
         node_ids = {node.node_id for node in graph.nodes}
+        self.assertIn("policy_snapshot", node_ids)
         self.assertIn("sample_policy", node_ids)
         self.assertIn("rollout_join", node_ids)
         self.assertIn("remote_sampling", node_ids)
@@ -24,8 +34,7 @@ class AsyncRlDemoTest(unittest.TestCase):
     def test_demo_execution_produces_expected_rollout_structure(self) -> None:
         result = asyncio.run(AsyncExecutor().run(build_program()))
         sample_policy = cast(SamplePolicyOutput, result.outputs["sample_policy"])
-        self.assertEqual(sample_policy["sampled_policy_version"], 0)
-        self.assertEqual(sample_policy["current_policy_version"], 0)
+        self.assertEqual(sample_policy["sampled_policy_version"], 3)
         self.assertEqual(len(sample_policy["samples"]), 8)
 
         rollout = cast(RolloutJoinOutput, result.outputs["rollout_join"])
@@ -44,6 +53,8 @@ class AsyncRlDemoTest(unittest.TestCase):
         self.assertEqual(len(rollout["pangram_scores"]), 8)
         self.assertEqual(len(rollout["quality_scores"]), 8)
         self.assertEqual(len(rollout["kl_prefetch"]), 8)
+        self.assertEqual(rollout["current_policy_version"], 3)
+        self.assertEqual(rollout["sampled_policy_version"], 3)
 
     def test_demo_execution_records_expected_invariant_output(self) -> None:
         result = asyncio.run(AsyncExecutor().run(build_program()))
@@ -52,10 +63,27 @@ class AsyncRlDemoTest(unittest.TestCase):
         self.assertEqual(
             dict(invariant_result.details),
             {
-                "sampled_policy_version": 0,
-                "current_policy_version": 0,
+                "sampled_policy_version": 3,
+                "current_policy_version": 3,
             },
         )
+
+    def test_demo_staleness_invariant_fails_when_sampler_lags_control_plane(self) -> None:
+        with self.assertRaises(InvariantViolationError):
+            asyncio.run(AsyncExecutor().run(build_program(sampler_lag=1)))
+
+    def test_generated_demo_artifacts_match_checked_in_files(self) -> None:
+        self.assertEqual(generate_demo_artifacts(), read_expected_demo_artifacts())
+
+    def test_write_demo_artifacts_writes_expected_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            written = write_demo_artifacts(Path(tmpdir))
+            self.assertEqual(
+                tuple(path.name for path in written),
+                expected_artifact_names(),
+            )
+            for path in written:
+                self.assertTrue(path.exists())
 
 
 if __name__ == "__main__":

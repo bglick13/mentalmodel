@@ -1,0 +1,41 @@
+flowchart LR
+    batch_source["batch_source<br/>actor"]
+    learner_update["learner_update<br/>actor"]
+    policy_snapshot["policy_snapshot<br/>actor"]
+    kl_prefetch["kl_prefetch<br/>effect"]
+    pangram_reward["pangram_reward<br/>effect"]
+    quality_reward["quality_reward<br/>effect"]
+    refresh_sampler["refresh_sampler<br/>effect"]
+    sample_policy["sample_policy<br/>effect"]
+    staleness_invariant["staleness_invariant<br/>invariant"]
+    rollout_join["rollout_join<br/>join"]
+    reward_fanout["reward_fanout<br/>parallel"]
+    local_control_plane["local_control_plane<br/>runtime_context"]
+    remote_sampling["remote_sampling<br/>runtime_context"]
+    async_rl_demo["async_rl_demo<br/>workflow"]
+    async_rl_demo -->|"contains"| local_control_plane
+    local_control_plane -->|"contains"| batch_source
+    local_control_plane -->|"contains"| learner_update
+    local_control_plane -->|"contains"| policy_snapshot
+    local_control_plane -->|"contains"| refresh_sampler
+    local_control_plane -->|"contains"| remote_sampling
+    local_control_plane -->|"contains"| reward_fanout
+    local_control_plane -->|"contains"| rollout_join
+    local_control_plane -->|"contains"| staleness_invariant
+    remote_sampling -->|"contains"| sample_policy
+    reward_fanout -->|"contains"| kl_prefetch
+    reward_fanout -->|"contains"| pangram_reward
+    reward_fanout -->|"contains"| quality_reward
+    batch_source -->|"data"| sample_policy
+    kl_prefetch -->|"data"| rollout_join
+    learner_update -->|"data"| refresh_sampler
+    pangram_reward -->|"data"| rollout_join
+    policy_snapshot -->|"data"| rollout_join
+    policy_snapshot -->|"data"| sample_policy
+    quality_reward -->|"data"| rollout_join
+    rollout_join -->|"data"| learner_update
+    rollout_join -->|"data"| staleness_invariant
+    sample_policy -->|"data"| kl_prefetch
+    sample_policy -->|"data"| pangram_reward
+    sample_policy -->|"data"| quality_reward
+    sample_policy -->|"data"| rollout_join

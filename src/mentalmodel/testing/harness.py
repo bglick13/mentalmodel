@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from types import ModuleType
 
 from mentalmodel.analysis import AnalysisReport, run_analysis
-from mentalmodel.core.interfaces import NamedPrimitive
+from mentalmodel.core.interfaces import NamedPrimitive, RuntimeValue
 from mentalmodel.core.workflow import Workflow
 from mentalmodel.ir.lowering import lower_program
-from mentalmodel.runtime import AsyncExecutor, ExecutionResult
+from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.export import write_json
+from mentalmodel.observability.tracing import RecordedSpan
+from mentalmodel.runtime import AsyncExecutor, ExecutionRecorder, ExecutionResult
+from mentalmodel.runtime.runs import RunArtifacts, write_run_artifacts
 from mentalmodel.testing.invariants import PropertyCheckResult, run_property_checks
 
 
@@ -19,6 +25,8 @@ class RuntimeVerificationResult:
     record_count: int
     output_count: int
     state_count: int
+    run_id: str | None = None
+    run_artifacts_dir: str | None = None
     error: str | None = None
 
 
@@ -29,6 +37,7 @@ class VerificationReport:
     analysis: AnalysisReport
     runtime: RuntimeVerificationResult
     property_checks: tuple[PropertyCheckResult, ...]
+    run_artifacts: RunArtifacts | None = None
 
     @property
     def success(self) -> bool:
@@ -63,6 +72,8 @@ class VerificationReport:
                 "record_count": self.runtime.record_count,
                 "output_count": self.runtime.output_count,
                 "state_count": self.runtime.state_count,
+                "run_id": self.runtime.run_id,
+                "run_artifacts_dir": self.runtime.run_artifacts_dir,
                 "error": self.runtime.error,
             },
             "property_checks": [
@@ -78,10 +89,20 @@ class VerificationReport:
         }
 
 
+@dataclass(slots=True, frozen=True)
+class RuntimeExecutionCapture:
+    """Captured runtime details used for report generation and run artifacts."""
+
+    result: RuntimeVerificationResult
+    records: tuple[ExecutionRecord, ...]
+    outputs: dict[str, RuntimeValue]
+    state: dict[str, RuntimeValue]
+    spans: tuple[RecordedSpan, ...]
+    trace_sink_configured: bool
+
+
 def execute_program(program: Workflow[NamedPrimitive]) -> ExecutionResult:
     """Run one workflow through the deterministic async executor."""
-
-    import asyncio
 
     return asyncio.run(AsyncExecutor().run(program))
 
@@ -90,38 +111,91 @@ def run_verification(
     program: Workflow[NamedPrimitive],
     *,
     module: ModuleType | None = None,
+    runs_dir: Path | None = None,
+    persist_run_artifacts: bool = True,
 ) -> VerificationReport:
     """Run static analysis, runtime execution, and property checks."""
 
     graph = lower_program(program)
     analysis = run_analysis(graph)
-    runtime = _run_runtime(program)
+    runtime_capture = _capture_runtime(program)
     property_checks = (
         run_property_checks(module, program)
         if module is not None
         else tuple[PropertyCheckResult, ...]()
     )
-    return VerificationReport(
+    report = VerificationReport(
+        analysis=analysis,
+        runtime=runtime_capture.result,
+        property_checks=property_checks,
+    )
+    if not persist_run_artifacts:
+        return report
+
+    artifacts = write_run_artifacts(
+        graph=graph,
+        run_id=runtime_capture.result.run_id or "run-failed",
+        success=report.success,
+        records=runtime_capture.records,
+        outputs=runtime_capture.outputs,
+        state=runtime_capture.state,
+        spans=runtime_capture.spans,
+        runs_dir=runs_dir,
+        verification_payload=report.as_dict(),
+        trace_sink_configured=runtime_capture.trace_sink_configured,
+    )
+    runtime = RuntimeVerificationResult(
+        success=runtime_capture.result.success,
+        record_count=runtime_capture.result.record_count,
+        output_count=runtime_capture.result.output_count,
+        state_count=runtime_capture.result.state_count,
+        run_id=runtime_capture.result.run_id,
+        run_artifacts_dir=str(artifacts.run_dir),
+        error=runtime_capture.result.error,
+    )
+    final_report = VerificationReport(
         analysis=analysis,
         runtime=runtime,
         property_checks=property_checks,
+        run_artifacts=artifacts,
     )
+    if artifacts.verification_path is not None:
+        write_json(artifacts.verification_path, final_report.as_dict())
+    return final_report
 
 
-def _run_runtime(program: Workflow[NamedPrimitive]) -> RuntimeVerificationResult:
+def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCapture:
+    recorder = ExecutionRecorder()
+    executor = AsyncExecutor(recorder=recorder)
     try:
-        result = execute_program(program)
+        result = asyncio.run(executor.run(program))
     except Exception as exc:
-        return RuntimeVerificationResult(
-            success=False,
-            record_count=0,
-            output_count=0,
-            state_count=0,
-            error=f"{type(exc).__name__}: {exc}",
+        return RuntimeExecutionCapture(
+            result=RuntimeVerificationResult(
+                success=False,
+                record_count=len(recorder.records),
+                output_count=0,
+                state_count=0,
+                run_id=recorder.last_run_id,
+                error=f"{type(exc).__name__}: {exc}",
+            ),
+            records=tuple(recorder.records),
+            outputs={},
+            state={},
+            spans=executor.tracing.snapshot_spans(),
+            trace_sink_configured=executor.tracing.sink_configured,
         )
-    return RuntimeVerificationResult(
-        success=True,
-        record_count=len(result.records),
-        output_count=len(result.outputs),
-        state_count=len(result.state),
+    return RuntimeExecutionCapture(
+        result=RuntimeVerificationResult(
+            success=True,
+            record_count=len(result.records),
+            output_count=len(result.outputs),
+            state_count=len(result.state),
+            run_id=result.run_id,
+        ),
+        records=result.records,
+        outputs=result.outputs,
+        state=result.state,
+        spans=result.spans,
+        trace_sink_configured=executor.tracing.sink_configured,
     )

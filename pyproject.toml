@@ -42,6 +42,13 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+mentalmodel = [
+  "examples/async_rl/*.md",
+  "examples/async_rl/*.txt",
+  "skills/templates/*.md",
+]
+
 [tool.uv]
 default-groups = ["dev"]
 

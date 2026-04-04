@@ -18,6 +18,12 @@ from mentalmodel.core.interfaces import NamedPrimitive
 from mentalmodel.core.workflow import Workflow
 from mentalmodel.docs import render_markdown_artifacts, render_mermaid
 from mentalmodel.errors import EntrypointLoadError, MentalModelError
+from mentalmodel.examples.async_rl import (
+    DEFAULT_OUTPUT_DIRNAME,
+    expected_artifact_names,
+    generate_demo_artifacts,
+)
+from mentalmodel.examples.async_rl.demo import build_program as build_async_rl_demo
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.schemas import EntryPointSpec
 from mentalmodel.skills import build_install_plan, install_skills
@@ -172,11 +178,16 @@ def run_docs(
     return 0
 
 
-def run_verify(entrypoint: str, *, json_output: bool = False) -> int:
+def run_verify(
+    entrypoint: str,
+    *,
+    json_output: bool = False,
+    runs_dir: Path | None = None,
+) -> int:
     """Run analysis, runtime verification, and property checks."""
 
     module, program = load_entrypoint_subject(entrypoint)
-    report = run_verification(program, module=module)
+    report = run_verification(program, module=module, runs_dir=runs_dir)
 
     if json_output:
         print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
@@ -203,12 +214,14 @@ def run_verify(entrypoint: str, *, json_output: bool = False) -> int:
     runtime_table.add_column("Records", justify="right")
     runtime_table.add_column("Outputs", justify="right")
     runtime_table.add_column("State Entries", justify="right")
+    runtime_table.add_column("Run Artifacts")
     runtime_table.add_column("Error")
     runtime_table.add_row(
         "yes" if report.runtime.success else "no",
         str(report.runtime.record_count),
         str(report.runtime.output_count),
         str(report.runtime.state_count),
+        report.runtime.run_artifacts_dir or "",
         report.runtime.error or "",
     )
     console.print(runtime_table)
@@ -252,9 +265,90 @@ def run_install_skills_command(
     table.add_column("Target")
     table.add_column("File")
     for file in plan.files:
-        table.add_row(plan.agent, str(plan.target_dir), str(file.path))
+        table.add_row(plan.agent, str(file.path.parent), str(file.path))
     console.print(table)
     return 0
+
+
+def run_demo_command(
+    name: str,
+    *,
+    write_artifacts: bool = False,
+    output_dir: Path | None = None,
+    runs_dir: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Run or materialize one packaged reference demo."""
+
+    if name != "async-rl":
+        raise EntrypointLoadError(f"Unknown demo {name!r}. Expected 'async-rl'.")
+
+    graph = lower_program(build_async_rl_demo())
+    report = run_analysis(graph)
+    demo_module = importlib.import_module("mentalmodel.examples.async_rl.demo")
+    verification = run_verification(
+        build_async_rl_demo(),
+        module=demo_module,
+        runs_dir=runs_dir,
+    )
+    artifact_dir = output_dir or (Path.cwd() / DEFAULT_OUTPUT_DIRNAME)
+    artifact_names = expected_artifact_names()
+
+    if write_artifacts:
+        generated = generate_demo_artifacts()
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        for artifact_name, content in generated.items():
+            (artifact_dir / artifact_name).write_text(content + "\n", encoding="utf-8")
+
+    if json_output:
+        payload = {
+            "demo": name,
+            "graph_id": graph.graph_id,
+            "node_count": len(graph.nodes),
+            "edge_count": len(graph.edges),
+            "artifacts": list(artifact_names),
+            "artifact_dir": str(artifact_dir),
+            "wrote_artifacts": write_artifacts,
+            "run_artifacts_dir": verification.runtime.run_artifacts_dir,
+            "verification": verification.as_dict(),
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if verification.success and not report.has_errors else 1
+
+    console = Console()
+    summary = Table(title="mentalmodel demo summary")
+    summary.add_column("Demo")
+    summary.add_column("Graph")
+    summary.add_column("Nodes", justify="right")
+    summary.add_column("Edges", justify="right")
+    summary.add_column("Runtime", justify="right")
+    summary.add_column("Property Checks", justify="right")
+    summary.add_column("Run Artifacts")
+    summary.add_row(
+        name,
+        graph.graph_id,
+        str(len(graph.nodes)),
+        str(len(graph.edges)),
+        "pass" if verification.runtime.success else "fail",
+        str(len(verification.property_checks)),
+        verification.runtime.run_artifacts_dir or "",
+    )
+    console.print(summary)
+
+    artifacts = Table(title="Demo Artifacts")
+    artifacts.add_column("Artifact")
+    artifacts.add_column("Target Directory")
+    for artifact_name in artifact_names:
+        artifacts.add_row(artifact_name, str(artifact_dir))
+    console.print(artifacts)
+
+    if write_artifacts:
+        console.print(f"[green]wrote[/green] {artifact_dir}")
+    else:
+        console.print(
+            "[yellow]Artifacts not written. Use --write-artifacts to materialize them.[/yellow]"
+        )
+    return 0 if verification.success and not report.has_errors else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -293,11 +387,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="mentalmodel.examples.async_rl.demo:build_program",
         help="Program entrypoint in `module:function` format.",
     )
+    verify.add_argument(
+        "--runs-dir",
+        type=Path,
+        help="Optional root directory for persisted run artifacts. Defaults to ./.runs.",
+    )
     verify.add_argument("--json", action="store_true", help="Emit JSON output.")
     subparsers.add_parser("replay", help="Replay a recorded execution.")
 
     demo = subparsers.add_parser("demo", help="Run or inspect a reference demo.")
-    demo.add_argument("name", nargs="?", default="async-rl")
+    demo.add_argument("name", nargs="?", default="async-rl", choices=["async-rl"])
+    demo.add_argument("--write-artifacts", action="store_true")
+    demo.add_argument("--output-dir", type=Path)
+    demo.add_argument("--runs-dir", type=Path)
+    demo.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     install_skills = subparsers.add_parser(
         "install-skills",
@@ -323,12 +426,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "docs":
             return run_docs(args.entrypoint, output_dir=args.output_dir, stdout=args.stdout)
         if args.command == "verify":
-            return run_verify(args.entrypoint, json_output=args.json)
+            return run_verify(
+                args.entrypoint,
+                json_output=args.json,
+                runs_dir=args.runs_dir,
+            )
         if args.command == "install-skills":
             return run_install_skills_command(
                 args.agent,
                 target_dir=args.target_dir,
                 dry_run=args.dry_run,
+            )
+        if args.command == "demo":
+            return run_demo_command(
+                args.name,
+                write_artifacts=args.write_artifacts,
+                output_dir=args.output_dir,
+                runs_dir=args.runs_dir,
+                json_output=args.json,
             )
         print(f"mentalmodel scaffold command selected: {args.command}")
         return 0

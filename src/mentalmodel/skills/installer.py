@@ -6,6 +6,12 @@ from pathlib import Path
 from mentalmodel.errors import SkillInstallError
 
 SUPPORTED_AGENTS = ("claude", "codex")
+SUPPORTED_SKILLS = (
+    "mentalmodel-base",
+    "mentalmodel-plugin-authoring",
+    "mentalmodel-invariants-testing",
+    "mentalmodel-debugging",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -35,9 +41,15 @@ def build_install_plan(agent: str, *, target_dir: Path | None = None) -> SkillIn
         )
 
     resolved_dir = target_dir or default_target_dir(normalized_agent)
-    template_path = template_path_for_agent(normalized_agent)
-    content = template_path.read_text(encoding="utf-8")
-    files = (SkillInstallFile(path=resolved_dir / "SKILL.md", content=content),)
+    files = tuple(
+        SkillInstallFile(
+            path=resolved_dir / skill_name / "SKILL.md",
+            content=template_path_for_agent(normalized_agent, skill_name).read_text(
+                encoding="utf-8"
+            ),
+        )
+        for skill_name in SUPPORTED_SKILLS
+    )
     return SkillInstallPlan(
         agent=normalized_agent,
         target_dir=resolved_dir,
@@ -59,6 +71,7 @@ def install_skills(
 
     plan.target_dir.mkdir(parents=True, exist_ok=True)
     for file in plan.files:
+        file.path.parent.mkdir(parents=True, exist_ok=True)
         file.path.write_text(file.content, encoding="utf-8")
     return plan
 
@@ -68,18 +81,26 @@ def default_target_dir(agent: str) -> Path:
 
     home = Path.home()
     if agent == "codex":
-        return home / ".codex" / "skills" / "mentalmodel"
+        return home / ".codex" / "skills"
     if agent == "claude":
-        return home / ".claude" / "skills" / "mentalmodel"
+        return home / ".claude" / "skills"
     raise SkillInstallError(f"Unsupported agent {agent!r}.")
 
 
-def template_path_for_agent(agent: str) -> Path:
-    """Return the packaged template path for one supported agent."""
+def template_path_for_agent(agent: str, skill_name: str) -> Path:
+    """Return the packaged template path for one supported agent and skill."""
 
     templates_dir = Path(__file__).with_suffix("").parent / "templates"
-    if agent == "codex":
-        return templates_dir / "codex_skill.md"
-    if agent == "claude":
-        return templates_dir / "claude_skill.md"
-    raise SkillInstallError(f"Unsupported agent {agent!r}.")
+    if skill_name not in SUPPORTED_SKILLS:
+        raise SkillInstallError(
+            f"Unsupported skill {skill_name!r}. Expected one of: {', '.join(SUPPORTED_SKILLS)}."
+        )
+    filename = _template_filename(agent, skill_name)
+    return templates_dir / filename
+
+
+def _template_filename(agent: str, skill_name: str) -> str:
+    if agent not in SUPPORTED_AGENTS:
+        raise SkillInstallError(f"Unsupported agent {agent!r}.")
+    suffix = skill_name.removeprefix("mentalmodel-")
+    return f"{agent}-{suffix}.md"

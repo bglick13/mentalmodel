@@ -2,6 +2,7 @@
 
 from mentalmodel.skills.installer import (
     SUPPORTED_AGENTS,
+    SUPPORTED_SKILLS,
     SkillInstallFile,
     SkillInstallPlan,
     build_install_plan,
@@ -10,6 +11,7 @@ from mentalmodel.skills.installer import (
 
 __all__ = [
     "SUPPORTED_AGENTS",
+    "SUPPORTED_SKILLS",
     "SkillInstallFile",
     "SkillInstallPlan",
     "build_install_plan",

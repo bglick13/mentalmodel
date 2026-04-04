@@ -54,7 +54,26 @@ uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel install-skills --agent codex --dry-run
+uv run mentalmodel demo async-rl
+uv run mentalmodel demo async-rl --write-artifacts --output-dir /tmp/mentalmodel-demo
 ```
+
+`mentalmodel verify` writes a per-run debugging bundle under
+`.runs/<graph_id>/<run_id>/` by default. The most useful files are:
+
+- `verification.json`
+- `summary.json`
+- `records.jsonl`
+- `outputs.json`
+- `state.json`
+- `otel-spans.jsonl` when no external OpenTelemetry sink is configured
+
+Installed skills currently include:
+
+- `mentalmodel-base`
+- `mentalmodel-plugin-authoring`
+- `mentalmodel-invariants-testing`
+- `mentalmodel-debugging`
 
 Import sorting is handled by Ruff's `I` rules rather than a separate `isort`
 configuration.

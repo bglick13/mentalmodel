@@ -17,6 +17,42 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.command, "demo")
         self.assertEqual(args.name, "async-rl")
 
+    def test_demo_command_outputs_summary(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(["demo", "async-rl"])
+        self.assertEqual(exit_code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("mentalmodel demo summary", rendered)
+        self.assertIn("expected_mermaid.txt", rendered)
+
+    def test_demo_command_writes_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "demo",
+                        "async-rl",
+                        "--write-artifacts",
+                        "--output-dir",
+                        tmpdir,
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((Path(tmpdir) / "expected_mermaid.txt").exists())
+            self.assertTrue((Path(tmpdir) / "topology.md").exists())
+
+    def test_demo_command_json_output_is_valid(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(["demo", "async-rl", "--json"])
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["demo"], "async-rl")
+        self.assertEqual(payload["graph_id"], "async_rl_demo")
+        self.assertIn("expected_mermaid.txt", payload["artifacts"])
+
     def test_check_command_succeeds_for_demo_entrypoint(self) -> None:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -120,17 +156,23 @@ class CliTest(unittest.TestCase):
             self.assertTrue((output_dir / "runtime-contexts.md").exists())
 
     def test_verify_command_succeeds_for_demo_entrypoint(self) -> None:
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            exit_code = main(
-                [
-                    "verify",
-                    "--entrypoint",
-                    "mentalmodel.examples.async_rl.demo:build_program",
-                ]
-            )
-        self.assertEqual(exit_code, 0)
-        self.assertIn("mentalmodel verify summary", stdout.getvalue())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verify",
+                        "--entrypoint",
+                        "mentalmodel.examples.async_rl.demo:build_program",
+                        "--runs-dir",
+                        tmpdir,
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            rendered = stdout.getvalue()
+            self.assertIn("mentalmodel verify summary", rendered)
+            runs_root = Path(tmpdir) / ".runs"
+            self.assertTrue(runs_root.exists())
 
     def test_verify_command_fails_for_runtime_invariant_violation(self) -> None:
         stdout = io.StringIO()
@@ -146,21 +188,26 @@ class CliTest(unittest.TestCase):
         self.assertIn("Runtime Verification", stdout.getvalue())
 
     def test_verify_command_json_output_is_valid(self) -> None:
-        stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            exit_code = main(
-                [
-                    "verify",
-                    "--entrypoint",
-                    "mentalmodel.examples.async_rl.demo:build_program",
-                    "--json",
-                ]
-            )
-        self.assertEqual(exit_code, 0)
-        payload = json.loads(stdout.getvalue())
-        self.assertTrue(payload["success"])
-        self.assertEqual(payload["graph_id"], "async_rl_demo")
-        self.assertEqual(len(payload["property_checks"]), 1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verify",
+                        "--entrypoint",
+                        "mentalmodel.examples.async_rl.demo:build_program",
+                        "--runs-dir",
+                        tmpdir,
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["graph_id"], "async_rl_demo")
+            self.assertEqual(len(payload["property_checks"]), 2)
+            run_dir = Path(payload["runtime"]["run_artifacts_dir"])
+            self.assertTrue((run_dir / "verification.json").exists())
 
     def test_install_skills_dry_run_outputs_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -178,7 +225,18 @@ class CliTest(unittest.TestCase):
                 )
             self.assertEqual(exit_code, 0)
             self.assertIn("mentalmodel install-skills dry run", stdout.getvalue())
-            self.assertFalse((Path(tmpdir) / "SKILL.md").exists())
+            self.assertFalse((Path(tmpdir) / "mentalmodel-base" / "SKILL.md").exists())
+
+    def test_demo_command_json_output_includes_run_artifacts_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(["demo", "async-rl", "--runs-dir", tmpdir, "--json"])
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            run_dir = Path(payload["run_artifacts_dir"])
+            self.assertTrue(run_dir.exists())
+            self.assertTrue((run_dir / "records.jsonl").exists())
 
     def test_install_skills_writes_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -194,9 +252,13 @@ class CliTest(unittest.TestCase):
                     ]
                 )
             self.assertEqual(exit_code, 0)
-            skill_file = Path(tmpdir) / "SKILL.md"
+            skill_file = Path(tmpdir) / "mentalmodel-base" / "SKILL.md"
+            plugin_skill = Path(tmpdir) / "mentalmodel-plugin-authoring" / "SKILL.md"
+            debug_skill = Path(tmpdir) / "mentalmodel-debugging" / "SKILL.md"
             self.assertTrue(skill_file.exists())
-            self.assertIn("mentalmodel Claude Skill", skill_file.read_text(encoding="utf-8"))
+            self.assertTrue(plugin_skill.exists())
+            self.assertTrue(debug_skill.exists())
+            self.assertIn("mentalmodel Base", skill_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

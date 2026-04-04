@@ -14,7 +14,7 @@ class DocsTest(unittest.TestCase):
         sample_policy = next(entry for entry in inventory if entry.node_id == "sample_policy")
         runtime_context = next(entry for entry in inventory if entry.node_id == "remote_sampling")
         self.assertEqual(sample_policy.runtime_context, "sandbox")
-        self.assertEqual(sample_policy.data_dependencies, ("batch_source",))
+        self.assertEqual(sample_policy.data_dependencies, ("batch_source", "policy_snapshot"))
         self.assertEqual(sample_policy.container_parent, "remote_sampling")
         self.assertEqual(sample_policy.plugin_kind, "core")
         self.assertEqual(runtime_context.plugin_kind, "runtime_context")
