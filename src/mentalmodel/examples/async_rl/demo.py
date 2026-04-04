@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import TypeAlias, TypedDict
 
+from hypothesis import strategies as st
+
 from mentalmodel.core import (
     Actor,
     ActorHandler,
@@ -21,6 +23,7 @@ from mentalmodel.core import (
 from mentalmodel.core.models import ActorResult
 from mentalmodel.plugins.runtime_context import RuntimeContext
 from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.testing import execute_program, hypothesis_property_check
 
 
 class BatchSourceInputs(TypedDict):
@@ -274,7 +277,7 @@ AsyncRlNode: TypeAlias = (
 )
 
 
-def build_program() -> Workflow[AsyncRlNode]:
+def build_program(group_size: int = 4) -> Workflow[AsyncRlNode]:
     """Build the milestone-two async RL authoring model."""
 
     return Workflow(
@@ -295,7 +298,7 @@ def build_program() -> Workflow[AsyncRlNode]:
                         children=[
                             Effect[SamplePolicyInputs, SamplePolicyOutput](
                                 "sample_policy",
-                                handler=PolicySampler(group_size=4),
+                                handler=PolicySampler(group_size=group_size),
                                 inputs=[Ref("batch_source")],
                             )
                         ],
@@ -351,3 +354,33 @@ def build_program() -> Workflow[AsyncRlNode]:
             )
         ],
     )
+
+
+@hypothesis_property_check(
+    "score maps align with sampled rollouts",
+    group_size=st.integers(min_value=1, max_value=5),
+)
+def property_rollout_scores_align(
+    program: Workflow[AsyncRlNode],
+    group_size: int,
+) -> None:
+    del program
+    result = execute_program(build_program(group_size=group_size))
+    sample_policy = result.outputs["sample_policy"]
+    assert isinstance(sample_policy, dict)
+    samples = sample_policy["samples"]
+    assert isinstance(samples, list)
+    expected_count = len(samples)
+
+    rollout_join = result.outputs["rollout_join"]
+    assert isinstance(rollout_join, dict)
+    pangram_scores = rollout_join["pangram_scores"]
+    quality_scores = rollout_join["quality_scores"]
+    kl_prefetch = rollout_join["kl_prefetch"]
+    assert isinstance(pangram_scores, dict)
+    assert isinstance(quality_scores, dict)
+    assert isinstance(kl_prefetch, dict)
+
+    assert len(pangram_scores) == expected_count
+    assert len(quality_scores) == expected_count
+    assert len(kl_prefetch) == expected_count

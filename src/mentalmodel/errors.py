@@ -11,3 +11,11 @@ class EntrypointLoadError(MentalModelError):
 
 class LoweringError(MentalModelError):
     """Raised when an authoring model cannot be lowered into IR."""
+
+
+class VerificationError(MentalModelError):
+    """Raised when verification setup or execution fails."""
+
+
+class SkillInstallError(MentalModelError):
+    """Raised when packaged skill installation cannot be completed."""

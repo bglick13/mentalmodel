@@ -930,6 +930,12 @@ Suggested markdown outputs:
   artifacts
 - verify milestone with lint, typecheck, and test runs before continuing
 
+### Milestone 7: Flesh out skills
+- Base skill should be much more detailed: include all core primitives, best practices, hello world program, useful CLI commands, and all core concepts
+- Plugin specific skill: detailed instructions and examples for authoring new plugins
+- Invariants/testing specific skill: best practices for authoring useful invariants/property checks
+- Debugging specific skill: detailed overview of otel implementation, how to run and debug a program. Should facilitate auto-research style self improvement
+
 ## Immediate Next Build Steps
 
 The next implementation pass should focus on:

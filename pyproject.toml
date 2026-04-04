@@ -5,6 +5,7 @@ description = "Semantic program modeling for recoverable topology, causality, an
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "hypothesis>=6.142.5,<7",
   "opentelemetry-api>=1.38.0,<2",
   "opentelemetry-sdk>=1.38.0,<2",
   "rich>=14.2.0,<15",

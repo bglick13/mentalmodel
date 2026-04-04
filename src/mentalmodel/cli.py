@@ -5,6 +5,7 @@ import importlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 
 from rich.console import Console
@@ -19,6 +20,8 @@ from mentalmodel.docs import render_markdown_artifacts, render_mermaid
 from mentalmodel.errors import EntrypointLoadError, MentalModelError
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.schemas import EntryPointSpec
+from mentalmodel.skills import build_install_plan, install_skills
+from mentalmodel.testing import run_verification
 
 
 def parse_entrypoint(raw: str) -> EntryPointSpec:
@@ -32,7 +35,7 @@ def parse_entrypoint(raw: str) -> EntryPointSpec:
     return EntryPointSpec(module_name=module_name, attribute_name=attribute_name)
 
 
-def load_entrypoint(raw: str) -> Workflow[NamedPrimitive]:
+def load_entrypoint_subject(raw: str) -> tuple[ModuleType, Workflow[NamedPrimitive]]:
     spec = parse_entrypoint(raw)
     try:
         module = importlib.import_module(spec.module_name)
@@ -49,7 +52,12 @@ def load_entrypoint(raw: str) -> Workflow[NamedPrimitive]:
         raise EntrypointLoadError(
             f"Entrypoint {raw!r} must resolve to a Workflow, got {type(loaded).__name__}."
         )
-    return cast(Workflow[NamedPrimitive], loaded)
+    return module, cast(Workflow[NamedPrimitive], loaded)
+
+
+def load_entrypoint(raw: str) -> Workflow[NamedPrimitive]:
+    _, workflow = load_entrypoint_subject(raw)
+    return workflow
 
 
 def load_graph(entrypoint: str) -> Workflow[NamedPrimitive]:
@@ -164,6 +172,91 @@ def run_docs(
     return 0
 
 
+def run_verify(entrypoint: str, *, json_output: bool = False) -> int:
+    """Run analysis, runtime verification, and property checks."""
+
+    module, program = load_entrypoint_subject(entrypoint)
+    report = run_verification(program, module=module)
+
+    if json_output:
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+        return 0 if report.success else 1
+
+    console = Console()
+    summary = Table(title="mentalmodel verify summary")
+    summary.add_column("Graph")
+    summary.add_column("Static Errors", justify="right")
+    summary.add_column("Warnings", justify="right")
+    summary.add_column("Runtime", justify="right")
+    summary.add_column("Property Checks", justify="right")
+    summary.add_row(
+        report.analysis.graph.graph_id,
+        str(report.analysis.error_count),
+        str(report.analysis.warning_count),
+        "pass" if report.runtime.success else "fail",
+        str(len(report.property_checks)),
+    )
+    console.print(summary)
+
+    runtime_table = Table(title="Runtime Verification")
+    runtime_table.add_column("Success")
+    runtime_table.add_column("Records", justify="right")
+    runtime_table.add_column("Outputs", justify="right")
+    runtime_table.add_column("State Entries", justify="right")
+    runtime_table.add_column("Error")
+    runtime_table.add_row(
+        "yes" if report.runtime.success else "no",
+        str(report.runtime.record_count),
+        str(report.runtime.output_count),
+        str(report.runtime.state_count),
+        report.runtime.error or "",
+    )
+    console.print(runtime_table)
+
+    if report.property_checks:
+        checks = Table(title="Property Checks")
+        checks.add_column("Name")
+        checks.add_column("Hypothesis")
+        checks.add_column("Success")
+        checks.add_column("Error")
+        for result in report.property_checks:
+            checks.add_row(
+                result.name,
+                "yes" if result.hypothesis_backed else "no",
+                "yes" if result.success else "no",
+                result.error or "",
+            )
+        console.print(checks)
+    else:
+        console.print("[yellow]No property checks discovered.[/yellow]")
+
+    return 0 if report.success else 1
+
+
+def run_install_skills_command(
+    agent: str,
+    *,
+    target_dir: Path | None = None,
+    dry_run: bool = False,
+) -> int:
+    """Install packaged skill templates for one supported agent."""
+
+    plan = build_install_plan(agent, target_dir=target_dir)
+    if not dry_run:
+        plan = install_skills(agent, target_dir=target_dir, dry_run=False)
+
+    console = Console()
+    title = "mentalmodel install-skills dry run" if dry_run else "mentalmodel install-skills"
+    table = Table(title=title)
+    table.add_column("Agent")
+    table.add_column("Target")
+    table.add_column("File")
+    for file in plan.files:
+        table.add_row(plan.agent, str(plan.target_dir), str(file.path))
+    console.print(table)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mentalmodel",
@@ -194,7 +287,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     docs.add_argument("--output-dir", type=Path, help="Directory to write markdown artifacts.")
     docs.add_argument("--stdout", action="store_true", help="Also render docs to stdout.")
-    subparsers.add_parser("verify", help="Run invariants and verification helpers.")
+    verify = subparsers.add_parser("verify", help="Run invariants and verification helpers.")
+    verify.add_argument(
+        "--entrypoint",
+        default="mentalmodel.examples.async_rl.demo:build_program",
+        help="Program entrypoint in `module:function` format.",
+    )
+    verify.add_argument("--json", action="store_true", help="Emit JSON output.")
     subparsers.add_parser("replay", help="Replay a recorded execution.")
 
     demo = subparsers.add_parser("demo", help="Run or inspect a reference demo.")
@@ -205,6 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install packaged agent skills.",
     )
     install_skills.add_argument("--agent", default="codex")
+    install_skills.add_argument("--target-dir", type=Path)
     install_skills.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -222,6 +322,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_graph(args.entrypoint, output=args.output)
         if args.command == "docs":
             return run_docs(args.entrypoint, output_dir=args.output_dir, stdout=args.stdout)
+        if args.command == "verify":
+            return run_verify(args.entrypoint, json_output=args.json)
+        if args.command == "install-skills":
+            return run_install_skills_command(
+                args.agent,
+                target_dir=args.target_dir,
+                dry_run=args.dry_run,
+            )
         print(f"mentalmodel scaffold command selected: {args.command}")
         return 0
     except MentalModelError as exc:
