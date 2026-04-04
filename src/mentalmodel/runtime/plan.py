@@ -17,6 +17,7 @@ from mentalmodel.core.interfaces import (
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.lowering import lower_program
+from mentalmodel.observability.export import serialize_runtime_value
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.errors import InvariantViolationError
 from mentalmodel.runtime.events import (
@@ -24,6 +25,7 @@ from mentalmodel.runtime.events import (
     EFFECT_INVOKED,
     INVARIANT_CHECKED,
     JOIN_RESOLVED,
+    NODE_INPUTS_RESOLVED,
     STATE_READ,
     STATE_TRANSITION,
 )
@@ -90,6 +92,7 @@ class CompiledActorNode(Generic[InputT, OutputT, StateT]):
         context: ExecutionContext,
     ) -> RuntimeValue:
         typed_inputs = self.input_adapter.bind(outputs)
+        record_resolved_inputs(context=context, metadata=self.metadata, inputs=typed_inputs)
         previous_state = context.state_store.get(self.state_key)
         context.recorder.record(
             run_id=context.run_id,
@@ -130,6 +133,7 @@ class CompiledEffectNode(Generic[InputT, OutputT]):
         context: ExecutionContext,
     ) -> RuntimeValue:
         typed_inputs = self.input_adapter.bind(outputs)
+        record_resolved_inputs(context=context, metadata=self.metadata, inputs=typed_inputs)
         context.recorder.record(
             run_id=context.run_id,
             node_id=self.metadata.node_id,
@@ -160,6 +164,7 @@ class CompiledJoinNode(Generic[InputT, OutputT]):
         context: ExecutionContext,
     ) -> RuntimeValue:
         typed_inputs = self.input_adapter.bind(outputs)
+        record_resolved_inputs(context=context, metadata=self.metadata, inputs=typed_inputs)
         if self.reducer is None:
             output = cast(RuntimeValue, typed_inputs)
         else:
@@ -187,6 +192,7 @@ class CompiledInvariantNode(Generic[InputT, DetailT]):
         context: ExecutionContext,
     ) -> RuntimeValue:
         typed_inputs = self.input_adapter.bind(outputs)
+        record_resolved_inputs(context=context, metadata=self.metadata, inputs=typed_inputs)
         result = await self.checker.check(typed_inputs, context)
         context.recorder.record(
             run_id=context.run_id,
@@ -364,3 +370,23 @@ def summarize_runtime_value(value: RuntimeValue) -> dict[str, JsonValue]:
     if isinstance(value, list):
         return {"type": "list", "length": len(value)}
     return {"type": type(value).__name__}
+
+
+def record_resolved_inputs(
+    *,
+    context: ExecutionContext,
+    metadata: ExecutionNodeMetadata,
+    inputs: object,
+) -> None:
+    """Record the concrete input payload bound for one executable node."""
+
+    context.recorder.record(
+        run_id=context.run_id,
+        node_id=metadata.node_id,
+        event_type=NODE_INPUTS_RESOLVED,
+        timestamp_ms=context.clock.now_ms(),
+        payload={
+            "input_keys": [dependency for dependency in metadata.dependencies],
+            "inputs": serialize_runtime_value(inputs),
+        },
+    )

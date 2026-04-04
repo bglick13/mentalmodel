@@ -19,6 +19,7 @@ from mentalmodel.observability.export import (
 from mentalmodel.observability.tracing import RecordedSpan
 
 RUNS_DIRNAME = ".runs"
+RUN_SCHEMA_VERSION = 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -38,6 +39,7 @@ class RunArtifacts:
 class RunSummary:
     """Parsed metadata from one persisted run bundle."""
 
+    schema_version: int
     graph_id: str
     run_id: str
     run_dir: Path
@@ -49,6 +51,40 @@ class RunSummary:
     output_count: int
     state_count: int
     trace_sink_configured: bool
+
+
+@dataclass(slots=True, frozen=True)
+class RunRepairAction:
+    """One deterministic summary.json repair operation."""
+
+    run_dir: Path
+    graph_id: str
+    run_id: str
+    from_schema_version: int
+    to_schema_version: int
+    updates: dict[str, JsonValue]
+
+
+@dataclass(slots=True, frozen=True)
+class RunRepairPlan:
+    """Repair plan for one set of run bundles."""
+
+    root_dir: Path
+    actions: tuple[RunRepairAction, ...]
+
+    @property
+    def has_actions(self) -> bool:
+        return bool(self.actions)
+
+
+@dataclass(slots=True, frozen=True)
+class RunNodeTrace:
+    """Resolved semantic trace for one node in one run."""
+
+    summary: RunSummary
+    node_id: str
+    records: tuple[dict[str, JsonValue], ...]
+    spans: tuple[dict[str, JsonValue], ...]
 
 
 def default_runs_dir(*, root: Path | None = None) -> Path:
@@ -89,6 +125,7 @@ def write_run_artifacts(
     write_json(
         summary_path,
         {
+            "schema_version": RUN_SCHEMA_VERSION,
             "graph_id": graph.graph_id,
             "run_id": run_id,
             "created_at_ms": created_at_ms,
@@ -187,20 +224,22 @@ def load_run_summary(run_dir: Path) -> RunSummary:
     """Load one run summary from disk."""
 
     payload = read_json(run_dir / "summary.json")
-    graph_id = _require_str(payload, "graph_id")
-    run_id = _require_str(payload, "run_id")
+    summary_payload = normalize_summary_payload(payload=payload, run_dir=run_dir)
+    graph_id = _require_str(summary_payload, "graph_id")
+    run_id = _require_str(summary_payload, "run_id")
     return RunSummary(
+        schema_version=_require_int(summary_payload, "schema_version"),
         graph_id=graph_id,
         run_id=run_id,
         run_dir=run_dir,
-        created_at_ms=_resolve_created_at_ms(payload=payload, run_dir=run_dir),
-        success=_require_bool(payload, "success"),
-        node_count=_require_int(payload, "node_count"),
-        edge_count=_require_int(payload, "edge_count"),
-        record_count=_require_int(payload, "record_count"),
-        output_count=_require_int(payload, "output_count"),
-        state_count=_require_int(payload, "state_count"),
-        trace_sink_configured=_require_bool(payload, "trace_sink_configured"),
+        created_at_ms=_require_int(summary_payload, "created_at_ms"),
+        success=_require_bool(summary_payload, "success"),
+        node_count=_require_int(summary_payload, "node_count"),
+        edge_count=_require_int(summary_payload, "edge_count"),
+        record_count=_require_int(summary_payload, "record_count"),
+        output_count=_require_int(summary_payload, "output_count"),
+        state_count=_require_int(summary_payload, "state_count"),
+        trace_sink_configured=_require_bool(summary_payload, "trace_sink_configured"),
     )
 
 
@@ -215,6 +254,54 @@ def load_run_payload(
 
     summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
     return read_json(summary.run_dir / filename)
+
+
+def plan_run_repairs(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+) -> RunRepairPlan:
+    """Plan deterministic repairs for one runs root or subtree."""
+
+    root = default_runs_dir(root=runs_dir)
+    actions: list[RunRepairAction] = []
+    for run_dir in iter_run_dirs(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id):
+        summary_path = run_dir / "summary.json"
+        if not summary_path.exists():
+            continue
+        raw_payload = read_json(summary_path)
+        current_version = resolve_schema_version(raw_payload)
+        normalized = normalize_summary_payload(payload=raw_payload, run_dir=run_dir)
+        updates = {
+            key: value
+            for key, value in normalized.items()
+            if raw_payload.get(key) != value
+        }
+        if not updates:
+            continue
+        actions.append(
+            RunRepairAction(
+                run_dir=run_dir,
+                graph_id=_require_str(normalized, "graph_id"),
+                run_id=_require_str(normalized, "run_id"),
+                from_schema_version=current_version,
+                to_schema_version=RUN_SCHEMA_VERSION,
+                updates=updates,
+            )
+        )
+    return RunRepairPlan(root_dir=root, actions=tuple(actions))
+
+
+def apply_run_repairs(plan: RunRepairPlan) -> RunRepairPlan:
+    """Apply one deterministic repair plan to disk."""
+
+    for action in plan.actions:
+        summary_path = action.run_dir / "summary.json"
+        payload = read_json(summary_path)
+        normalized = normalize_summary_payload(payload=payload, run_dir=action.run_dir)
+        write_json(summary_path, normalized)
+    return plan
 
 
 def load_run_records(
@@ -248,6 +335,120 @@ def load_run_records(
             continue
         loaded.append(record)
     return tuple(loaded)
+
+
+def load_run_spans(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str | None = None,
+) -> tuple[dict[str, JsonValue], ...]:
+    """Load JSONL span records from a resolved run bundle."""
+
+    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    spans_path = summary.run_dir / "otel-spans.jsonl"
+    if not spans_path.exists():
+        return tuple()
+    loaded: list[dict[str, JsonValue]] = []
+    for line in spans_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise RunInspectionError(f"Malformed JSONL row in {spans_path}.")
+        span = {str(key): cast_json_value(value) for key, value in payload.items()}
+        if node_id is not None and _span_node_id(span) != node_id:
+            continue
+        loaded.append(span)
+    return tuple(loaded)
+
+
+def load_run_node_output(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str,
+) -> JsonValue:
+    """Load one node output from a resolved run bundle."""
+
+    payload = load_run_payload(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        filename="outputs.json",
+    )
+    outputs = payload.get("outputs")
+    if not isinstance(outputs, dict):
+        raise RunInspectionError("Run outputs.json does not contain an 'outputs' mapping.")
+    if node_id not in outputs:
+        raise RunInspectionError(f"Run output for node {node_id!r} was not found.")
+    return outputs[node_id]
+
+
+def load_run_node_inputs(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str,
+) -> JsonValue:
+    """Load one node input payload from a resolved run bundle."""
+
+    records = load_run_records(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        node_id=node_id,
+        event_type="node.inputs_resolved",
+    )
+    if not records:
+        raise RunInspectionError(
+            f"Resolved inputs for node {node_id!r} were not found in the run bundle."
+        )
+    payload = records[-1].get("payload")
+    if not isinstance(payload, dict):
+        raise RunInspectionError(
+            f"Resolved input payload for node {node_id!r} is missing from the run bundle."
+        )
+    inputs = payload.get("inputs")
+    if inputs is None:
+        raise RunInspectionError(
+            f"Resolved input payload for node {node_id!r} is missing from the run bundle."
+        )
+    return inputs
+
+
+def load_run_node_trace(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str,
+    event_type: str | None = None,
+) -> RunNodeTrace:
+    """Load the semantic trace for one node in one run."""
+
+    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    records = load_run_records(
+        runs_dir=runs_dir,
+        graph_id=summary.graph_id,
+        run_id=summary.run_id,
+        node_id=node_id,
+        event_type=event_type,
+    )
+    spans = load_run_spans(
+        runs_dir=runs_dir,
+        graph_id=summary.graph_id,
+        run_id=summary.run_id,
+        node_id=node_id,
+    )
+    if not records and not spans:
+        raise RunInspectionError(
+            f"No trace data was found for node {node_id!r} in run {summary.run_id!r}."
+        )
+    return RunNodeTrace(summary=summary, node_id=node_id, records=records, spans=spans)
 
 
 def read_json(path: Path) -> dict[str, JsonValue]:
@@ -287,6 +488,62 @@ def _resolve_created_at_ms(*, payload: dict[str, JsonValue], run_dir: Path) -> i
     return int(summary_path.stat().st_mtime * 1000)
 
 
+def resolve_schema_version(payload: dict[str, JsonValue]) -> int:
+    """Resolve the effective schema version for one summary payload."""
+
+    value = payload.get("schema_version")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 1
+
+
+def normalize_summary_payload(
+    *,
+    payload: dict[str, JsonValue],
+    run_dir: Path,
+) -> dict[str, JsonValue]:
+    """Return one summary payload normalized to the current schema."""
+
+    return {
+        "schema_version": RUN_SCHEMA_VERSION,
+        "graph_id": _require_str(payload, "graph_id"),
+        "run_id": _require_str(payload, "run_id"),
+        "created_at_ms": _resolve_created_at_ms(payload=payload, run_dir=run_dir),
+        "success": _require_bool(payload, "success"),
+        "node_count": _require_int(payload, "node_count"),
+        "edge_count": _require_int(payload, "edge_count"),
+        "record_count": _require_int(payload, "record_count"),
+        "output_count": _require_int(payload, "output_count"),
+        "state_count": _require_int(payload, "state_count"),
+        "trace_sink_configured": _require_bool(payload, "trace_sink_configured"),
+    }
+
+
+def iter_run_dirs(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+) -> tuple[Path, ...]:
+    """Iterate run directories under one runs root with optional filters."""
+
+    root = default_runs_dir(root=runs_dir)
+    if not root.exists():
+        return tuple()
+    graph_dirs = [root / graph_id] if graph_id is not None else sorted(root.iterdir())
+    selected: list[Path] = []
+    for graph_dir in graph_dirs:
+        if not graph_dir.exists() or not graph_dir.is_dir():
+            continue
+        for candidate in sorted(graph_dir.iterdir()):
+            if not candidate.is_dir():
+                continue
+            if run_id is not None and candidate.name != run_id:
+                continue
+            selected.append(candidate)
+    return tuple(selected)
+
+
 def _require_str(payload: dict[str, JsonValue], key: str) -> str:
     value = payload.get(key)
     if isinstance(value, str):
@@ -306,3 +563,11 @@ def _require_bool(payload: dict[str, JsonValue], key: str) -> bool:
     if isinstance(value, bool):
         return value
     raise RunInspectionError(f"Expected {key!r} to be a boolean.")
+
+
+def _span_node_id(span: dict[str, JsonValue]) -> str | None:
+    attributes = span.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    value = attributes.get("mentalmodel.node.id")
+    return value if isinstance(value, str) else None

@@ -1,6 +1,7 @@
 """Runtime event names."""
 
 NODE_STARTED = "node.started"
+NODE_INPUTS_RESOLVED = "node.inputs_resolved"
 NODE_SUCCEEDED = "node.succeeded"
 NODE_FAILED = "node.failed"
 STATE_READ = "state.read"

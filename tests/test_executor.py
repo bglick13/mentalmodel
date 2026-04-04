@@ -135,6 +135,7 @@ class ExecutorTest(unittest.TestCase):
         result = asyncio.run(AsyncExecutor().run(build_program()))
         event_types = {record.event_type for record in result.records}
         self.assertIn("node.started", event_types)
+        self.assertIn("node.inputs_resolved", event_types)
         self.assertIn("state.transition", event_types)
         self.assertIn("effect.invoked", event_types)
         self.assertIn("invariant.checked", event_types)
@@ -148,14 +149,21 @@ class ExecutorTest(unittest.TestCase):
         ]
         self.assertEqual(
             batch_source_events[:3],
-            ["node.started", "state.read", "state.transition"],
+            ["node.started", "node.inputs_resolved", "state.read"],
         )
         sample_effect_records = [
             record for record in result.records if record.node_id == "sample_policy"
         ]
         sample_effect_events = [record.event_type for record in sample_effect_records]
+        self.assertIn("node.inputs_resolved", sample_effect_events)
         self.assertIn("effect.invoked", sample_effect_events)
         self.assertIn("effect.completed", sample_effect_events)
+        resolved = next(
+            record
+            for record in sample_effect_records
+            if record.event_type == "node.inputs_resolved"
+        )
+        self.assertEqual(resolved.payload["input_keys"], ["batch_source", "policy_snapshot"])
         invoked = next(
             record for record in sample_effect_records if record.event_type == "effect.invoked"
         )
@@ -206,6 +214,97 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(
             invariant_record.payload,
             {"passed": True, "severity": "error"},
+        )
+        invariant_inputs = next(
+            record
+            for record in result.records
+            if record.node_id == "staleness_invariant"
+            and record.event_type == "node.inputs_resolved"
+        )
+        self.assertEqual(
+            invariant_inputs.payload["input_keys"],
+            ["rollout_join"],
+        )
+        self.assertEqual(
+            invariant_inputs.payload["inputs"],
+            {
+                "rollout_join": {
+                    "current_policy_version": 3,
+                    "kl_prefetch": {
+                        "prompt-0:0": [0.1, 0.2, 0.3],
+                        "prompt-0:1": [0.1, 0.2, 0.3],
+                        "prompt-0:2": [0.1, 0.2, 0.3],
+                        "prompt-0:3": [0.1, 0.2, 0.3],
+                        "prompt-1:0": [0.1, 0.2, 0.3],
+                        "prompt-1:1": [0.1, 0.2, 0.3],
+                        "prompt-1:2": [0.1, 0.2, 0.3],
+                        "prompt-1:3": [0.1, 0.2, 0.3],
+                    },
+                    "pangram_scores": {
+                        "prompt-0:0": 0.8,
+                        "prompt-0:1": 0.8,
+                        "prompt-0:2": 0.8,
+                        "prompt-0:3": 0.8,
+                        "prompt-1:0": 0.8,
+                        "prompt-1:1": 0.8,
+                        "prompt-1:2": 0.8,
+                        "prompt-1:3": 0.8,
+                    },
+                    "quality_scores": {
+                        "prompt-0:0": 0.6,
+                        "prompt-0:1": 0.6,
+                        "prompt-0:2": 0.6,
+                        "prompt-0:3": 0.6,
+                        "prompt-1:0": 0.6,
+                        "prompt-1:1": 0.6,
+                        "prompt-1:2": 0.6,
+                        "prompt-1:3": 0.6,
+                    },
+                    "sampled_policy_version": 3,
+                    "samples": [
+                        {
+                            "completion_text": "sample 0 for Rewrite this sentence clearly.",
+                            "prompt_id": "prompt-0",
+                            "sample_index": 0,
+                        },
+                        {
+                            "completion_text": "sample 1 for Rewrite this sentence clearly.",
+                            "prompt_id": "prompt-0",
+                            "sample_index": 1,
+                        },
+                        {
+                            "completion_text": "sample 2 for Rewrite this sentence clearly.",
+                            "prompt_id": "prompt-0",
+                            "sample_index": 2,
+                        },
+                        {
+                            "completion_text": "sample 3 for Rewrite this sentence clearly.",
+                            "prompt_id": "prompt-0",
+                            "sample_index": 3,
+                        },
+                        {
+                            "completion_text": "sample 0 for Humanize this paragraph.",
+                            "prompt_id": "prompt-1",
+                            "sample_index": 0,
+                        },
+                        {
+                            "completion_text": "sample 1 for Humanize this paragraph.",
+                            "prompt_id": "prompt-1",
+                            "sample_index": 1,
+                        },
+                        {
+                            "completion_text": "sample 2 for Humanize this paragraph.",
+                            "prompt_id": "prompt-1",
+                            "sample_index": 2,
+                        },
+                        {
+                            "completion_text": "sample 3 for Humanize this paragraph.",
+                            "prompt_id": "prompt-1",
+                            "sample_index": 3,
+                        },
+                    ],
+                }
+            },
         )
 
     def test_effect_failure_is_recorded_and_raised(self) -> None:

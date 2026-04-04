@@ -54,8 +54,13 @@ uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel runs list
+uv run mentalmodel runs latest --graph-id async_rl_demo
 uv run mentalmodel runs show --graph-id async_rl_demo
+uv run mentalmodel runs inputs --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs outputs --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs trace --graph-id async_rl_demo --node-id staleness_invariant
 uv run mentalmodel runs records --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs repair --dry-run
 uv run mentalmodel install-skills --agent codex --dry-run
 uv run mentalmodel demo async-rl
 uv run mentalmodel demo async-rl --write-artifacts --output-dir /tmp/mentalmodel-demo
@@ -70,6 +75,19 @@ uv run mentalmodel demo async-rl --write-artifacts --output-dir /tmp/mentalmodel
 - `outputs.json`
 - `state.json`
 - `otel-spans.jsonl` when no external OpenTelemetry sink is configured
+
+Milestone 8 run-inspection commands:
+
+- `runs latest` resolves the newest matching run bundle
+- `runs inputs` shows one node's persisted bound input payload
+- `runs outputs` shows one node's persisted output
+- `runs trace` shows one node's semantic execution trace and matching spans
+
+Run bundle versioning:
+
+- new `summary.json` files include `schema_version`
+- older bundles remain readable through compatibility loading
+- `runs repair` backfills legacy `summary.json` files to the current schema
 
 Installed skills currently include:
 

@@ -263,6 +263,7 @@ class CliTest(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual(len(payload), 1)
             self.assertEqual(payload[0]["graph_id"], "async_rl_demo")
+            self.assertIn("schema_version", payload[0])
 
     def test_runs_show_command_json_outputs_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -275,7 +276,99 @@ class CliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["graph_id"], "async_rl_demo")
+            self.assertIn("schema_version", payload)
             self.assertIn("records.jsonl", payload["files"]["records"])
+
+    def test_runs_latest_command_json_outputs_latest_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_demo_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "latest",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "async_rl_demo",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["graph_id"], "async_rl_demo")
+            self.assertIn("schema_version", payload)
+            self.assertIn("run_id", payload)
+
+    def test_runs_outputs_command_json_returns_node_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_demo_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "outputs",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "async_rl_demo",
+                        "--node-id",
+                        "staleness_invariant",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["node_id"], "staleness_invariant")
+            self.assertIn("output", payload)
+
+    def test_runs_trace_command_json_returns_trace_for_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_demo_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "trace",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "async_rl_demo",
+                        "--node-id",
+                        "staleness_invariant",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["node_id"], "staleness_invariant")
+            self.assertGreaterEqual(len(payload["records"]), 1)
+
+    def test_runs_inputs_command_returns_node_input_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_demo_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "inputs",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "async_rl_demo",
+                        "--node-id",
+                        "staleness_invariant",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["node_id"], "staleness_invariant")
+            self.assertEqual(payload["inputs"]["rollout_join"]["current_policy_version"], 3)
 
     def test_runs_records_command_filters_node(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -299,6 +392,85 @@ class CliTest(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertGreaterEqual(len(payload), 1)
             self.assertTrue(all(record["node_id"] == "staleness_invariant" for record in payload))
+
+    def test_runs_repair_command_json_reports_legacy_bundle_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / ".runs" / "legacy_graph" / "run-legacy"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "graph_id": "legacy_graph",
+                        "run_id": "run-legacy",
+                        "success": True,
+                        "node_count": 1,
+                        "edge_count": 0,
+                        "record_count": 0,
+                        "output_count": 0,
+                        "state_count": 0,
+                        "trace_sink_configured": False,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "repair",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "legacy_graph",
+                        "--dry-run",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["action_count"] >= 1)
+            self.assertEqual(payload["actions"][0]["graph_id"], "legacy_graph")
+
+    def test_runs_repair_command_applies_legacy_bundle_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / ".runs" / "legacy_graph" / "run-legacy"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            summary_path = run_dir / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "graph_id": "legacy_graph",
+                        "run_id": "run-legacy",
+                        "success": True,
+                        "node_count": 1,
+                        "edge_count": 0,
+                        "record_count": 0,
+                        "output_count": 0,
+                        "state_count": 0,
+                        "trace_sink_configured": False,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "repair",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "legacy_graph",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            repaired = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertIn("schema_version", repaired)
+            self.assertIn("created_at_ms", repaired)
 
     def test_install_skills_writes_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

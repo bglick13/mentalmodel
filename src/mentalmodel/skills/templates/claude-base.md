@@ -36,9 +36,15 @@ uv run mentalmodel demo async-rl
 uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel runs list
+uv run mentalmodel runs latest --graph-id async_rl_demo
 uv run mentalmodel runs show --graph-id async_rl_demo
+uv run mentalmodel runs inputs --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs outputs --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs trace --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs repair --dry-run
 ```
 
 `mentalmodel verify` writes a run bundle to `.runs` by default. The most useful
 files are `verification.json`, `records.jsonl`, `outputs.json`, and
-`otel-spans.jsonl`.
+`otel-spans.jsonl`. `summary.json` is versioned with `schema_version`, and
+`runs repair` can normalize older bundles.

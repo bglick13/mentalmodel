@@ -27,9 +27,14 @@ from mentalmodel.examples.async_rl.demo import build_program as build_async_rl_d
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.schemas import EntryPointSpec
 from mentalmodel.runtime.runs import (
+    apply_run_repairs,
     list_run_summaries,
+    load_run_node_inputs,
+    load_run_node_output,
+    load_run_node_trace,
     load_run_payload,
     load_run_records,
+    plan_run_repairs,
     resolve_run_summary,
 )
 from mentalmodel.skills import build_install_plan, install_skills
@@ -372,6 +377,7 @@ def run_runs_list(
             json.dumps(
                 [
                     {
+                        "schema_version": summary.schema_version,
                         "graph_id": summary.graph_id,
                         "run_id": summary.run_id,
                         "created_at_ms": summary.created_at_ms,
@@ -427,6 +433,7 @@ def run_runs_show(
     verification = _optional_run_payload(summary.run_dir / "verification.json")
     payload = {
         "graph_id": summary.graph_id,
+        "schema_version": summary.schema_version,
         "run_id": summary.run_id,
         "created_at_ms": summary.created_at_ms,
         "success": summary.success,
@@ -457,6 +464,7 @@ def run_runs_show(
     summary_table.add_column("Value")
     for field, value in (
         ("Graph", summary.graph_id),
+        ("Schema", str(summary.schema_version)),
         ("Run", summary.run_id),
         ("Success", "yes" if summary.success else "no"),
         ("Created", str(summary.created_at_ms)),
@@ -482,6 +490,232 @@ def run_runs_show(
     ):
         files_table.add_row(label, str(summary.run_dir / filename))
     console.print(files_table)
+    return 0
+
+
+def run_runs_latest(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Resolve and show the newest matching run."""
+
+    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=None)
+    payload = {
+        "graph_id": summary.graph_id,
+        "schema_version": summary.schema_version,
+        "run_id": summary.run_id,
+        "created_at_ms": summary.created_at_ms,
+        "success": summary.success,
+        "run_dir": str(summary.run_dir),
+        "record_count": summary.record_count,
+        "output_count": summary.output_count,
+        "state_count": summary.state_count,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel latest run")
+    table.add_column("Field")
+    table.add_column("Value")
+    for field, value in (
+        ("Graph", summary.graph_id),
+        ("Run", summary.run_id),
+        ("Success", "yes" if summary.success else "no"),
+        ("Created", str(summary.created_at_ms)),
+        ("Run Dir", str(summary.run_dir)),
+    ):
+        table.add_row(field, value)
+    Console().print(table)
+    return 0
+
+
+def run_runs_repair(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Plan or apply deterministic repairs for run bundle summaries."""
+
+    plan = plan_run_repairs(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    if not dry_run:
+        plan = apply_run_repairs(plan)
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "root_dir": str(plan.root_dir),
+                    "dry_run": dry_run,
+                    "action_count": len(plan.actions),
+                    "actions": [
+                        {
+                            "graph_id": action.graph_id,
+                            "run_id": action.run_id,
+                            "run_dir": str(action.run_dir),
+                            "from_schema_version": action.from_schema_version,
+                            "to_schema_version": action.to_schema_version,
+                            "updates": action.updates,
+                        }
+                        for action in plan.actions
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    table = Table(
+        title="mentalmodel runs repair dry run"
+        if dry_run
+        else "mentalmodel runs repair"
+    )
+    table.add_column("Graph")
+    table.add_column("Run")
+    table.add_column("From")
+    table.add_column("To")
+    table.add_column("Updates")
+    for action in plan.actions:
+        table.add_row(
+            action.graph_id,
+            action.run_id,
+            str(action.from_schema_version),
+            str(action.to_schema_version),
+            ", ".join(sorted(action.updates.keys())),
+        )
+    console = Console()
+    if plan.actions:
+        console.print(table)
+    else:
+        console.print("[green]No repairs needed.[/green]")
+    return 0
+
+
+def run_runs_inputs(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str,
+    json_output: bool = False,
+) -> int:
+    """Show the resolved input payload for one node."""
+
+    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    payload = load_run_node_inputs(
+        runs_dir=runs_dir,
+        graph_id=summary.graph_id,
+        run_id=summary.run_id,
+        node_id=node_id,
+    )
+    output = {
+        "graph_id": summary.graph_id,
+        "run_id": summary.run_id,
+        "node_id": node_id,
+        "inputs": payload,
+    }
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    Console().print(Panel.fit(json.dumps(output, indent=2, sort_keys=True), title="run inputs"))
+    return 0
+
+
+def run_runs_outputs(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str,
+    json_output: bool = False,
+) -> int:
+    """Show the output payload for one node."""
+
+    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    payload = load_run_node_output(
+        runs_dir=runs_dir,
+        graph_id=summary.graph_id,
+        run_id=summary.run_id,
+        node_id=node_id,
+    )
+    output = {
+        "graph_id": summary.graph_id,
+        "run_id": summary.run_id,
+        "node_id": node_id,
+        "output": payload,
+    }
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    Console().print(Panel.fit(json.dumps(output, indent=2, sort_keys=True), title="run output"))
+    return 0
+
+
+def run_runs_trace(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str,
+    event_type: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Show semantic trace data for one node."""
+
+    trace = load_run_node_trace(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        node_id=node_id,
+        event_type=event_type,
+    )
+    payload = {
+        "graph_id": trace.summary.graph_id,
+        "run_id": trace.summary.run_id,
+        "node_id": trace.node_id,
+        "records": list(trace.records),
+        "spans": list(trace.spans),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    console = Console()
+    record_table = Table(title=f"mentalmodel trace {trace.summary.run_id} {trace.node_id}")
+    record_table.add_column("Seq", justify="right")
+    record_table.add_column("Event")
+    record_table.add_column("Timestamp", justify="right")
+    record_table.add_column("Payload")
+    for record in trace.records:
+        record_table.add_row(
+            str(record.get("sequence", "")),
+            str(record.get("event_type", "")),
+            str(record.get("timestamp_ms", "")),
+            json.dumps(record.get("payload", {}), sort_keys=True),
+        )
+    if trace.records:
+        console.print(record_table)
+    else:
+        console.print("[yellow]No semantic records found for node.[/yellow]")
+
+    if trace.spans:
+        span_table = Table(title="Matching Spans")
+        span_table.add_column("Name")
+        span_table.add_column("Duration (ns)", justify="right")
+        span_table.add_column("Error")
+        for span in trace.spans:
+            span_table.add_row(
+                str(span.get("name", "")),
+                str(span.get("duration_ns", "")),
+                str(span.get("error_type", "") or ""),
+            )
+        console.print(span_table)
     return 0
 
 
@@ -591,6 +825,33 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show.add_argument("--run-id")
     runs_show.add_argument("--json", action="store_true", help="Emit JSON output.")
 
+    runs_latest = runs_subparsers.add_parser("latest", help="Resolve the newest matching run.")
+    runs_latest.add_argument("--runs-dir", type=Path)
+    runs_latest.add_argument("--graph-id")
+    runs_latest.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    runs_inputs = runs_subparsers.add_parser("inputs", help="Show one node input payload.")
+    runs_inputs.add_argument("--runs-dir", type=Path)
+    runs_inputs.add_argument("--graph-id")
+    runs_inputs.add_argument("--run-id")
+    runs_inputs.add_argument("--node-id", required=True)
+    runs_inputs.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    runs_outputs = runs_subparsers.add_parser("outputs", help="Show one node output payload.")
+    runs_outputs.add_argument("--runs-dir", type=Path)
+    runs_outputs.add_argument("--graph-id")
+    runs_outputs.add_argument("--run-id")
+    runs_outputs.add_argument("--node-id", required=True)
+    runs_outputs.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    runs_trace = runs_subparsers.add_parser("trace", help="Show semantic trace data for one node.")
+    runs_trace.add_argument("--runs-dir", type=Path)
+    runs_trace.add_argument("--graph-id")
+    runs_trace.add_argument("--run-id")
+    runs_trace.add_argument("--node-id", required=True)
+    runs_trace.add_argument("--event-type")
+    runs_trace.add_argument("--json", action="store_true", help="Emit JSON output.")
+
     runs_records = runs_subparsers.add_parser("records", help="Show run records.")
     runs_records.add_argument("--runs-dir", type=Path)
     runs_records.add_argument("--graph-id")
@@ -599,6 +860,16 @@ def build_parser() -> argparse.ArgumentParser:
     runs_records.add_argument("--event-type")
     runs_records.add_argument("--limit", type=int, default=50)
     runs_records.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    runs_repair = runs_subparsers.add_parser(
+        "repair",
+        help="Repair legacy run bundle summaries.",
+    )
+    runs_repair.add_argument("--runs-dir", type=Path)
+    runs_repair.add_argument("--graph-id")
+    runs_repair.add_argument("--run-id")
+    runs_repair.add_argument("--dry-run", action="store_true")
+    runs_repair.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     demo = subparsers.add_parser("demo", help="Run or inspect a reference demo.")
     demo.add_argument("name", nargs="?", default="async-rl", choices=["async-rl"])
@@ -657,6 +928,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                     run_id=args.run_id,
                     json_output=args.json,
                 )
+            if args.runs_command == "latest":
+                return run_runs_latest(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    json_output=args.json,
+                )
+            if args.runs_command == "inputs":
+                return run_runs_inputs(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_id=args.run_id,
+                    node_id=args.node_id,
+                    json_output=args.json,
+                )
+            if args.runs_command == "outputs":
+                return run_runs_outputs(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_id=args.run_id,
+                    node_id=args.node_id,
+                    json_output=args.json,
+                )
+            if args.runs_command == "trace":
+                return run_runs_trace(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_id=args.run_id,
+                    node_id=args.node_id,
+                    event_type=args.event_type,
+                    json_output=args.json,
+                )
             if args.runs_command == "records":
                 return run_runs_records(
                     runs_dir=args.runs_dir,
@@ -665,6 +967,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     node_id=args.node_id,
                     event_type=args.event_type,
                     limit=args.limit,
+                    json_output=args.json,
+                )
+            if args.runs_command == "repair":
+                return run_runs_repair(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_id=args.run_id,
+                    dry_run=args.dry_run,
                     json_output=args.json,
                 )
         if args.command == "demo":

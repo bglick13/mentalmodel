@@ -44,8 +44,13 @@ uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel runs list
+uv run mentalmodel runs latest --graph-id async_rl_demo
 uv run mentalmodel runs show --graph-id async_rl_demo
+uv run mentalmodel runs inputs --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs outputs --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs trace --graph-id async_rl_demo --node-id staleness_invariant
 uv run mentalmodel runs records --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs repair --dry-run
 uv run mentalmodel demo async-rl
 ```
 
@@ -58,6 +63,10 @@ uv run mentalmodel demo async-rl
   `outputs.json`, `state.json`, and `otel-spans.jsonl`.
 - Semantic records are the first thing to inspect; OTel span files are a
   fallback mirror when no external sink is configured.
+- `runs inputs` reads the persisted `node.inputs_resolved` event payload for a
+  node, so it shows exactly what the runtime bound before handler execution.
+- `summary.json` is versioned with `schema_version`; use `runs repair` to
+  normalize older bundles when needed.
 
 ## Hello world shape
 
