@@ -35,6 +35,8 @@ authoring model.
 uv run mentalmodel demo async-rl
 uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel runs list
+uv run mentalmodel runs show --graph-id async_rl_demo
 ```
 
 `mentalmodel verify` writes a run bundle to `.runs` by default. The most useful

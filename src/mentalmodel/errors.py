@@ -19,3 +19,7 @@ class VerificationError(MentalModelError):
 
 class SkillInstallError(MentalModelError):
     """Raised when packaged skill installation cannot be completed."""
+
+
+class RunInspectionError(MentalModelError):
+    """Raised when persisted run artifacts cannot be located or parsed."""

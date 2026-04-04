@@ -43,6 +43,9 @@ uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel runs list
+uv run mentalmodel runs show --graph-id async_rl_demo
+uv run mentalmodel runs records --graph-id async_rl_demo --node-id staleness_invariant
 uv run mentalmodel demo async-rl
 ```
 

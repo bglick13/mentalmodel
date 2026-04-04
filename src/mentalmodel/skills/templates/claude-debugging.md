@@ -6,7 +6,8 @@ description: Use when debugging a mentalmodel workflow or generated artifact. Co
 # mentalmodel Debugging
 
 - start with `mentalmodel check`, `docs`, and `verify`
-- inspect the newest `.runs/<graph_id>/<run_id>/` bundle after `verify`
+- use `mentalmodel runs show --graph-id <graph_id>` for the latest bundle
+- use `mentalmodel runs records --graph-id <graph_id> --node-id <node_id>` for semantic events
 - use docs to find the suspicious node
 - trace its inputs to producer nodes
 - use semantic execution records before generic traces

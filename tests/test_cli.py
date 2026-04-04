@@ -11,6 +11,21 @@ from mentalmodel.cli import build_parser, main
 
 
 class CliTest(unittest.TestCase):
+    def _materialize_demo_run(self, runs_dir: str) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "verify",
+                    "--entrypoint",
+                    "mentalmodel.examples.async_rl.demo:build_program",
+                    "--runs-dir",
+                    runs_dir,
+                    "--json",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+
     def test_demo_command_parses(self) -> None:
         parser = build_parser()
         args = parser.parse_args(["demo", "async-rl"])
@@ -237,6 +252,53 @@ class CliTest(unittest.TestCase):
             run_dir = Path(payload["run_artifacts_dir"])
             self.assertTrue(run_dir.exists())
             self.assertTrue((run_dir / "records.jsonl").exists())
+
+    def test_runs_list_command_outputs_materialized_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_demo_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(["runs", "list", "--runs-dir", tmpdir, "--json"])
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(len(payload), 1)
+            self.assertEqual(payload[0]["graph_id"], "async_rl_demo")
+
+    def test_runs_show_command_json_outputs_latest_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_demo_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    ["runs", "show", "--runs-dir", tmpdir, "--graph-id", "async_rl_demo", "--json"]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["graph_id"], "async_rl_demo")
+            self.assertIn("records.jsonl", payload["files"]["records"])
+
+    def test_runs_records_command_filters_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_demo_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "records",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "async_rl_demo",
+                        "--node-id",
+                        "staleness_invariant",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertGreaterEqual(len(payload), 1)
+            self.assertTrue(all(record["node_id"] == "staleness_invariant" for record in payload))
 
     def test_install_skills_writes_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

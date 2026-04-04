@@ -13,8 +13,9 @@ generated artifact.
 1. `mentalmodel check`
 2. `mentalmodel docs`
 3. `mentalmodel verify`
-4. Inspect the newest `.runs/<graph_id>/<run_id>/` bundle
-5. Inspect authored workflow and handler implementations
+4. `mentalmodel runs show --graph-id <graph_id>`
+5. `mentalmodel runs records --graph-id <graph_id> --node-id <node_id>`
+6. Inspect authored workflow and handler implementations
 
 ## What to inspect
 

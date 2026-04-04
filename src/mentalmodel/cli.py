@@ -26,6 +26,12 @@ from mentalmodel.examples.async_rl import (
 from mentalmodel.examples.async_rl.demo import build_program as build_async_rl_demo
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.schemas import EntryPointSpec
+from mentalmodel.runtime.runs import (
+    list_run_summaries,
+    load_run_payload,
+    load_run_records,
+    resolve_run_summary,
+)
 from mentalmodel.skills import build_install_plan, install_skills
 from mentalmodel.testing import run_verification
 
@@ -351,6 +357,180 @@ def run_demo_command(
     return 0 if verification.success and not report.has_errors else 1
 
 
+def run_runs_list(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    limit: int = 20,
+    json_output: bool = False,
+) -> int:
+    """List persisted run bundles."""
+
+    summaries = list_run_summaries(runs_dir=runs_dir, graph_id=graph_id)[: max(1, limit)]
+    if json_output:
+        print(
+            json.dumps(
+                [
+                    {
+                        "graph_id": summary.graph_id,
+                        "run_id": summary.run_id,
+                        "created_at_ms": summary.created_at_ms,
+                        "success": summary.success,
+                        "record_count": summary.record_count,
+                        "output_count": summary.output_count,
+                        "state_count": summary.state_count,
+                        "run_dir": str(summary.run_dir),
+                    }
+                    for summary in summaries
+                ],
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    table = Table(title="mentalmodel runs")
+    table.add_column("Graph")
+    table.add_column("Run")
+    table.add_column("Success")
+    table.add_column("Records", justify="right")
+    table.add_column("Outputs", justify="right")
+    table.add_column("State", justify="right")
+    table.add_column("Path")
+    for summary in summaries:
+        table.add_row(
+            summary.graph_id,
+            summary.run_id,
+            "yes" if summary.success else "no",
+            str(summary.record_count),
+            str(summary.output_count),
+            str(summary.state_count),
+            str(summary.run_dir),
+        )
+    if not summaries:
+        Console().print("[yellow]No runs found.[/yellow]")
+        return 0
+    Console().print(table)
+    return 0
+
+
+def run_runs_show(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Show one persisted run bundle and its files."""
+
+    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    verification = _optional_run_payload(summary.run_dir / "verification.json")
+    payload = {
+        "graph_id": summary.graph_id,
+        "run_id": summary.run_id,
+        "created_at_ms": summary.created_at_ms,
+        "success": summary.success,
+        "node_count": summary.node_count,
+        "edge_count": summary.edge_count,
+        "record_count": summary.record_count,
+        "output_count": summary.output_count,
+        "state_count": summary.state_count,
+        "trace_sink_configured": summary.trace_sink_configured,
+        "run_dir": str(summary.run_dir),
+        "files": {
+            "summary": str(summary.run_dir / "summary.json"),
+            "verification": str(summary.run_dir / "verification.json"),
+            "records": str(summary.run_dir / "records.jsonl"),
+            "outputs": str(summary.run_dir / "outputs.json"),
+            "state": str(summary.run_dir / "state.json"),
+            "spans": str(summary.run_dir / "otel-spans.jsonl"),
+        },
+        "verification_success": _verification_success(verification),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    console = Console()
+    summary_table = Table(title="mentalmodel run")
+    summary_table.add_column("Field")
+    summary_table.add_column("Value")
+    for field, value in (
+        ("Graph", summary.graph_id),
+        ("Run", summary.run_id),
+        ("Success", "yes" if summary.success else "no"),
+        ("Created", str(summary.created_at_ms)),
+        ("Records", str(summary.record_count)),
+        ("Outputs", str(summary.output_count)),
+        ("State", str(summary.state_count)),
+        ("Trace Sink", "configured" if summary.trace_sink_configured else "disk fallback"),
+        ("Run Dir", str(summary.run_dir)),
+    ):
+        summary_table.add_row(field, value)
+    console.print(summary_table)
+
+    files_table = Table(title="Run Files")
+    files_table.add_column("Name")
+    files_table.add_column("Path")
+    for label, filename in (
+        ("summary", "summary.json"),
+        ("verification", "verification.json"),
+        ("records", "records.jsonl"),
+        ("outputs", "outputs.json"),
+        ("state", "state.json"),
+        ("spans", "otel-spans.jsonl"),
+    ):
+        files_table.add_row(label, str(summary.run_dir / filename))
+    console.print(files_table)
+    return 0
+
+
+def run_runs_records(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    node_id: str | None = None,
+    event_type: str | None = None,
+    limit: int = 50,
+    json_output: bool = False,
+) -> int:
+    """Show semantic execution records for one persisted run."""
+
+    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    records = load_run_records(
+        runs_dir=runs_dir,
+        graph_id=summary.graph_id,
+        run_id=summary.run_id,
+        node_id=node_id,
+        event_type=event_type,
+    )
+    limited = records[-max(1, limit) :]
+    if json_output:
+        print(json.dumps(list(limited), indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title=f"mentalmodel records {summary.run_id}")
+    table.add_column("Seq", justify="right")
+    table.add_column("Node")
+    table.add_column("Event")
+    table.add_column("Timestamp", justify="right")
+    table.add_column("Payload")
+    for record in limited:
+        table.add_row(
+            str(record.get("sequence", "")),
+            str(record.get("node_id", "")),
+            str(record.get("event_type", "")),
+            str(record.get("timestamp_ms", "")),
+            json.dumps(record.get("payload", {}), sort_keys=True),
+        )
+    if not limited:
+        Console().print("[yellow]No matching records found.[/yellow]")
+        return 0
+    Console().print(table)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mentalmodel",
@@ -395,6 +575,31 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--json", action="store_true", help="Emit JSON output.")
     subparsers.add_parser("replay", help="Replay a recorded execution.")
 
+    runs = subparsers.add_parser("runs", help="Inspect persisted run artifacts.")
+    runs_subparsers = runs.add_subparsers(dest="runs_command")
+    runs_subparsers.required = True
+
+    runs_list = runs_subparsers.add_parser("list", help="List recent run bundles.")
+    runs_list.add_argument("--runs-dir", type=Path)
+    runs_list.add_argument("--graph-id")
+    runs_list.add_argument("--limit", type=int, default=20)
+    runs_list.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    runs_show = runs_subparsers.add_parser("show", help="Show one run bundle.")
+    runs_show.add_argument("--runs-dir", type=Path)
+    runs_show.add_argument("--graph-id")
+    runs_show.add_argument("--run-id")
+    runs_show.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    runs_records = runs_subparsers.add_parser("records", help="Show run records.")
+    runs_records.add_argument("--runs-dir", type=Path)
+    runs_records.add_argument("--graph-id")
+    runs_records.add_argument("--run-id")
+    runs_records.add_argument("--node-id")
+    runs_records.add_argument("--event-type")
+    runs_records.add_argument("--limit", type=int, default=50)
+    runs_records.add_argument("--json", action="store_true", help="Emit JSON output.")
+
     demo = subparsers.add_parser("demo", help="Run or inspect a reference demo.")
     demo.add_argument("name", nargs="?", default="async-rl", choices=["async-rl"])
     demo.add_argument("--write-artifacts", action="store_true")
@@ -437,6 +642,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target_dir=args.target_dir,
                 dry_run=args.dry_run,
             )
+        if args.command == "runs":
+            if args.runs_command == "list":
+                return run_runs_list(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    limit=args.limit,
+                    json_output=args.json,
+                )
+            if args.runs_command == "show":
+                return run_runs_show(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_id=args.run_id,
+                    json_output=args.json,
+                )
+            if args.runs_command == "records":
+                return run_runs_records(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_id=args.run_id,
+                    node_id=args.node_id,
+                    event_type=args.event_type,
+                    limit=args.limit,
+                    json_output=args.json,
+                )
         if args.command == "demo":
             return run_demo_command(
                 args.name,
@@ -450,6 +680,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except MentalModelError as exc:
         print(f"mentalmodel error: {exc}")
         return 1
+
+
+def _optional_run_payload(path: Path) -> dict[str, object] | None:
+    if not path.exists():
+        return None
+    raw = load_run_payload(
+        runs_dir=path.parents[2],
+        graph_id=path.parent.parent.name,
+        run_id=path.parent.name,
+        filename=path.name,
+    )
+    return dict(raw)
+
+
+def _verification_success(payload: dict[str, object] | None) -> bool | None:
+    if payload is None:
+        return None
+    success = payload.get("success")
+    return success if isinstance(success, bool) else None
 
 
 if __name__ == "__main__":
