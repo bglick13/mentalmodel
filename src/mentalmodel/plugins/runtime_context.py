@@ -24,7 +24,9 @@ class RuntimeContext:
 class RuntimeContextPlugin:
     """Lowers `RuntimeContext` objects into grouping nodes plus child metadata."""
 
-    kind = "runtime_context"
+    kind: str = "runtime_context"
+    origin: str = "mentalmodel.plugins.runtime_context"
+    version: str | None = "0.1.0"
 
     def supports(self, primitive: object) -> bool:
         return isinstance(primitive, RuntimeContext)

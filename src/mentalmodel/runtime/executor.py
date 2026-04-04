@@ -7,11 +7,11 @@ from dataclasses import dataclass
 
 from mentalmodel.core import Workflow
 from mentalmodel.core.interfaces import JsonValue, NamedPrimitive, RuntimeValue
-from mentalmodel.errors import MentalModelError
 from mentalmodel.ir.graph import IRGraph, IRNode
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.tracing import TracingAdapter, create_tracing_adapter
 from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.runtime.errors import ExecutionError
 from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
 from mentalmodel.runtime.plan import (
     CompiledProgram,
@@ -20,14 +20,6 @@ from mentalmodel.runtime.plan import (
     compile_program,
 )
 from mentalmodel.runtime.recorder import ExecutionRecorder
-
-
-class ExecutionError(MentalModelError):
-    """Raised when runtime execution fails."""
-
-
-class InvariantViolationError(ExecutionError):
-    """Raised when an invariant does not hold at runtime."""
 
 
 @dataclass(slots=True, frozen=True)

@@ -18,6 +18,7 @@ from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.runtime.errors import InvariantViolationError
 from mentalmodel.runtime.events import (
     EFFECT_COMPLETED,
     EFFECT_INVOKED,
@@ -194,6 +195,10 @@ class CompiledInvariantNode(Generic[InputT, DetailT]):
             timestamp_ms=context.clock.now_ms(),
             payload={"passed": result.passed, "severity": self.severity},
         )
+        if not result.passed:
+            raise InvariantViolationError(
+                f"Invariant {self.metadata.node_id!r} failed: {dict(result.details)!r}"
+            )
         return cast(RuntimeValue, result)
 
 

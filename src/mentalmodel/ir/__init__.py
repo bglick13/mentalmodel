@@ -2,6 +2,7 @@
 
 from mentalmodel.ir.graph import IREdge, IRFragment, IRGraph, IRNode
 from mentalmodel.ir.lowering import LoweringContext, lower_program
+from mentalmodel.ir.provenance import NodeProvenance
 
 __all__ = [
     "IREdge",
@@ -9,5 +10,6 @@ __all__ = [
     "IRGraph",
     "IRNode",
     "LoweringContext",
+    "NodeProvenance",
     "lower_program",
 ]

@@ -40,6 +40,20 @@ The package should favor durable abstractions over fast local wins. If a
 milestone reveals that an abstraction boundary is missing, the milestone should
 expand to include that boundary rather than shipping a shortcut.
 
+Milestones are also not considered complete unless they include solid,
+targeted verification for the behavior they introduce.
+
+Minimum acceptance standard for each milestone:
+
+- add automated tests for success paths and meaningful failure paths
+- verify structural contracts, runtime semantics, and extension boundaries where
+  relevant
+- run the project verification toolchain before moving to the next milestone
+- do not defer missing tests or validation gaps to later milestones
+
+Implementation is not complete until the code, tests, and verification path all
+agree on the intended behavior.
+
 ## Repo Skeleton
 
 ```text
@@ -865,6 +879,8 @@ Suggested markdown outputs:
 - define IR models
 - define lowering contract
 - define CLI skeleton
+- add direct tests for lowering, graph validity, and CLI entrypoint loading
+- verify milestone with lint, typecheck, and test runs before continuing
 
 ### Milestone 2: Base primitives and runtime
 
@@ -873,6 +889,8 @@ Suggested markdown outputs:
 - implement async executor
 - implement execution recorder
 - implement OTel adapter
+- add end-to-end runtime tests, failure-path tests, and execution-record tests
+- verify milestone with lint, typecheck, and test runs before continuing
 
 ### Milestone 3: Analysis and docs
 
@@ -880,12 +898,19 @@ Suggested markdown outputs:
 - implement semantic analyzers
 - implement Mermaid and markdown renderers
 - implement `mentalmodel check`, `graph`, and `docs`
+- add direct analyzer and artifact-generation tests, including failure cases
+- verify milestone with lint, typecheck, and test runs before continuing
 
 ### Milestone 4: Extension model
 
 - implement plugin registry
-- implement `RuntimeContext` reference plugin
+- implement `RuntimeContext` as the reference plugin
+- stamp plugin provenance into IR during lowering
 - validate plugin provenance in IR and docs
+- update the async RL demo so `RuntimeContext` is the canonical proof that the
+  plugin boundary works end to end
+- add plugin registration, plugin failure, and extension-lowering tests
+- verify milestone with lint, typecheck, and test runs before continuing
 
 ### Milestone 5: Verification and skills
 
@@ -893,12 +918,17 @@ Suggested markdown outputs:
 - add Hypothesis-backed verification hooks
 - implement `mentalmodel verify`
 - implement `mentalmodel install-skills`
+- add verification-command tests and deterministic property-check coverage
+- verify milestone with lint, typecheck, and test runs before continuing
 
 ### Milestone 6: Demo and reference workflow
 
 - implement minimal async RL demo
 - add expected docs artifacts
 - add CLI path for generating demo outputs
+- add demo semantic tests for output structure, invariants, and generated
+  artifacts
+- verify milestone with lint, typecheck, and test runs before continuing
 
 ## Immediate Next Build Steps
 

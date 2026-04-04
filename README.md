@@ -49,6 +49,9 @@ uv run ruff check --fix .
 uv run ruff format .
 uv run mypy
 uv run pytest
+uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 ```
 
 Import sorting is handled by Ruff's `I` rules rather than a separate `isort`

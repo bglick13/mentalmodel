@@ -8,6 +8,7 @@ from mentalmodel.core.interfaces import NamedPrimitive
 from mentalmodel.core.refs import Ref
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IREdge, IRFragment, IRGraph, IRNode
+from mentalmodel.ir.provenance import NodeProvenance
 from mentalmodel.plugins.registry import PluginRegistry, default_registry
 
 if TYPE_CHECKING:
@@ -20,18 +21,19 @@ class LoweringContext:
 
     registry: PluginRegistry = field(default_factory=default_registry)
     inherited_metadata: dict[str, str] = field(default_factory=dict)
+    provenance: NodeProvenance = field(default_factory=NodeProvenance.core)
     _registered_ids: set[str] = field(default_factory=set)
 
     def lower(self, primitive: NamedPrimitive) -> IRFragment:
         lower = getattr(primitive, "lower", None)
         if callable(lower):
-            return cast(IRFragment, lower(self))
+            return cast(IRFragment, lower(self.with_provenance(NodeProvenance.core())))
         plugin = self.registry.find_plugin(primitive)
         if plugin is None:
             raise LoweringError(
                 f"No lowering strategy found for object of type {type(primitive).__name__}."
             )
-        return plugin.lower(primitive, self)
+        return plugin.lower(primitive, self.with_provenance(NodeProvenance.from_plugin(plugin)))
 
     def child_context(self, metadata: dict[str, str] | None = None) -> LoweringContext:
         merged = dict(self.inherited_metadata)
@@ -40,6 +42,17 @@ class LoweringContext:
         return LoweringContext(
             registry=self.registry,
             inherited_metadata=merged,
+            provenance=self.provenance,
+            _registered_ids=self._registered_ids,
+        )
+
+    def with_provenance(self, provenance: NodeProvenance) -> LoweringContext:
+        """Return a context that stamps nodes with the provided provenance."""
+
+        return LoweringContext(
+            registry=self.registry,
+            inherited_metadata=dict(self.inherited_metadata),
+            provenance=provenance,
             _registered_ids=self._registered_ids,
         )
 
@@ -117,6 +130,7 @@ class LoweringContext:
     def _apply_metadata(self, node: IRNode) -> IRNode:
         metadata = dict(self.inherited_metadata)
         metadata.update(node.metadata)
+        metadata.update(self.provenance.as_metadata())
         return IRNode(
             node_id=node.node_id,
             kind=node.kind,

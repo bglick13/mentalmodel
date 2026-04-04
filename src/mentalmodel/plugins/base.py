@@ -12,6 +12,8 @@ class PrimitivePlugin(Protocol):
     """Plugin contract for non-core primitives."""
 
     kind: str
+    origin: str
+    version: str | None
 
     def supports(self, primitive: object) -> bool:
         """Return whether the plugin can lower the given primitive."""

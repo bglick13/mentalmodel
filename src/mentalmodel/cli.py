@@ -4,11 +4,18 @@ import argparse
 import importlib
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import cast
 
-from mentalmodel.analysis import run_graph_checks, run_semantic_checks
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.table import Table
+
+from mentalmodel.analysis import run_analysis
 from mentalmodel.core.interfaces import NamedPrimitive
 from mentalmodel.core.workflow import Workflow
+from mentalmodel.docs import render_markdown_artifacts, render_mermaid
 from mentalmodel.errors import EntrypointLoadError, MentalModelError
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.schemas import EntryPointSpec
@@ -45,11 +52,16 @@ def load_entrypoint(raw: str) -> Workflow[NamedPrimitive]:
     return cast(Workflow[NamedPrimitive], loaded)
 
 
+def load_graph(entrypoint: str) -> Workflow[NamedPrimitive]:
+    """Load the workflow entrypoint for CLI commands."""
+
+    return load_entrypoint(entrypoint)
+
+
 def run_check(entrypoint: str, *, json_output: bool = False) -> int:
-    program = load_entrypoint(entrypoint)
+    program = load_graph(entrypoint)
     graph = lower_program(program)
-    findings = [*run_graph_checks(graph), *run_semantic_checks(graph)]
-    error_count = sum(1 for finding in findings if finding.severity == "error")
+    report = run_analysis(graph)
 
     if json_output:
         print(
@@ -58,6 +70,8 @@ def run_check(entrypoint: str, *, json_output: bool = False) -> int:
                     "graph_id": graph.graph_id,
                     "node_count": len(graph.nodes),
                     "edge_count": len(graph.edges),
+                    "error_count": report.error_count,
+                    "warning_count": report.warning_count,
                     "findings": [
                         {
                             "code": finding.code,
@@ -65,7 +79,7 @@ def run_check(entrypoint: str, *, json_output: bool = False) -> int:
                             "message": finding.message,
                             "node_id": finding.node_id,
                         }
-                        for finding in findings
+                        for finding in report.findings
                     ],
                 },
                 indent=2,
@@ -73,13 +87,81 @@ def run_check(entrypoint: str, *, json_output: bool = False) -> int:
             )
         )
     else:
-        print(
-            f"check summary: graph={graph.graph_id} nodes={len(graph.nodes)} "
-            f"edges={len(graph.edges)} findings={len(findings)}"
+        console = Console()
+        summary = Table(title="mentalmodel check summary")
+        summary.add_column("Graph")
+        summary.add_column("Nodes", justify="right")
+        summary.add_column("Edges", justify="right")
+        summary.add_column("Errors", justify="right")
+        summary.add_column("Warnings", justify="right")
+        summary.add_row(
+            graph.graph_id,
+            str(len(graph.nodes)),
+            str(len(graph.edges)),
+            str(report.error_count),
+            str(report.warning_count),
         )
-        for finding in findings:
-            print(finding.render())
-    return 1 if error_count > 0 else 0
+        console.print(summary)
+        if report.findings:
+            findings = Table(title="Findings")
+            findings.add_column("Severity")
+            findings.add_column("Code")
+            findings.add_column("Node")
+            findings.add_column("Message")
+            for finding in report.findings:
+                findings.add_row(
+                    finding.severity,
+                    finding.code,
+                    finding.node_id or "",
+                    finding.message,
+                )
+            console.print(findings)
+        else:
+            console.print("[green]No findings.[/green]")
+    return 1 if report.has_errors else 0
+
+
+def run_graph(
+    entrypoint: str,
+    *,
+    output: Path | None = None,
+) -> int:
+    """Render Mermaid graph output for one workflow entrypoint."""
+
+    graph = lower_program(load_graph(entrypoint))
+    mermaid = render_mermaid(graph)
+    if output is not None:
+        output.write_text(mermaid + "\n", encoding="utf-8")
+        Console().print(f"[green]wrote[/green] {output}")
+        return 0
+    Console().print(Panel.fit(mermaid, title=f"{graph.graph_id} Mermaid"))
+    return 0
+
+
+def run_docs(
+    entrypoint: str,
+    *,
+    output_dir: Path | None = None,
+    stdout: bool = False,
+) -> int:
+    """Render markdown documentation artifacts for one workflow entrypoint."""
+
+    graph = lower_program(load_graph(entrypoint))
+    report = run_analysis(graph)
+    artifacts = render_markdown_artifacts(graph, findings=report.findings)
+    console = Console()
+
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in artifacts.as_mapping().items():
+            target = output_dir / name
+            target.write_text(content + "\n", encoding="utf-8")
+        console.print(f"[green]wrote[/green] {output_dir}")
+
+    if stdout or output_dir is None:
+        for name, content in artifacts.as_mapping().items():
+            console.print(Panel(Markdown(content), title=name))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,8 +179,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Program entrypoint in `module:function` format.",
     )
     check.add_argument("--json", action="store_true", help="Emit JSON output.")
-    subparsers.add_parser("graph", help="Render graph artifacts from IR.")
-    subparsers.add_parser("docs", help="Generate documentation from IR.")
+    graph = subparsers.add_parser("graph", help="Render graph artifacts from IR.")
+    graph.add_argument(
+        "--entrypoint",
+        default="mentalmodel.examples.async_rl.demo:build_program",
+        help="Program entrypoint in `module:function` format.",
+    )
+    graph.add_argument("--output", type=Path, help="Optional path to write Mermaid output.")
+    docs = subparsers.add_parser("docs", help="Generate documentation from IR.")
+    docs.add_argument(
+        "--entrypoint",
+        default="mentalmodel.examples.async_rl.demo:build_program",
+        help="Program entrypoint in `module:function` format.",
+    )
+    docs.add_argument("--output-dir", type=Path, help="Directory to write markdown artifacts.")
+    docs.add_argument("--stdout", action="store_true", help="Also render docs to stdout.")
     subparsers.add_parser("verify", help="Run invariants and verification helpers.")
     subparsers.add_parser("replay", help="Replay a recorded execution.")
 
@@ -123,6 +218,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "check":
             return run_check(args.entrypoint, json_output=args.json)
+        if args.command == "graph":
+            return run_graph(args.entrypoint, output=args.output)
+        if args.command == "docs":
+            return run_docs(args.entrypoint, output_dir=args.output_dir, stdout=args.stdout)
         print(f"mentalmodel scaffold command selected: {args.command}")
         return 0
     except MentalModelError as exc:
