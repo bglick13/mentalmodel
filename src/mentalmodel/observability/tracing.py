@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import sys
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    ConsoleSpanExporter,
+    SpanExporter,
+)
 from opentelemetry.trace import Span, Tracer
+
+from mentalmodel.observability.config import TracingConfig, TracingMode, load_tracing_config
 
 
 @dataclass(slots=True, frozen=True)
@@ -25,11 +32,16 @@ class RecordedSpan:
 
 @dataclass(slots=True)
 class TracingAdapter:
-    """Small wrapper around an OpenTelemetry tracer."""
+    """Wrapper around an OpenTelemetry tracer plus local span capture."""
 
     tracer: Tracer
-    sink_configured: bool
+    provider: TracerProvider
+    config: TracingConfig
     spans: list[RecordedSpan] = field(default_factory=list)
+
+    @property
+    def sink_configured(self) -> bool:
+        return self.config.external_sink_configured
 
     @contextmanager
     def start_span(
@@ -52,56 +64,92 @@ class TracingAdapter:
                 error_message = str(exc)
                 raise
             finally:
-                self.spans.append(
-                    RecordedSpan(
-                        name=name,
-                        start_time_ns=start_time_ns,
-                        end_time_ns=time.time_ns(),
-                        attributes=dict(attributes or {}),
-                        error_type=error_type,
-                        error_message=error_message,
+                if self.config.capture_local_spans:
+                    self.spans.append(
+                        RecordedSpan(
+                            name=name,
+                            start_time_ns=start_time_ns,
+                            end_time_ns=time.time_ns(),
+                            attributes=dict(attributes or {}),
+                            error_type=error_type,
+                            error_message=error_message,
+                        )
                     )
-                )
 
     def snapshot_spans(self) -> tuple[RecordedSpan, ...]:
         """Return an immutable copy of captured spans."""
 
         return tuple(self.spans)
 
+    def flush(self) -> None:
+        """Flush configured exporters."""
+
+        self.provider.force_flush()
+
+    def trace_summary(self) -> dict[str, str | bool | None]:
+        """Return a JSON-safe summary of resolved tracing config."""
+
+        return self.config.summary()
+
 
 @dataclass(slots=True)
-class InMemoryTracingFactory:
-    """Factory for an in-process tracer provider."""
+class TracingFactory:
+    """Factory for tracer providers and exporters from typed config."""
 
-    service_name: str = "mentalmodel"
-    provider: TracerProvider = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.provider = TracerProvider(
-            resource=Resource.create({"service.name": self.service_name})
-        )
+    config: TracingConfig
 
     def create(self) -> TracingAdapter:
+        provider = TracerProvider(resource=self._resource())
+        exporter = self._build_exporter()
+        if exporter is not None:
+            provider.add_span_processor(BatchSpanProcessor(exporter))
         return TracingAdapter(
-            tracer=self.provider.get_tracer("mentalmodel.runtime"),
-            sink_configured=detect_external_tracing_sink(),
+            tracer=provider.get_tracer("mentalmodel.runtime"),
+            provider=provider,
+            config=self.config,
+        )
+
+    def _resource(self) -> Resource:
+        attributes = {"service.name": self.config.service_name}
+        if self.config.service_namespace is not None:
+            attributes["service.namespace"] = self.config.service_namespace
+        if self.config.service_version is not None:
+            attributes["service.version"] = self.config.service_version
+        return Resource.create(attributes)
+
+    def _build_exporter(self) -> SpanExporter | None:
+        if self.config.mode is TracingMode.DISABLED:
+            return None
+        if self.config.mode is TracingMode.DISK:
+            return None
+        if self.config.mode is TracingMode.CONSOLE:
+            return ConsoleSpanExporter(out=sys.stderr)
+        if self.config.mode is TracingMode.OTLP_HTTP:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter as HttpOTLPSpanExporter,
+            )
+
+            return HttpOTLPSpanExporter(
+                endpoint=self.config.otlp_endpoint,
+                headers=self.config.otlp_headers,
+            )
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter as GrpcOTLPSpanExporter,
+        )
+
+        return GrpcOTLPSpanExporter(
+            endpoint=self.config.otlp_endpoint,
+            headers=self.config.otlp_headers,
+            insecure=self.config.otlp_insecure,
         )
 
 
-def create_tracing_adapter(service_name: str = "mentalmodel") -> TracingAdapter:
-    """Create a default tracing adapter for the runtime."""
+def create_tracing_adapter(
+    *,
+    config: TracingConfig | None = None,
+    service_name: str = "mentalmodel",
+) -> TracingAdapter:
+    """Create a tracing adapter from explicit config or environment defaults."""
 
-    return InMemoryTracingFactory(service_name=service_name).create()
-
-
-def detect_external_tracing_sink() -> bool:
-    """Return whether the process appears to have an external trace sink configured."""
-
-    return any(
-        os.getenv(var_name)
-        for var_name in (
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-            "OTEL_TRACES_EXPORTER",
-        )
-    )
+    resolved = config or load_tracing_config(service_name=service_name)
+    return TracingFactory(resolved).create()

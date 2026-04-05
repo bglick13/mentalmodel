@@ -27,6 +27,12 @@ Use this skill when working on invariants, verification, or property checks.
 - Use `@hypothesis_property_check` when varying inputs exposes structural bugs.
 - Keep generated input domains small and meaningful.
 - Property checks should exercise the actual workflow, not mock around it.
+- Prefer reusable helpers before writing bespoke assertions:
+  - `assert_aligned_key_sets(...)`
+  - `assert_causal_order(...)`
+  - `assert_monotonic_non_decreasing(...)`
+  - `collect_runtime_boundary_observations(...)` with
+    `assert_runtime_boundary_crossings(...)`
 
 ## Verification workflow
 
@@ -50,3 +56,13 @@ When investigating a suspected invariant bug:
 4. Inspect the matching `.runs/.../outputs.json` and `records.jsonl`.
 5. Ask whether the invariant could actually fail.
 6. Strengthen the invariant or property check if it is too weak.
+
+## Helper selection
+
+- fanout/join map consistency: use `assert_aligned_key_sets(...)`
+- version, cursor, epoch, or offset progress: use
+  `assert_monotonic_non_decreasing(...)`
+- observed-versus-current causal relationships: use `assert_causal_order(...)`
+- runtime boundary policy checks: derive observations from the lowered graph with
+  `collect_runtime_boundary_observations(...)`, then validate them with
+  `assert_runtime_boundary_crossings(...)`

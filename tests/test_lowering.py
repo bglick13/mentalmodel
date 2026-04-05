@@ -6,6 +6,9 @@ from typing import cast
 from mentalmodel.core import Actor, ActorHandler, ActorResult, Ref, Workflow
 from mentalmodel.core.interfaces import NamedPrimitive
 from mentalmodel.errors import LoweringError
+from mentalmodel.examples.autoresearch_sorting.demo import (
+    build_program as build_autoresearch_program,
+)
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.provenance import CORE_PLUGIN_KIND, CORE_PLUGIN_ORIGIN
 from mentalmodel.plugins.registry import PluginRegistry, default_registry
@@ -31,6 +34,14 @@ class LoweringTest(unittest.TestCase):
         self.assertIsNotNone(plugin)
         assert plugin is not None
         self.assertEqual(plugin.kind, "runtime_context")
+
+    def test_autoresearch_plugin_registry_is_available(self) -> None:
+        registry = default_registry()
+        root_context = cast(RuntimeContext, build_autoresearch_program().children[0])
+        plugin = registry.find_plugin(root_context.children[0])
+        self.assertIsNotNone(plugin)
+        assert plugin is not None
+        self.assertEqual(plugin.kind, "autoresearch")
 
     def test_plugin_registry_rejects_duplicate_kinds(self) -> None:
         registry = PluginRegistry()
@@ -75,6 +86,16 @@ class LoweringTest(unittest.TestCase):
         source = next(node for node in graph.nodes if node.node_id == "source")
         self.assertEqual(source.metadata["plugin_kind"], CORE_PLUGIN_KIND)
         self.assertEqual(source.metadata["plugin_origin"], CORE_PLUGIN_ORIGIN)
+
+    def test_lower_program_stamps_autoresearch_plugin_provenance(self) -> None:
+        graph = lower_program(build_autoresearch_program())
+        search_node = next(node for node in graph.nodes if node.node_id == "autoresearch_sorting")
+        self.assertEqual(search_node.kind, "autoresearch")
+        self.assertEqual(search_node.metadata["plugin_kind"], "autoresearch")
+        self.assertEqual(
+            search_node.metadata["plugin_origin"],
+            "mentalmodel.integrations.autoresearch",
+        )
 
     def test_lower_program_requires_plugin_for_extension_primitive(self) -> None:
         program: Workflow[NamedPrimitive] = Workflow(

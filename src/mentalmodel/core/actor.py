@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from mentalmodel.core.interfaces import ActorHandler
 from mentalmodel.core.refs import Ref
 from mentalmodel.ir.graph import IRFragment, IRNode
+from mentalmodel.observability.metrics import OutputMetricSpec
 
 if TYPE_CHECKING:
     from mentalmodel.ir.lowering import LoweringContext
@@ -22,6 +23,7 @@ class Actor(Generic[InputT, OutputT, StateT]):
     name: str
     handler: ActorHandler[InputT, StateT, OutputT]
     inputs: list[Ref] = field(default_factory=list)
+    metrics: list[OutputMetricSpec[OutputT]] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
 
     def lower(self, ctx: LoweringContext) -> IRFragment:

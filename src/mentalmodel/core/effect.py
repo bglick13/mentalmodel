@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from mentalmodel.core.interfaces import EffectHandler
 from mentalmodel.core.refs import Ref
 from mentalmodel.ir.graph import IRFragment, IRNode
+from mentalmodel.observability.metrics import OutputMetricSpec
 
 if TYPE_CHECKING:
     from mentalmodel.ir.lowering import LoweringContext
@@ -21,6 +22,7 @@ class Effect(Generic[InputT, OutputT]):
     name: str
     handler: EffectHandler[InputT, OutputT]
     inputs: list[Ref] = field(default_factory=list)
+    metrics: list[OutputMetricSpec[OutputT]] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
 
     def lower(self, ctx: LoweringContext) -> IRFragment:

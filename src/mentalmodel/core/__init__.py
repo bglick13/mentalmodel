@@ -17,6 +17,16 @@ from mentalmodel.core.invariants import Invariant
 from mentalmodel.core.models import ActorResult, InvariantResult
 from mentalmodel.core.refs import Ref
 from mentalmodel.core.workflow import Workflow
+from mentalmodel.observability.metrics import (
+    MetricContext,
+    MetricDefinition,
+    MetricExtractor,
+    MetricKind,
+    MetricObservation,
+    OutputMetricSpec,
+    extract_output_metrics,
+    infer_output_metrics,
+)
 
 __all__ = [
     "Actor",
@@ -30,10 +40,18 @@ __all__ = [
     "Join",
     "JoinReducer",
     "JsonValue",
+    "MetricContext",
+    "MetricDefinition",
+    "MetricExtractor",
+    "MetricKind",
+    "MetricObservation",
     "NamedPrimitive",
+    "OutputMetricSpec",
     "Parallel",
     "Ref",
     "ResolvedInputs",
     "RuntimeValue",
     "Workflow",
+    "extract_output_metrics",
+    "infer_output_metrics",
 ]

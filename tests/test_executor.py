@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import cast
 
 from mentalmodel.core import (
@@ -21,11 +22,18 @@ from mentalmodel.core import (
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import LoweringError
 from mentalmodel.examples.async_rl.demo import LearnerState, RefreshOutput, build_program
+from mentalmodel.examples.autoresearch_sorting.demo import (
+    build_program as build_autoresearch_program,
+)
+from mentalmodel.integrations.autoresearch.plugin import AutoResearchOutput
+from mentalmodel.observability.config import TracingConfig, TracingMode
+from mentalmodel.observability.metrics import MetricObservation
 from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter
 from mentalmodel.plugins.runtime_context import RuntimeContext
 from mentalmodel.runtime import compile_program
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.errors import ExecutionError, InvariantViolationError
+from mentalmodel.runtime.execution import CompiledPluginNode
 from mentalmodel.runtime.executor import AsyncExecutor
 from mentalmodel.runtime.plan import (
     CompiledActorNode,
@@ -76,6 +84,10 @@ class FakeTracingAdapter:
     def __init__(self) -> None:
         self.span_names: list[str] = []
         self.sink_configured = False
+        self.config = TracingConfig(
+            service_name="mentalmodel-test",
+            mode=TracingMode.DISK,
+        )
 
     @contextmanager
     def start_span(
@@ -90,6 +102,42 @@ class FakeTracingAdapter:
 
     def snapshot_spans(self) -> tuple[RecordedSpan, ...]:
         return tuple()
+
+    def flush(self) -> None:
+        return None
+
+    def trace_summary(self) -> dict[str, str | bool | None]:
+        return {
+            "trace_mode": "disk",
+            "trace_otlp_endpoint": None,
+            "trace_mirror_to_disk": True,
+            "trace_capture_local_spans": False,
+            "trace_sink_configured": False,
+            "trace_service_name": "mentalmodel-test",
+            "trace_service_namespace": None,
+            "trace_service_version": None,
+        }
+
+
+@dataclass(slots=True)
+class RecordingMetricEmitter:
+    observations: list[MetricObservation] = field(default_factory=list)
+    flush_calls: int = 0
+
+    def emit(self, observations: Sequence[MetricObservation]) -> None:
+        self.observations.extend(observations)
+
+    def flush(self) -> None:
+        self.flush_calls += 1
+
+
+class RaisingMetricEmitter:
+    def emit(self, observations: Sequence[MetricObservation]) -> None:
+        del observations
+        raise RuntimeError("metric export failed")
+
+    def flush(self) -> None:
+        return None
 
 
 class ExecutorTest(unittest.TestCase):
@@ -114,6 +162,21 @@ class ExecutorTest(unittest.TestCase):
                 "sample_policy",
             ),
         )
+
+    def test_compile_program_builds_executable_plugin_node(self) -> None:
+        compiled = compile_program(build_autoresearch_program())
+        search = compiled.plan.nodes["autoresearch_sorting"]
+        self.assertIsInstance(search, CompiledPluginNode)
+        self.assertEqual(search.metadata.kind, "autoresearch")
+        self.assertEqual(search.metadata.runtime_context, "local")
+
+    def test_async_executor_runs_autoresearch_plugin_end_to_end(self) -> None:
+        result = asyncio.run(AsyncExecutor().run(build_autoresearch_program()))
+        search_output = cast(AutoResearchOutput, result.outputs["autoresearch_sorting"])
+        self.assertEqual(search_output["best_candidate"], "merge")
+        self.assertEqual(search_output["metric_name"], "mentalmodel.demo.sorting.comparison_count")
+        invariant_output = cast(InvariantResult[float], result.outputs["search_result_invariant"])
+        self.assertTrue(invariant_output.passed)
 
     def test_compile_program_excludes_container_nodes_from_execution_plan(self) -> None:
         compiled = compile_program(build_program())
@@ -379,6 +442,45 @@ class ExecutorTest(unittest.TestCase):
         asyncio.run(AsyncExecutor(tracing=cast(TracingAdapter, tracing)).run(build_program()))
         self.assertIn("actor:batch_source", tracing.span_names)
         self.assertIn("effect:sample_policy", tracing.span_names)
+
+    def test_executor_emits_built_in_and_output_derived_metrics(self) -> None:
+        metrics = RecordingMetricEmitter()
+        asyncio.run(AsyncExecutor(metrics=metrics).run(build_program()))
+        metric_names = [observation.definition.name for observation in metrics.observations]
+        self.assertIn("mentalmodel.run.started", metric_names)
+        self.assertIn("mentalmodel.run.completed", metric_names)
+        self.assertIn("mentalmodel.node.executions", metric_names)
+        self.assertIn("mentalmodel.node.duration_ms", metric_names)
+        self.assertIn("mentalmodel.demo.reward.pangram.mean", metric_names)
+        self.assertIn("mentalmodel.demo.reward.quality.count", metric_names)
+        self.assertIn("mentalmodel.demo.learner_update.sample_count", metric_names)
+        self.assertIn(
+            "mentalmodel.demo.learner_update.updated_policy_version",
+            metric_names,
+        )
+        pangram_mean = next(
+            observation
+            for observation in metrics.observations
+            if observation.definition.name == "mentalmodel.demo.reward.pangram.mean"
+        )
+        self.assertEqual(pangram_mean.value, 0.8)
+        pangram_count = next(
+            observation
+            for observation in metrics.observations
+            if observation.definition.name == "mentalmodel.demo.reward.pangram.count"
+        )
+        self.assertEqual(pangram_count.value, 8)
+        sample_count = next(
+            observation
+            for observation in metrics.observations
+            if observation.definition.name == "mentalmodel.demo.learner_update.sample_count"
+        )
+        self.assertEqual(sample_count.value, 8)
+        self.assertEqual(metrics.flush_calls, 1)
+
+    def test_metric_emission_failures_do_not_break_execution(self) -> None:
+        result = asyncio.run(AsyncExecutor(metrics=RaisingMetricEmitter()).run(build_program()))
+        self.assertIn("refresh_sampler", result.outputs)
 
 
 if __name__ == "__main__":

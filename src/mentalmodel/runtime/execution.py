@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Generic, Protocol, TypeVar, cast
+
+from mentalmodel.core.interfaces import JsonValue, RuntimeValue
+from mentalmodel.observability.export import serialize_runtime_value
+from mentalmodel.observability.metrics import (
+    OutputMetricSpec,
+    derive_output_metrics,
+    emit_metric_batch,
+)
+from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.runtime.events import NODE_INPUTS_RESOLVED
+
+InputT = TypeVar("InputT")
+InputT_contra = TypeVar("InputT_contra", contravariant=True)
+InputBoundT_co = TypeVar("InputBoundT_co", covariant=True)
+OutputT = TypeVar("OutputT")
+OutputT_co = TypeVar("OutputT_co", covariant=True)
+
+
+@dataclass(slots=True, frozen=True)
+class ExecutionNodeMetadata:
+    """Executable node metadata derived from the canonical IR."""
+
+    node_id: str
+    kind: str
+    label: str
+    runtime_context: str | None
+    dependencies: tuple[str, ...]
+
+
+class InputAdapter(Protocol[InputBoundT_co]):
+    """Converts resolved upstream runtime values into a handler input shape."""
+
+    def bind(self, outputs: Mapping[str, RuntimeValue]) -> InputBoundT_co:
+        """Bind raw upstream outputs into the typed handler input."""
+
+
+@dataclass(slots=True, frozen=True)
+class MappingInputAdapter(Generic[InputT]):
+    """Default adapter that presents upstream outputs as a mapping."""
+
+    dependencies: tuple[str, ...]
+
+    def bind(self, outputs: Mapping[str, RuntimeValue]) -> InputT:
+        bound = {dependency: outputs[dependency] for dependency in self.dependencies}
+        return cast(InputT, bound)
+
+
+class CompiledExecutionNode(Protocol):
+    """Executable runtime node compiled from a semantic primitive."""
+
+    metadata: ExecutionNodeMetadata
+
+    async def execute(
+        self,
+        outputs: Mapping[str, RuntimeValue],
+        context: ExecutionContext,
+    ) -> RuntimeValue:
+        """Execute the node against resolved upstream outputs."""
+
+
+class PluginExecutionHandler(Protocol[InputT_contra, OutputT_co]):
+    """Runtime contract for executable plugin node handlers."""
+
+    async def execute(
+        self,
+        inputs: InputT_contra,
+        context: ExecutionContext,
+    ) -> OutputT_co:
+        """Execute the plugin-owned node and return its output."""
+
+
+@dataclass(slots=True, frozen=True)
+class CompiledPluginNode(Generic[InputT, OutputT]):
+    """Executable runtime node compiled from a plugin primitive."""
+
+    metadata: ExecutionNodeMetadata
+    handler: PluginExecutionHandler[InputT, OutputT]
+    input_adapter: InputAdapter[InputT]
+    metrics: tuple[OutputMetricSpec[object], ...] = ()
+
+    async def execute(
+        self,
+        outputs: Mapping[str, RuntimeValue],
+        context: ExecutionContext,
+    ) -> RuntimeValue:
+        typed_inputs = self.input_adapter.bind(outputs)
+        record_resolved_inputs(context=context, metadata=self.metadata, inputs=typed_inputs)
+        output = await self.handler.execute(typed_inputs, context)
+        emit_metric_batch(
+            context.metrics,
+            derive_output_metrics(
+                output=output,
+                context=context.metric_context(),
+                specs=self.metrics,
+            ),
+        )
+        return cast(RuntimeValue, output)
+
+
+def summarize_runtime_value(value: RuntimeValue) -> dict[str, JsonValue]:
+    """Summarize runtime values into recorder-safe JSON payloads."""
+
+    if value is None:
+        return {"type": "None"}
+    if isinstance(value, dict):
+        return {"type": "dict", "keys": [str(key) for key in sorted(value.keys())]}
+    if isinstance(value, list):
+        return {"type": "list", "length": len(value)}
+    return {"type": type(value).__name__}
+
+
+def record_resolved_inputs(
+    *,
+    context: ExecutionContext,
+    metadata: ExecutionNodeMetadata,
+    inputs: object,
+) -> None:
+    """Record the concrete input payload bound for one executable node."""
+
+    context.recorder.record(
+        run_id=context.run_id,
+        node_id=metadata.node_id,
+        event_type=NODE_INPUTS_RESOLVED,
+        timestamp_ms=context.clock.now_ms(),
+        payload={
+            "input_keys": [dependency for dependency in metadata.dependencies],
+            "inputs": serialize_runtime_value(inputs),
+        },
+    )

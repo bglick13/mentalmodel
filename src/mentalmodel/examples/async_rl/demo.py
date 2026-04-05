@@ -16,14 +16,28 @@ from mentalmodel.core import (
     InvariantResult,
     Join,
     JoinReducer,
+    MetricContext,
+    MetricExtractor,
+    MetricObservation,
     Parallel,
     Ref,
     Workflow,
+    extract_output_metrics,
+    infer_output_metrics,
 )
 from mentalmodel.core.models import ActorResult
+from mentalmodel.observability.metrics import MetricDefinition, MetricKind
 from mentalmodel.plugins.runtime_context import RuntimeContext
 from mentalmodel.runtime.context import ExecutionContext
-from mentalmodel.testing import execute_program, hypothesis_property_check
+from mentalmodel.testing import (
+    assert_aligned_key_sets,
+    assert_causal_order,
+    assert_monotonic_non_decreasing,
+    execute_program,
+    hypothesis_property_check,
+    invariant_fail,
+    invariant_pass,
+)
 
 
 class BatchSourceInputs(TypedDict):
@@ -115,6 +129,51 @@ class RefreshOutput(TypedDict):
 
 class InvariantInputs(TypedDict):
     rollout_join: RolloutJoinOutput
+
+
+@dataclass(slots=True, frozen=True)
+class RewardSummaryMetrics(MetricExtractor[RewardScores]):
+    metric_prefix: str
+
+    def extract(
+        self,
+        output: RewardScores,
+        context: MetricContext,
+    ) -> tuple[MetricObservation, ...]:
+        if not output:
+            return tuple()
+        values = list(output.values())
+        mean_value = sum(values) / len(values)
+        base_attributes = context.default_attributes()
+        return (
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.mean",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Mean reward across sampled rollouts.",
+                ),
+                value=mean_value,
+                attributes=dict(base_attributes),
+            ),
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.max",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Maximum reward across sampled rollouts.",
+                ),
+                value=max(values),
+                attributes=dict(base_attributes),
+            ),
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.count",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Number of scored rollouts in one reward pass.",
+                ),
+                value=len(values),
+                attributes=dict(base_attributes),
+            ),
+        )
 
 
 @dataclass(slots=True)
@@ -294,11 +353,19 @@ class PolicyStalenessChecker(InvariantChecker[InvariantInputs, int]):
         rollout = inputs["rollout_join"]
         sampled = rollout["sampled_policy_version"]
         current = rollout["current_policy_version"]
-        delta = abs(current - sampled)
-        return InvariantResult(
-            passed=delta <= self.max_off_policy_steps,
-            details={"sampled_policy_version": sampled, "current_policy_version": current},
-        )
+        details = {
+            "sampled_policy_version": sampled,
+            "current_policy_version": current,
+        }
+        try:
+            assert_causal_order(
+                sampled,
+                current,
+                max_lag=self.max_off_policy_steps,
+            )
+        except AssertionError:
+            return invariant_fail(details=details)
+        return invariant_pass(details=details)
 
 
 AsyncRlNode: TypeAlias = (
@@ -362,11 +429,25 @@ def build_program(
                                 "pangram_reward",
                                 handler=PangramScorer(),
                                 inputs=[Ref("sample_policy")],
+                                metrics=[
+                                    extract_output_metrics(
+                                        RewardSummaryMetrics(
+                                            metric_prefix="mentalmodel.demo.reward.pangram"
+                                        )
+                                    )
+                                ],
                             ),
                             Effect[RewardInputs, RewardScores](
                                 "quality_reward",
                                 handler=QualityScorer(),
                                 inputs=[Ref("sample_policy")],
+                                metrics=[
+                                    extract_output_metrics(
+                                        RewardSummaryMetrics(
+                                            metric_prefix="mentalmodel.demo.reward.quality"
+                                        )
+                                    )
+                                ],
                             ),
                             Effect[RewardInputs, KLPrefetchOutput](
                                 "kl_prefetch",
@@ -397,6 +478,11 @@ def build_program(
                         "learner_update",
                         handler=LearnerUpdate(),
                         inputs=[Ref("rollout_join")],
+                        metrics=[
+                            infer_output_metrics(
+                                prefix="mentalmodel.demo.learner_update"
+                            )
+                        ],
                     ),
                     Effect[RefreshInputs, RefreshOutput](
                         "refresh_sampler",
@@ -440,12 +526,14 @@ def property_rollout_scores_align(
     assert isinstance(kl_prefetch, dict)
     assert sample_policy["sampled_policy_version"] == rollout_join["sampled_policy_version"]
 
-    assert len(pangram_scores) == expected_count
-    assert len(quality_scores) == expected_count
-    assert len(kl_prefetch) == expected_count
-    assert set(pangram_scores.keys()) == sample_keys
-    assert set(quality_scores.keys()) == sample_keys
-    assert set(kl_prefetch.keys()) == sample_keys
+    aligned = assert_aligned_key_sets(
+        pangram_scores,
+        quality_scores,
+        kl_prefetch,
+        expected_keys=sample_keys,
+        labels=("pangram_scores", "quality_scores", "kl_prefetch"),
+    )
+    assert len(aligned) == expected_count
 
 
 @hypothesis_property_check(
@@ -471,6 +559,21 @@ def property_staleness_budget_is_enforced(
         invariant = result.outputs["staleness_invariant"]
         assert isinstance(invariant, InvariantResult)
         assert invariant.passed
+        rollout_join = result.outputs["rollout_join"]
+        learner_update = result.outputs["learner_update"]
+        refresh_sampler = result.outputs["refresh_sampler"]
+        assert isinstance(rollout_join, dict)
+        assert isinstance(learner_update, dict)
+        assert isinstance(refresh_sampler, dict)
+        assert_monotonic_non_decreasing(
+            [
+                rollout_join["sampled_policy_version"],
+                rollout_join["current_policy_version"],
+                learner_update["updated_policy_version"],
+                refresh_sampler["refreshed_to_policy_version"],
+            ],
+            label="policy version flow",
+        )
         return
 
     from mentalmodel.runtime import InvariantViolationError

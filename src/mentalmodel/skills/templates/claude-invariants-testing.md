@@ -8,6 +8,10 @@ description: Use when adding or debugging invariants, property checks, or verifi
 - add invariants at real semantic boundaries
 - make compared values explicit in invariant inputs
 - use Hypothesis when varying inputs exposes structural bugs
+- use reusable helpers before bespoke assertions:
+  `assert_aligned_key_sets(...)`, `assert_causal_order(...)`,
+  `assert_monotonic_non_decreasing(...)`, and
+  `assert_runtime_boundary_crossings(...)`
 - read `invariants.md` first when debugging invariant issues
 - inspect `.runs/.../outputs.json` and `records.jsonl` to confirm what the
   invariant actually saw at runtime

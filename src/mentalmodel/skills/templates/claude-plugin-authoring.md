@@ -9,3 +9,5 @@ description: Use when adding or modifying mentalmodel plugins. Covers plugin reg
 - lower only into canonical IR
 - keep provenance explicit in node metadata
 - prove the plugin through lowering, analysis, docs, and tests
+- if the plugin owns runtime behavior, compile it through the executable plugin
+  path so it participates in records, spans, metrics, and `.runs`

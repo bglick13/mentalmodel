@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import cast
@@ -17,15 +17,34 @@ from mentalmodel.analysis import run_analysis
 from mentalmodel.core.interfaces import NamedPrimitive
 from mentalmodel.core.workflow import Workflow
 from mentalmodel.docs import render_markdown_artifacts, render_mermaid
+from mentalmodel.doctor import DoctorStatus, build_doctor_report
 from mentalmodel.errors import EntrypointLoadError, MentalModelError
+from mentalmodel.examples.agent_tool_use import (
+    DEFAULT_OUTPUT_DIRNAME as AGENT_TOOL_USE_OUTPUT_DIRNAME,
+)
+from mentalmodel.examples.agent_tool_use import (
+    expected_artifact_names as expected_agent_tool_use_artifact_names,
+)
+from mentalmodel.examples.agent_tool_use import (
+    generate_demo_artifacts as generate_agent_tool_use_artifacts,
+)
+from mentalmodel.examples.agent_tool_use.demo import build_program as build_agent_tool_use_demo
 from mentalmodel.examples.async_rl import (
-    DEFAULT_OUTPUT_DIRNAME,
+    DEFAULT_OUTPUT_DIRNAME as ASYNC_RL_OUTPUT_DIRNAME,
+)
+from mentalmodel.examples.async_rl import (
     expected_artifact_names,
     generate_demo_artifacts,
 )
 from mentalmodel.examples.async_rl.demo import build_program as build_async_rl_demo
+from mentalmodel.examples.autoresearch_sorting.demo import (
+    build_program as build_autoresearch_sorting_demo,
+)
+from mentalmodel.integrations.autoresearch import write_autoresearch_bundle
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.schemas import EntryPointSpec
+from mentalmodel.observability import load_tracing_config, write_otel_demo
+from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
     apply_run_repairs,
     list_run_summaries,
@@ -38,7 +57,7 @@ from mentalmodel.runtime.runs import (
     resolve_run_summary,
 )
 from mentalmodel.skills import build_install_plan, install_skills
-from mentalmodel.testing import run_verification
+from mentalmodel.testing import execute_program, run_verification
 
 
 def parse_entrypoint(raw: str) -> EntryPointSpec:
@@ -257,6 +276,144 @@ def run_verify(
     return 0 if report.success else 1
 
 
+def run_replay(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str,
+    run_id: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Replay one persisted run as a semantic timeline."""
+
+    report = build_replay_report(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    if json_output:
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+        return 0
+
+    console = Console()
+    summary = Table(title="mentalmodel replay")
+    summary.add_column("Field")
+    summary.add_column("Value")
+    for field, value in (
+        ("Graph", report.summary.graph_id),
+        ("Run", report.summary.run_id),
+        ("Schema", str(report.summary.schema_version)),
+        ("Success", "yes" if report.summary.success else "no"),
+        (
+            "Verification",
+            "yes"
+            if report.verification_success is True
+            else "no" if report.verification_success is False else "unknown",
+        ),
+        ("Events", str(len(report.events))),
+        ("Nodes", str(len(report.node_summaries))),
+        ("Runtime Error", report.runtime_error or ""),
+    ):
+        summary.add_row(field, value)
+    console.print(summary)
+
+    events = Table(title="Replay Events")
+    events.add_column("Seq", justify="right")
+    events.add_column("Node")
+    events.add_column("Event")
+    events.add_column("Timestamp", justify="right")
+    events.add_column("Payload")
+    for event in report.events:
+        events.add_row(
+            str(event.sequence),
+            event.node_id,
+            event.event_type,
+            str(event.timestamp_ms),
+            json.dumps(event.payload, sort_keys=True),
+        )
+    console.print(events)
+
+    nodes = Table(title="Replay Node Summary")
+    nodes.add_column("Node")
+    nodes.add_column("Events", justify="right")
+    nodes.add_column("First Seq", justify="right")
+    nodes.add_column("Last Seq", justify="right")
+    nodes.add_column("Last Event")
+    nodes.add_column("Invariant")
+    for node_summary in report.node_summaries:
+        nodes.add_row(
+            node_summary.node_id,
+            str(node_summary.event_count),
+            str(node_summary.first_sequence or ""),
+            str(node_summary.last_sequence or ""),
+            node_summary.last_event_type or "",
+            (
+                "pass"
+                if node_summary.invariant_passed is True
+                else "fail" if node_summary.invariant_passed is False else ""
+            ),
+        )
+    console.print(nodes)
+    return 0
+
+
+def run_otel_show_config(*, json_output: bool = False) -> int:
+    """Show the resolved tracing configuration for the current process."""
+
+    config = load_tracing_config()
+    payload = {
+        "service_name": config.service_name,
+        "service_namespace": config.service_namespace,
+        "service_version": config.service_version,
+        "mode": config.mode.value,
+        "otlp_endpoint": config.otlp_endpoint,
+        "otlp_headers": config.otlp_headers,
+        "otlp_insecure": config.otlp_insecure,
+        "mirror_to_disk": config.mirror_to_disk,
+        "capture_local_spans": config.capture_local_spans,
+        "external_sink_configured": config.external_sink_configured,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel otel config")
+    table.add_column("Field")
+    table.add_column("Value")
+    for field, value in payload.items():
+        rendered = (
+            json.dumps(value, sort_keys=True)
+            if isinstance(value, dict)
+            else str(value)
+        )
+        table.add_row(field, rendered)
+    Console().print(table)
+    return 0
+
+
+def run_otel_write_demo(
+    *,
+    stack: str,
+    output_dir: Path,
+    json_output: bool = False,
+) -> int:
+    """Write one self-hosted OpenTelemetry demo stack to disk."""
+
+    written = write_otel_demo(output_dir=output_dir, stack=stack)
+    payload = {
+        "stack": stack,
+        "output_dir": str(output_dir),
+        "files": [str(path) for path in written],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel otel demo")
+    table.add_column("Stack")
+    table.add_column("File")
+    for path in written:
+        table.add_row(stack, str(path))
+    Console().print(table)
+    Console().print(f"[green]wrote[/green] {output_dir}")
+    return 0
+
+
 def run_install_skills_command(
     agent: str,
     *,
@@ -281,6 +438,53 @@ def run_install_skills_command(
     return 0
 
 
+def run_doctor(
+    *,
+    agent: str,
+    target_dir: Path | None = None,
+    runs_dir: Path | None = None,
+    entrypoint: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Run lightweight setup and debugging preflight checks."""
+
+    report = build_doctor_report(
+        agent=agent,
+        target_dir=target_dir,
+        runs_dir=runs_dir,
+        entrypoint=entrypoint,
+    )
+    if json_output:
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+        return 0 if report.success else 1
+
+    console = Console()
+    summary = Table(title="mentalmodel doctor")
+    summary.add_column("Check")
+    summary.add_column("Status")
+    summary.add_column("Message")
+    for check in report.checks:
+        status_style = {
+            DoctorStatus.PASS: "[green]pass[/green]",
+            DoctorStatus.WARN: "[yellow]warn[/yellow]",
+            DoctorStatus.FAIL: "[red]fail[/red]",
+            DoctorStatus.SKIP: "[cyan]skip[/cyan]",
+        }[check.status]
+        summary.add_row(check.name, status_style, check.message)
+    console.print(summary)
+
+    details = Table(title="Doctor Details")
+    details.add_column("Check")
+    details.add_column("Details")
+    for check in report.checks:
+        if not check.details:
+            continue
+        details.add_row(check.name, json.dumps(check.details, sort_keys=True))
+    if details.row_count > 0:
+        console.print(details)
+    return 0 if report.success else 1
+
+
 def run_demo_command(
     name: str,
     *,
@@ -291,22 +495,70 @@ def run_demo_command(
 ) -> int:
     """Run or materialize one packaged reference demo."""
 
-    if name != "async-rl":
-        raise EntrypointLoadError(f"Unknown demo {name!r}. Expected 'async-rl'.")
+    if name == "async-rl":
+        return _run_packaged_demo(
+            name=name,
+            build_program=build_async_rl_demo,
+            module_name="mentalmodel.examples.async_rl.demo",
+            default_output_dirname=ASYNC_RL_OUTPUT_DIRNAME,
+            artifact_names=expected_artifact_names(),
+            generate_artifacts=generate_demo_artifacts,
+            write_artifacts=write_artifacts,
+            output_dir=output_dir,
+            runs_dir=runs_dir,
+            json_output=json_output,
+        )
+    if name == "agent-tool-use":
+        return _run_packaged_demo(
+            name=name,
+            build_program=build_agent_tool_use_demo,
+            module_name="mentalmodel.examples.agent_tool_use.demo",
+            default_output_dirname=AGENT_TOOL_USE_OUTPUT_DIRNAME,
+            artifact_names=expected_agent_tool_use_artifact_names(),
+            generate_artifacts=generate_agent_tool_use_artifacts,
+            write_artifacts=write_artifacts,
+            output_dir=output_dir,
+            runs_dir=runs_dir,
+            json_output=json_output,
+        )
+    if name == "autoresearch-sorting":
+        return _run_autoresearch_sorting_demo(
+            write_artifacts=write_artifacts,
+            output_dir=output_dir,
+            runs_dir=runs_dir,
+            json_output=json_output,
+        )
+    raise EntrypointLoadError(
+        f"Unknown demo {name!r}. Expected 'async-rl', 'agent-tool-use', or "
+        "'autoresearch-sorting'."
+    )
 
-    graph = lower_program(build_async_rl_demo())
+
+def _run_packaged_demo(
+    *,
+    name: str,
+    build_program: Callable[[], Workflow[NamedPrimitive]],
+    module_name: str,
+    default_output_dirname: str,
+    artifact_names: tuple[str, ...],
+    generate_artifacts: Callable[[], dict[str, str]],
+    write_artifacts: bool,
+    output_dir: Path | None,
+    runs_dir: Path | None,
+    json_output: bool,
+) -> int:
+    graph = lower_program(build_program())
     report = run_analysis(graph)
-    demo_module = importlib.import_module("mentalmodel.examples.async_rl.demo")
+    demo_module = importlib.import_module(module_name)
     verification = run_verification(
-        build_async_rl_demo(),
+        build_program(),
         module=demo_module,
         runs_dir=runs_dir,
     )
-    artifact_dir = output_dir or (Path.cwd() / DEFAULT_OUTPUT_DIRNAME)
-    artifact_names = expected_artifact_names()
+    artifact_dir = output_dir or (Path.cwd() / default_output_dirname)
 
     if write_artifacts:
-        generated = generate_demo_artifacts()
+        generated = generate_artifacts()
         artifact_dir.mkdir(parents=True, exist_ok=True)
         for artifact_name, content in generated.items():
             (artifact_dir / artifact_name).write_text(content + "\n", encoding="utf-8")
@@ -362,6 +614,86 @@ def run_demo_command(
     return 0 if verification.success and not report.has_errors else 1
 
 
+def _run_autoresearch_sorting_demo(
+    *,
+    write_artifacts: bool,
+    output_dir: Path | None,
+    runs_dir: Path | None,
+    json_output: bool,
+) -> int:
+    program = build_autoresearch_sorting_demo()
+    verification = run_verification(program, runs_dir=runs_dir)
+    execution = execute_program(program)
+    output = cast(dict[str, object], execution.outputs["autoresearch_sorting"])
+    artifact_dir = output_dir or (Path.cwd() / "mentalmodel-demo-autoresearch-sorting")
+    bundle = write_autoresearch_bundle(artifact_dir) if write_artifacts else None
+    payload = {
+        "demo": "autoresearch-sorting",
+        "objective_name": output["objective_name"],
+        "graph_id": execution.graph.graph_id,
+        "best_candidate": output["best_candidate"],
+        "best_score": output["best_score"],
+        "metric_name": output["metric_name"],
+        "results": output["candidate_results"],
+        "run_artifacts_dir": verification.runtime.run_artifacts_dir,
+        "verification": verification.as_dict(),
+        "wrote_artifacts": write_artifacts,
+        "artifact_dir": str(artifact_dir),
+        "bundle_files": (
+            []
+            if bundle is None
+            else [
+                str(bundle.program_path),
+                str(bundle.objective_path),
+                str(bundle.candidates_path),
+            ]
+        ),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    console = Console()
+    summary = Table(title="mentalmodel demo summary")
+    summary.add_column("Demo")
+    summary.add_column("Objective")
+    summary.add_column("Best Candidate")
+    summary.add_column("Score", justify="right")
+    summary.add_column("Metric")
+    summary.add_row(
+        "autoresearch-sorting",
+        str(output["objective_name"]),
+        str(output["best_candidate"]),
+        str(output["best_score"]),
+        str(output["metric_name"]),
+    )
+    console.print(summary)
+
+    results = Table(title="Autoresearch Candidate Results")
+    results.add_column("Candidate")
+    results.add_column("Success")
+    results.add_column("Verification")
+    results.add_column("Score", justify="right")
+    candidate_results = cast(list[dict[str, object]], output["candidate_results"])
+    for result in candidate_results:
+        results.add_row(
+            str(result["candidate_label"]),
+            "yes" if bool(result["success"]) else "no",
+            "yes" if bool(result["verification_success"]) else "no",
+            str(result["score"]),
+        )
+    console.print(results)
+
+    if bundle is not None:
+        console.print(f"[green]wrote[/green] {artifact_dir}")
+    else:
+        console.print(
+            "[yellow]Bundle not written. Use --write-artifacts to materialize program.md and "
+            "objective metadata.[/yellow]"
+        )
+    return 0
+
+
 def run_runs_list(
     *,
     runs_dir: Path | None = None,
@@ -381,13 +713,15 @@ def run_runs_list(
                         "graph_id": summary.graph_id,
                         "run_id": summary.run_id,
                         "created_at_ms": summary.created_at_ms,
-                        "success": summary.success,
-                        "record_count": summary.record_count,
-                        "output_count": summary.output_count,
-                        "state_count": summary.state_count,
-                        "run_dir": str(summary.run_dir),
-                    }
-                    for summary in summaries
+                    "success": summary.success,
+                    "record_count": summary.record_count,
+                    "output_count": summary.output_count,
+                    "state_count": summary.state_count,
+                    "trace_mode": summary.trace_mode,
+                    "trace_mirror_to_disk": summary.trace_mirror_to_disk,
+                    "run_dir": str(summary.run_dir),
+                }
+                for summary in summaries
                 ],
                 indent=2,
                 sort_keys=True,
@@ -402,6 +736,7 @@ def run_runs_list(
     table.add_column("Records", justify="right")
     table.add_column("Outputs", justify="right")
     table.add_column("State", justify="right")
+    table.add_column("Trace")
     table.add_column("Path")
     for summary in summaries:
         table.add_row(
@@ -411,6 +746,7 @@ def run_runs_list(
             str(summary.record_count),
             str(summary.output_count),
             str(summary.state_count),
+            summary.trace_mode,
             str(summary.run_dir),
         )
     if not summaries:
@@ -443,6 +779,11 @@ def run_runs_show(
         "output_count": summary.output_count,
         "state_count": summary.state_count,
         "trace_sink_configured": summary.trace_sink_configured,
+        "trace_mode": summary.trace_mode,
+        "trace_otlp_endpoint": summary.trace_otlp_endpoint,
+        "trace_mirror_to_disk": summary.trace_mirror_to_disk,
+        "trace_capture_local_spans": summary.trace_capture_local_spans,
+        "trace_service_name": summary.trace_service_name,
         "run_dir": str(summary.run_dir),
         "files": {
             "summary": str(summary.run_dir / "summary.json"),
@@ -471,7 +812,10 @@ def run_runs_show(
         ("Records", str(summary.record_count)),
         ("Outputs", str(summary.output_count)),
         ("State", str(summary.state_count)),
+        ("Trace Mode", summary.trace_mode),
+        ("Trace Endpoint", summary.trace_otlp_endpoint or ""),
         ("Trace Sink", "configured" if summary.trace_sink_configured else "disk fallback"),
+        ("Mirror To Disk", "yes" if summary.trace_mirror_to_disk else "no"),
         ("Run Dir", str(summary.run_dir)),
     ):
         summary_table.add_row(field, value)
@@ -512,6 +856,8 @@ def run_runs_latest(
         "record_count": summary.record_count,
         "output_count": summary.output_count,
         "state_count": summary.state_count,
+        "trace_mode": summary.trace_mode,
+        "trace_mirror_to_disk": summary.trace_mirror_to_disk,
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -525,6 +871,7 @@ def run_runs_latest(
         ("Run", summary.run_id),
         ("Success", "yes" if summary.success else "no"),
         ("Created", str(summary.created_at_ms)),
+        ("Trace Mode", summary.trace_mode),
         ("Run Dir", str(summary.run_dir)),
     ):
         table.add_row(field, value)
@@ -594,6 +941,111 @@ def run_runs_repair(
         console.print(table)
     else:
         console.print("[green]No repairs needed.[/green]")
+    return 0
+
+
+def run_runs_diff(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str,
+    run_a: str,
+    run_b: str,
+    node_id: str | None = None,
+    invariant: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Compare two persisted run bundles from the same graph."""
+
+    diff = build_run_diff(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_a=run_a,
+        run_b=run_b,
+        node_id=node_id,
+        invariant=invariant,
+    )
+    if json_output:
+        print(json.dumps(diff.as_dict(), indent=2, sort_keys=True))
+        return 0
+
+    console = Console()
+    summary = Table(title="mentalmodel runs diff")
+    summary.add_column("Field")
+    summary.add_column("Value")
+    for field, value in (
+        ("Graph", diff.graph_id),
+        ("Run A", diff.run_a.run_id),
+        ("Run B", diff.run_b.run_id),
+        ("Differs", "yes" if diff.differs else "no"),
+        ("State Equal", "yes" if diff.state_equal else "no"),
+        (
+            "Verification A",
+            "yes"
+            if diff.verification_success_run_a is True
+            else "no" if diff.verification_success_run_a is False else "unknown",
+        ),
+        (
+            "Verification B",
+            "yes"
+            if diff.verification_success_run_b is True
+            else "no" if diff.verification_success_run_b is False else "unknown",
+        ),
+    ):
+        summary.add_row(field, value)
+    console.print(summary)
+
+    node_table = Table(title="Node Diffs")
+    node_table.add_column("Node")
+    node_table.add_column("Differs")
+    node_table.add_column("Events")
+    node_table.add_column("Inputs")
+    node_table.add_column("Outputs")
+    node_table.add_column("Missing")
+    for node_diff in diff.node_diffs:
+        missing = []
+        if node_diff.missing_in_run_a:
+            missing.append("A")
+        if node_diff.missing_in_run_b:
+            missing.append("B")
+        node_table.add_row(
+            node_diff.node_id,
+            "yes" if node_diff.differs else "no",
+            "same" if node_diff.events_equal else "different",
+            _comparison_status(node_diff.inputs_equal),
+            _comparison_status(node_diff.outputs_equal),
+            ",".join(missing),
+        )
+    console.print(node_table)
+
+    if diff.invariant_diffs:
+        invariant_table = Table(title="Invariant Diffs")
+        invariant_table.add_column("Node")
+        invariant_table.add_column("Outcome A")
+        invariant_table.add_column("Outcome B")
+        invariant_table.add_column("Differs")
+        for invariant_diff in diff.invariant_diffs:
+            invariant_table.add_row(
+                invariant_diff.node_id,
+                _invariant_outcome_label(invariant_diff.outcome_run_a),
+                _invariant_outcome_label(invariant_diff.outcome_run_b),
+                "yes" if invariant_diff.differs else "no",
+            )
+        console.print(invariant_table)
+
+    if not diff.state_equal:
+        console.print(
+            Panel.fit(
+                json.dumps(
+                    {
+                        "state_run_a": diff.state_run_a,
+                        "state_run_b": diff.state_run_b,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                title="State Diff",
+            )
+        )
     return 0
 
 
@@ -807,7 +1259,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional root directory for persisted run artifacts. Defaults to ./.runs.",
     )
     verify.add_argument("--json", action="store_true", help="Emit JSON output.")
-    subparsers.add_parser("replay", help="Replay a recorded execution.")
+    replay = subparsers.add_parser("replay", help="Replay a recorded execution.")
+    replay.add_argument("--runs-dir", type=Path)
+    replay.add_argument("--graph-id", required=True)
+    replay.add_argument("--run-id")
+    replay.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    otel = subparsers.add_parser("otel", help="Inspect or materialize OTEL configuration.")
+    otel_subparsers = otel.add_subparsers(dest="otel_command")
+    otel_subparsers.required = True
+
+    otel_show = otel_subparsers.add_parser("show-config", help="Show resolved tracing config.")
+    otel_show.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    otel_demo = otel_subparsers.add_parser(
+        "write-demo",
+        help="Write a self-hosted OTEL demo stack.",
+    )
+    otel_demo.add_argument("--stack", choices=["lgtm", "jaeger"], default="lgtm")
+    otel_demo.add_argument("--output-dir", type=Path, required=True)
+    otel_demo.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs = subparsers.add_parser("runs", help="Inspect persisted run artifacts.")
     runs_subparsers = runs.add_subparsers(dest="runs_command")
@@ -871,12 +1342,36 @@ def build_parser() -> argparse.ArgumentParser:
     runs_repair.add_argument("--dry-run", action="store_true")
     runs_repair.add_argument("--json", action="store_true", help="Emit JSON output.")
 
+    runs_diff = runs_subparsers.add_parser(
+        "diff",
+        help="Compare two persisted run bundles.",
+    )
+    runs_diff.add_argument("--runs-dir", type=Path)
+    runs_diff.add_argument("--graph-id", required=True)
+    runs_diff.add_argument("--run-a", required=True)
+    runs_diff.add_argument("--run-b", required=True)
+    runs_diff.add_argument("--node-id")
+    runs_diff.add_argument("--invariant")
+    runs_diff.add_argument("--json", action="store_true", help="Emit JSON output.")
+
     demo = subparsers.add_parser("demo", help="Run or inspect a reference demo.")
-    demo.add_argument("name", nargs="?", default="async-rl", choices=["async-rl"])
+    demo.add_argument(
+        "name",
+        nargs="?",
+        default="async-rl",
+        choices=["async-rl", "agent-tool-use", "autoresearch-sorting"],
+    )
     demo.add_argument("--write-artifacts", action="store_true")
     demo.add_argument("--output-dir", type=Path)
     demo.add_argument("--runs-dir", type=Path)
     demo.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    doctor = subparsers.add_parser("doctor", help="Run agent/debugging preflight checks.")
+    doctor.add_argument("--agent", default="codex")
+    doctor.add_argument("--target-dir", type=Path)
+    doctor.add_argument("--runs-dir", type=Path)
+    doctor.add_argument("--entrypoint")
+    doctor.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     install_skills = subparsers.add_parser(
         "install-skills",
@@ -907,6 +1402,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json_output=args.json,
                 runs_dir=args.runs_dir,
             )
+        if args.command == "replay":
+            return run_replay(
+                runs_dir=args.runs_dir,
+                graph_id=args.graph_id,
+                run_id=args.run_id,
+                json_output=args.json,
+            )
+        if args.command == "otel":
+            if args.otel_command == "show-config":
+                return run_otel_show_config(json_output=args.json)
+            if args.otel_command == "write-demo":
+                return run_otel_write_demo(
+                    stack=args.stack,
+                    output_dir=args.output_dir,
+                    json_output=args.json,
+                )
         if args.command == "install-skills":
             return run_install_skills_command(
                 args.agent,
@@ -977,12 +1488,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     dry_run=args.dry_run,
                     json_output=args.json,
                 )
+            if args.runs_command == "diff":
+                return run_runs_diff(
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_a=args.run_a,
+                    run_b=args.run_b,
+                    node_id=args.node_id,
+                    invariant=args.invariant,
+                    json_output=args.json,
+                )
         if args.command == "demo":
             return run_demo_command(
                 args.name,
                 write_artifacts=args.write_artifacts,
                 output_dir=args.output_dir,
                 runs_dir=args.runs_dir,
+                json_output=args.json,
+            )
+        if args.command == "doctor":
+            return run_doctor(
+                agent=args.agent,
+                target_dir=args.target_dir,
+                runs_dir=args.runs_dir,
+                entrypoint=args.entrypoint,
                 json_output=args.json,
             )
         print(f"mentalmodel scaffold command selected: {args.command}")
@@ -1009,6 +1538,22 @@ def _verification_success(payload: dict[str, object] | None) -> bool | None:
         return None
     success = payload.get("success")
     return success if isinstance(success, bool) else None
+
+
+def _comparison_status(value: bool | None) -> str:
+    if value is True:
+        return "same"
+    if value is False:
+        return "different"
+    return "n/a"
+
+
+def _invariant_outcome_label(value: bool | None) -> str:
+    if value is True:
+        return "pass"
+    if value is False:
+        return "fail"
+    return "unknown"
 
 
 if __name__ == "__main__":

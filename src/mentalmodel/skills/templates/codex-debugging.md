@@ -12,13 +12,17 @@ generated artifact.
 
 1. `mentalmodel check`
 2. `mentalmodel docs`
-3. `mentalmodel verify`
-4. `mentalmodel runs latest --graph-id <graph_id>`
-5. `mentalmodel runs inputs --graph-id <graph_id> --node-id <node_id>`
-6. `mentalmodel runs outputs --graph-id <graph_id> --node-id <node_id>`
-7. `mentalmodel runs trace --graph-id <graph_id> --node-id <node_id>`
-8. If bundle metadata looks stale, run `mentalmodel runs repair --dry-run`
-9. Inspect authored workflow and handler implementations
+3. `mentalmodel doctor`
+4. `mentalmodel verify`
+5. `mentalmodel runs latest --graph-id <graph_id>`
+6. `mentalmodel otel show-config` if tracing/export looks suspicious
+7. `mentalmodel replay --graph-id <graph_id>`
+8. `mentalmodel runs inputs --graph-id <graph_id> --node-id <node_id>`
+9. `mentalmodel runs outputs --graph-id <graph_id> --node-id <node_id>`
+10. `mentalmodel runs trace --graph-id <graph_id> --node-id <node_id>`
+11. `mentalmodel runs diff --graph-id <graph_id> --run-a <run_a> --run-b <run_b>` when you need change-focused debugging
+12. If bundle metadata looks stale, run `mentalmodel runs repair --dry-run`
+13. Inspect authored workflow and handler implementations
 
 ## What to inspect
 
@@ -30,6 +34,12 @@ generated artifact.
 - OTel detail: `otel-spans.jsonl` when no external sink is configured
 - `runs inputs` shows the exact bound input payload persisted by
   `node.inputs_resolved`
+- `replay` shows the full semantic event timeline for one run
+- `runs diff` compares two persisted runs and highlights invariant and payload
+  drift
+- `otel show-config` reveals the exact resolved tracing mode and endpoint
+- `otel write-demo --stack lgtm --output-dir ...` gives you a local OTEL UI
+  path quickly when you need to demo traces externally
 - `summary.json` now carries `schema_version`; old bundles can be normalized
   with `runs repair`
 
@@ -50,6 +60,15 @@ When a generated doc “looks wrong”:
 2. find the corresponding node in the authored workflow
 3. inspect the inputs to that node
 4. inspect the producers of those inputs
-5. use `runs inputs`, `runs outputs`, and `runs trace` for the node in question
-6. cross-check the runtime bundle in `.runs`
-7. decide whether the bug is in authoring, lowering, runtime execution, or docs
+5. use `replay` to understand the full run lifecycle
+6. use `runs inputs`, `runs outputs`, and `runs trace` for the node in question
+7. use `runs diff` if the regression is relative to an earlier run
+8. cross-check the runtime bundle in `.runs`
+9. decide whether the bug is in authoring, lowering, runtime execution, or docs
+
+## Recipe docs
+
+- `docs/recipes/structure-debugging.md`
+- `docs/recipes/invariant-debugging.md`
+- `docs/recipes/runtime-failure-debugging.md`
+- `docs/recipes/run-comparison.md`

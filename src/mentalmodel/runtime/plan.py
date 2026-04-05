@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeAlias, TypeVar, cast
+from typing import Generic, TypeAlias, TypeVar, cast
 
 from mentalmodel.core import Actor, Effect, Invariant, Join, Workflow
 from mentalmodel.core.interfaces import (
@@ -17,7 +17,13 @@ from mentalmodel.core.interfaces import (
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.lowering import lower_program
-from mentalmodel.observability.export import serialize_runtime_value
+from mentalmodel.observability.metrics import (
+    OutputMetricSpec,
+    cast_metric_specs,
+    derive_output_metrics,
+    emit_metric_batch,
+)
+from mentalmodel.plugins.registry import PluginRegistry, default_registry
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.errors import InvariantViolationError
 from mentalmodel.runtime.events import (
@@ -25,58 +31,22 @@ from mentalmodel.runtime.events import (
     EFFECT_INVOKED,
     INVARIANT_CHECKED,
     JOIN_RESOLVED,
-    NODE_INPUTS_RESOLVED,
     STATE_READ,
     STATE_TRANSITION,
 )
+from mentalmodel.runtime.execution import (
+    CompiledPluginNode,
+    ExecutionNodeMetadata,
+    InputAdapter,
+    MappingInputAdapter,
+    record_resolved_inputs,
+    summarize_runtime_value,
+)
 
 InputT = TypeVar("InputT")
-InputBoundT_co = TypeVar("InputBoundT_co", covariant=True)
 OutputT = TypeVar("OutputT")
 StateT = TypeVar("StateT")
 DetailT = TypeVar("DetailT", bound=JsonValue)
-
-
-@dataclass(slots=True, frozen=True)
-class ExecutionNodeMetadata:
-    """Executable node metadata derived from the canonical IR."""
-
-    node_id: str
-    kind: str
-    label: str
-    runtime_context: str | None
-    dependencies: tuple[str, ...]
-
-
-class InputAdapter(Protocol[InputBoundT_co]):
-    """Converts resolved upstream runtime values into a handler input shape."""
-
-    def bind(self, outputs: Mapping[str, RuntimeValue]) -> InputBoundT_co:
-        """Bind raw upstream outputs into the typed handler input."""
-
-
-@dataclass(slots=True, frozen=True)
-class MappingInputAdapter(Generic[InputT]):
-    """Default adapter that presents upstream outputs as a mapping."""
-
-    dependencies: tuple[str, ...]
-
-    def bind(self, outputs: Mapping[str, RuntimeValue]) -> InputT:
-        bound = {dependency: outputs[dependency] for dependency in self.dependencies}
-        return cast(InputT, bound)
-
-
-class CompiledExecutionNode(Protocol):
-    """Executable runtime node compiled from a semantic primitive."""
-
-    metadata: ExecutionNodeMetadata
-
-    async def execute(
-        self,
-        outputs: Mapping[str, RuntimeValue],
-        context: ExecutionContext,
-    ) -> RuntimeValue:
-        """Execute the node against resolved upstream outputs."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -85,6 +55,7 @@ class CompiledActorNode(Generic[InputT, OutputT, StateT]):
     handler: ActorHandler[InputT, StateT, OutputT]
     input_adapter: InputAdapter[InputT]
     state_key: str
+    metrics: tuple[OutputMetricSpec[object], ...] = ()
 
     async def execute(
         self,
@@ -118,6 +89,14 @@ class CompiledActorNode(Generic[InputT, OutputT, StateT]):
                     "to_state": summarize_runtime_value(cast(RuntimeValue, result.next_state)),
                 },
             )
+        emit_metric_batch(
+            context.metrics,
+            derive_output_metrics(
+                output=result.output,
+                context=context.metric_context(),
+                specs=self.metrics,
+            ),
+        )
         return cast(RuntimeValue, result.output)
 
 
@@ -126,6 +105,7 @@ class CompiledEffectNode(Generic[InputT, OutputT]):
     metadata: ExecutionNodeMetadata
     handler: Effect[InputT, OutputT]
     input_adapter: InputAdapter[InputT]
+    metrics: tuple[OutputMetricSpec[object], ...] = ()
 
     async def execute(
         self,
@@ -148,6 +128,14 @@ class CompiledEffectNode(Generic[InputT, OutputT]):
             event_type=EFFECT_COMPLETED,
             timestamp_ms=context.clock.now_ms(),
             payload={"output_type": type(output).__name__},
+        )
+        emit_metric_batch(
+            context.metrics,
+            derive_output_metrics(
+                output=output,
+                context=context.metric_context(),
+                specs=self.metrics,
+            ),
         )
         return cast(RuntimeValue, output)
 
@@ -213,6 +201,7 @@ PlanNode: TypeAlias = (
     | CompiledEffectNode[object, object]
     | CompiledJoinNode[object, object]
     | CompiledInvariantNode[object, JsonValue]
+    | CompiledPluginNode[object, object]
 )
 
 
@@ -235,12 +224,21 @@ class CompiledProgram:
     plan: ExecutionPlan
 
 
-def compile_program(program: Workflow[NamedPrimitive]) -> CompiledProgram:
+def compile_program(
+    program: Workflow[NamedPrimitive],
+    *,
+    registry: PluginRegistry | None = None,
+) -> CompiledProgram:
     """Compile authored primitives into a graph plus a typed execution plan."""
 
-    graph = lower_program(program)
+    resolved_registry = registry or default_registry()
+    graph = lower_program(program, registry=resolved_registry)
     primitives = index_primitives(program)
-    plan = build_execution_plan(graph=graph, primitives=primitives)
+    plan = build_execution_plan(
+        graph=graph,
+        primitives=primitives,
+        registry=resolved_registry,
+    )
     return CompiledProgram(program=program, graph=graph, plan=plan)
 
 
@@ -248,6 +246,7 @@ def build_execution_plan(
     *,
     graph: IRGraph,
     primitives: Mapping[str, NamedPrimitive],
+    registry: PluginRegistry,
 ) -> ExecutionPlan:
     """Build executable runtime nodes from a lowered graph and primitive index."""
 
@@ -255,11 +254,14 @@ def build_execution_plan(
     compiled_nodes: dict[str, PlanNode] = {}
 
     for node in graph.nodes:
-        if node.kind not in {"actor", "effect", "join", "invariant"}:
-            continue
         primitive = primitives.get(node.node_id)
         if primitive is None:
-            raise LoweringError(f"Missing primitive binding for node {node.node_id!r}.")
+            continue
+        if (
+            node.kind not in {"actor", "effect", "join", "invariant"}
+            and registry.find_executable_plugin(primitive) is None
+        ):
+            continue
         metadata = ExecutionNodeMetadata(
             node_id=node.node_id,
             kind=node.kind,
@@ -272,6 +274,7 @@ def build_execution_plan(
             metadata=metadata,
             primitive=primitive,
             input_adapter=adapter,
+            registry=registry,
         )
 
     return ExecutionPlan(nodes=compiled_nodes)
@@ -282,9 +285,11 @@ def compile_execution_node(
     metadata: ExecutionNodeMetadata,
     primitive: NamedPrimitive,
     input_adapter: MappingInputAdapter[object],
+    registry: PluginRegistry | None = None,
 ) -> PlanNode:
     """Compile one authored primitive into an executable runtime node."""
 
+    resolved_registry = registry or default_registry()
     if metadata.kind == "actor" and isinstance(primitive, Actor):
         return cast(
             PlanNode,
@@ -293,6 +298,7 @@ def compile_execution_node(
                 handler=primitive.handler,
                 input_adapter=input_adapter,
                 state_key=primitive.name,
+                metrics=cast_metric_specs(primitive.metrics),
             ),
         )
     if metadata.kind == "effect" and isinstance(primitive, Effect):
@@ -302,6 +308,7 @@ def compile_execution_node(
                 metadata=metadata,
                 handler=primitive,
                 input_adapter=input_adapter,
+                metrics=cast_metric_specs(primitive.metrics),
             ),
         )
     if metadata.kind == "join" and isinstance(primitive, Join):
@@ -320,6 +327,16 @@ def compile_execution_node(
                 metadata=metadata,
                 checker=primitive.checker,
                 severity=primitive.severity,
+                input_adapter=input_adapter,
+            ),
+        )
+    plugin = resolved_registry.find_executable_plugin(primitive)
+    if plugin is not None:
+        return cast(
+            PlanNode,
+            plugin.compile(
+                primitive=primitive,
+                metadata=metadata,
                 input_adapter=input_adapter,
             ),
         )
@@ -360,33 +377,17 @@ def build_data_dependencies(graph: IRGraph) -> dict[str, set[str]]:
     return dependencies
 
 
-def summarize_runtime_value(value: RuntimeValue) -> dict[str, JsonValue]:
-    """Summarize runtime values into recorder-safe JSON payloads."""
-
-    if value is None:
-        return {"type": "None"}
-    if isinstance(value, dict):
-        return {"type": "dict", "keys": [str(key) for key in sorted(value.keys())]}
-    if isinstance(value, list):
-        return {"type": "list", "length": len(value)}
-    return {"type": type(value).__name__}
-
-
-def record_resolved_inputs(
-    *,
-    context: ExecutionContext,
-    metadata: ExecutionNodeMetadata,
-    inputs: object,
-) -> None:
-    """Record the concrete input payload bound for one executable node."""
-
-    context.recorder.record(
-        run_id=context.run_id,
-        node_id=metadata.node_id,
-        event_type=NODE_INPUTS_RESOLVED,
-        timestamp_ms=context.clock.now_ms(),
-        payload={
-            "input_keys": [dependency for dependency in metadata.dependencies],
-            "inputs": serialize_runtime_value(inputs),
-        },
-    )
+__all__ = [
+    "CompiledActorNode",
+    "CompiledEffectNode",
+    "CompiledInvariantNode",
+    "CompiledJoinNode",
+    "CompiledProgram",
+    "ExecutionNodeMetadata",
+    "ExecutionPlan",
+    "MappingInputAdapter",
+    "PlanNode",
+    "build_execution_plan",
+    "compile_execution_node",
+    "compile_program",
+]

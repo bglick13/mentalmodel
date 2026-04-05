@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
 
-from mentalmodel.plugins.base import PrimitivePlugin
+from mentalmodel.plugins.base import ExecutablePrimitivePlugin, PrimitivePlugin
 
 
 @dataclass(slots=True)
@@ -22,12 +23,20 @@ class PluginRegistry:
                 return plugin
         return None
 
+    def find_executable_plugin(self, primitive: object) -> ExecutablePrimitivePlugin | None:
+        plugin = self.find_plugin(primitive)
+        if plugin is None or not hasattr(plugin, "compile"):
+            return None
+        return cast(ExecutablePrimitivePlugin, plugin)
+
 
 def default_registry() -> PluginRegistry:
     """Create the default registry used by lowering and CLI tools."""
 
+    from mentalmodel.integrations.autoresearch.plugin import AutoResearchPlugin
     from mentalmodel.plugins.runtime_context import RuntimeContextPlugin
 
     registry = PluginRegistry()
     registry.register(RuntimeContextPlugin())
+    registry.register(AutoResearchPlugin())
     return registry

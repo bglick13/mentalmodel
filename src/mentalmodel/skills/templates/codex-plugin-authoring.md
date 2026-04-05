@@ -13,6 +13,8 @@ Use this skill when creating or changing a `mentalmodel` extension primitive.
 - `supports()` must be precise and non-overlapping with other plugins.
 - `lower()` must emit canonical IR only.
 - Do not bypass `LoweringContext`; provenance must be stamped by lowering.
+- If the plugin owns runtime behavior, compile it through the executable plugin
+  path instead of bypassing the execution plan.
 
 ## Reference model
 
@@ -30,6 +32,8 @@ Use `RuntimeContextPlugin` as the reference shape:
 - docs surface plugin provenance
 - missing plugin registration fails lowering
 - provenance regressions fail analysis
+- executable plugins emit normal runtime records, spans, metrics, and `.runs`
+  artifacts through the shared runtime path
 
 ## Workflow
 

@@ -99,6 +99,7 @@ class RuntimeExecutionCapture:
     state: dict[str, RuntimeValue]
     spans: tuple[RecordedSpan, ...]
     trace_sink_configured: bool
+    trace_summary: dict[str, str | bool | None]
 
 
 def execute_program(program: Workflow[NamedPrimitive]) -> ExecutionResult:
@@ -143,6 +144,7 @@ def run_verification(
         runs_dir=runs_dir,
         verification_payload=report.as_dict(),
         trace_sink_configured=runtime_capture.trace_sink_configured,
+        trace_summary=runtime_capture.trace_summary,
     )
     runtime = RuntimeVerificationResult(
         success=runtime_capture.result.success,
@@ -184,6 +186,7 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
             state={},
             spans=executor.tracing.snapshot_spans(),
             trace_sink_configured=executor.tracing.sink_configured,
+            trace_summary=executor.tracing.trace_summary(),
         )
     return RuntimeExecutionCapture(
         result=RuntimeVerificationResult(
@@ -198,4 +201,5 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
         state=result.state,
         spans=result.spans,
         trace_sink_configured=executor.tracing.sink_configured,
+        trace_summary=result.trace_summary,
     )

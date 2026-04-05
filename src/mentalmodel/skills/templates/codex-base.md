@@ -34,6 +34,11 @@ authoring model.
 - Treat container children as structure, not data flow.
 - Add or update invariants when adding joins, state transitions, or policy
   boundaries.
+- Prefer primitive-local `metrics=[...]` over ad hoc observability code inside
+  handlers when you need output-derived metrics.
+- Use `infer_output_metrics(...)` only for flat, bounded numeric summaries.
+- Use `extract_output_metrics(...)` with a typed extractor when the output shape
+  needs aggregation before it is safe to emit as metrics.
 - Preserve strong typing and generics. Do not introduce `Any` to move faster.
 
 ## Useful commands
@@ -43,6 +48,9 @@ uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel replay --graph-id async_rl_demo
+uv run mentalmodel otel show-config
+uv run mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
 uv run mentalmodel runs list
 uv run mentalmodel runs latest --graph-id async_rl_demo
 uv run mentalmodel runs show --graph-id async_rl_demo
@@ -50,8 +58,12 @@ uv run mentalmodel runs inputs --graph-id async_rl_demo --node-id staleness_inva
 uv run mentalmodel runs outputs --graph-id async_rl_demo --node-id staleness_invariant
 uv run mentalmodel runs trace --graph-id async_rl_demo --node-id staleness_invariant
 uv run mentalmodel runs records --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs diff --graph-id async_rl_demo --run-a <run_a> --run-b <run_b>
 uv run mentalmodel runs repair --dry-run
+uv run mentalmodel doctor --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel demo async-rl
+uv run mentalmodel demo agent-tool-use
+uv run mentalmodel demo autoresearch-sorting
 ```
 
 ## Run artifacts
@@ -63,10 +75,24 @@ uv run mentalmodel demo async-rl
   `outputs.json`, `state.json`, and `otel-spans.jsonl`.
 - Semantic records are the first thing to inspect; OTel span files are a
   fallback mirror when no external sink is configured.
+- Metrics are projections of semantic runtime behavior and stable node outputs,
+  not a second handwritten instrumentation path.
 - `runs inputs` reads the persisted `node.inputs_resolved` event payload for a
   node, so it shows exactly what the runtime bound before handler execution.
+- `replay` is the fastest way to reconstruct the full semantic lifecycle of a
+  run without manually joining records and summary metadata.
+- `runs diff` is the fastest way to compare two persisted runs when a bug only
+  appears after a configuration or code change.
+- `otel show-config` is the first command to run when you suspect OTLP export
+  is misconfigured.
+- `otel write-demo` materializes a self-hosted OTEL demo stack without making
+  you hand-author Docker or env files.
 - `summary.json` is versioned with `schema_version`; use `runs repair` to
   normalize older bundles when needed.
+- `agent-tool-use` is the serious second reference workflow for verifying that
+  the programming model is not RL-shaped by accident.
+- `autoresearch-sorting` shows the bounded objective/search layer and writes an
+  autoresearch-style `program.md` bundle when run with `--write-artifacts`.
 
 ## Hello world shape
 
@@ -85,8 +111,16 @@ program = Workflow(
 
 ## Working loop
 
-1. Lower and inspect structure with `mentalmodel check`.
-2. Render artifacts with `mentalmodel graph` and `mentalmodel docs`.
-3. Run `mentalmodel verify` after meaningful changes.
-4. Inspect the newest `.runs/...` bundle when debugging runtime behavior.
-5. If the program is a reference demo, refresh and compare golden artifacts.
+1. Run `mentalmodel doctor` when setup, entrypoints, skills, or tracing look suspicious.
+2. Lower and inspect structure with `mentalmodel check`.
+3. Render artifacts with `mentalmodel graph` and `mentalmodel docs`.
+4. Run `mentalmodel verify` after meaningful changes.
+5. Inspect the newest `.runs/...` bundle when debugging runtime behavior.
+6. If the program is a reference demo, refresh and compare golden artifacts.
+
+## Debug recipe docs
+
+- `docs/recipes/structure-debugging.md`
+- `docs/recipes/invariant-debugging.md`
+- `docs/recipes/runtime-failure-debugging.md`
+- `docs/recipes/run-comparison.md`

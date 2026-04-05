@@ -1,0 +1,41 @@
+flowchart LR
+    answer_synthesizer["answer_synthesizer<br/>actor"]
+    plan_task["plan_task<br/>actor"]
+    task_source["task_source<br/>actor"]
+    cost_calculator["cost_calculator<br/>effect"]
+    discount_lookup["discount_lookup<br/>effect"]
+    plan_lookup["plan_lookup<br/>effect"]
+    support_lookup["support_lookup<br/>effect"]
+    answer_invariant["answer_invariant<br/>invariant"]
+    tool_results_join["tool_results_join<br/>join"]
+    tool_fanout["tool_fanout<br/>parallel"]
+    local_control_plane["local_control_plane<br/>runtime_context"]
+    sandbox_tools["sandbox_tools<br/>runtime_context"]
+    agent_tool_use_demo["agent_tool_use_demo<br/>workflow"]
+    agent_tool_use_demo -->|"contains"| local_control_plane
+    local_control_plane -->|"contains"| answer_invariant
+    local_control_plane -->|"contains"| answer_synthesizer
+    local_control_plane -->|"contains"| plan_task
+    local_control_plane -->|"contains"| sandbox_tools
+    local_control_plane -->|"contains"| task_source
+    sandbox_tools -->|"contains"| cost_calculator
+    sandbox_tools -->|"contains"| tool_fanout
+    sandbox_tools -->|"contains"| tool_results_join
+    tool_fanout -->|"contains"| discount_lookup
+    tool_fanout -->|"contains"| plan_lookup
+    tool_fanout -->|"contains"| support_lookup
+    answer_synthesizer -->|"data"| answer_invariant
+    cost_calculator -->|"data"| answer_synthesizer
+    discount_lookup -->|"data"| tool_results_join
+    plan_lookup -->|"data"| tool_results_join
+    plan_task -->|"data"| tool_results_join
+    support_lookup -->|"data"| tool_results_join
+    task_source -->|"data"| answer_invariant
+    task_source -->|"data"| answer_synthesizer
+    task_source -->|"data"| discount_lookup
+    task_source -->|"data"| plan_lookup
+    task_source -->|"data"| plan_task
+    task_source -->|"data"| support_lookup
+    task_source -->|"data"| tool_results_join
+    tool_results_join -->|"data"| answer_synthesizer
+    tool_results_join -->|"data"| cost_calculator

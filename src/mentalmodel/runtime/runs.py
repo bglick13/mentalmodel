@@ -19,7 +19,7 @@ from mentalmodel.observability.export import (
 from mentalmodel.observability.tracing import RecordedSpan
 
 RUNS_DIRNAME = ".runs"
-RUN_SCHEMA_VERSION = 2
+RUN_SCHEMA_VERSION = 3
 
 
 @dataclass(slots=True, frozen=True)
@@ -51,6 +51,11 @@ class RunSummary:
     output_count: int
     state_count: int
     trace_sink_configured: bool
+    trace_mode: str
+    trace_otlp_endpoint: str | None
+    trace_mirror_to_disk: bool
+    trace_capture_local_spans: bool
+    trace_service_name: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -108,6 +113,7 @@ def write_run_artifacts(
     runs_dir: Path | None = None,
     verification_payload: dict[str, object] | None = None,
     trace_sink_configured: bool,
+    trace_summary: dict[str, str | bool | None],
 ) -> RunArtifacts:
     """Write one run bundle to disk."""
 
@@ -116,7 +122,8 @@ def write_run_artifacts(
     records_path = run_dir / "records.jsonl"
     outputs_path = run_dir / "outputs.json"
     state_path = run_dir / "state.json"
-    spans_path = None if trace_sink_configured else run_dir / "otel-spans.jsonl"
+    trace_mirror_to_disk = _require_summary_bool(trace_summary, "trace_mirror_to_disk")
+    spans_path = run_dir / "otel-spans.jsonl" if trace_mirror_to_disk else None
     verification_path = (
         None if verification_payload is None else run_dir / "verification.json"
     )
@@ -136,6 +143,13 @@ def write_run_artifacts(
             "output_count": len(outputs),
             "state_count": len(state),
             "trace_sink_configured": trace_sink_configured,
+            "trace_mode": _require_summary_str(trace_summary, "trace_mode"),
+            "trace_otlp_endpoint": trace_summary.get("trace_otlp_endpoint"),
+            "trace_mirror_to_disk": trace_mirror_to_disk,
+            "trace_capture_local_spans": _require_summary_bool(
+                trace_summary, "trace_capture_local_spans"
+            ),
+            "trace_service_name": _require_summary_str(trace_summary, "trace_service_name"),
         },
     )
     write_jsonl(records_path, (execution_record_to_json(record) for record in records))
@@ -240,6 +254,11 @@ def load_run_summary(run_dir: Path) -> RunSummary:
         output_count=_require_int(summary_payload, "output_count"),
         state_count=_require_int(summary_payload, "state_count"),
         trace_sink_configured=_require_bool(summary_payload, "trace_sink_configured"),
+        trace_mode=_require_str(summary_payload, "trace_mode"),
+        trace_otlp_endpoint=_optional_str(summary_payload, "trace_otlp_endpoint"),
+        trace_mirror_to_disk=_require_bool(summary_payload, "trace_mirror_to_disk"),
+        trace_capture_local_spans=_require_bool(summary_payload, "trace_capture_local_spans"),
+        trace_service_name=_require_str(summary_payload, "trace_service_name"),
     )
 
 
@@ -516,6 +535,13 @@ def normalize_summary_payload(
         "output_count": _require_int(payload, "output_count"),
         "state_count": _require_int(payload, "state_count"),
         "trace_sink_configured": _require_bool(payload, "trace_sink_configured"),
+        "trace_mode": _optional_str(payload, "trace_mode") or "disk",
+        "trace_otlp_endpoint": _optional_str(payload, "trace_otlp_endpoint"),
+        "trace_mirror_to_disk": _optional_bool(payload, "trace_mirror_to_disk", default=True),
+        "trace_capture_local_spans": _optional_bool(
+            payload, "trace_capture_local_spans", default=True
+        ),
+        "trace_service_name": _optional_str(payload, "trace_service_name") or "mentalmodel",
     }
 
 
@@ -563,6 +589,38 @@ def _require_bool(payload: dict[str, JsonValue], key: str) -> bool:
     if isinstance(value, bool):
         return value
     raise RunInspectionError(f"Expected {key!r} to be a boolean.")
+
+
+def _optional_str(payload: dict[str, JsonValue], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    raise RunInspectionError(f"Expected {key!r} to be a string when present.")
+
+
+def _optional_bool(payload: dict[str, JsonValue], key: str, *, default: bool) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise RunInspectionError(f"Expected {key!r} to be a boolean when present.")
+
+
+def _require_summary_str(summary: dict[str, str | bool | None], key: str) -> str:
+    value = summary.get(key)
+    if isinstance(value, str):
+        return value
+    raise RunInspectionError(f"Expected trace summary value {key!r} to be a string.")
+
+
+def _require_summary_bool(summary: dict[str, str | bool | None], key: str) -> bool:
+    value = summary.get(key)
+    if isinstance(value, bool):
+        return value
+    raise RunInspectionError(f"Expected trace summary value {key!r} to be a boolean.")
 
 
 def _span_node_id(span: dict[str, JsonValue]) -> str | None:

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
     RUN_SCHEMA_VERSION,
     apply_run_repairs,
@@ -28,6 +31,28 @@ from mentalmodel.testing import run_verification
 
 
 class RunsTest(unittest.TestCase):
+    def _materialize_demo_run(
+        self,
+        root: Path,
+        *,
+        group_size: int = 4,
+        sampler_lag: int = 0,
+        max_off_policy_steps: int = 0,
+    ) -> str:
+        module = importlib.import_module("mentalmodel.examples.async_rl.demo")
+        report = run_verification(
+            build_program(
+                group_size=group_size,
+                sampler_lag=sampler_lag,
+                max_off_policy_steps=max_off_policy_steps,
+            ),
+            module=module,
+            runs_dir=root,
+        )
+        run_id = report.runtime.run_id
+        assert run_id is not None
+        return run_id
+
     def test_run_helpers_load_latest_materialized_run(self) -> None:
         module = importlib.import_module("mentalmodel.examples.async_rl.demo")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -41,6 +66,8 @@ class RunsTest(unittest.TestCase):
             self.assertEqual(summary.schema_version, RUN_SCHEMA_VERSION)
             self.assertEqual(summary.graph_id, "async_rl_demo")
             self.assertEqual(summary.run_id, report.runtime.run_id)
+            self.assertEqual(summary.trace_mode, "disk")
+            self.assertTrue(summary.trace_mirror_to_disk)
 
             verification = load_run_payload(
                 runs_dir=root,
@@ -180,6 +207,88 @@ class RunsTest(unittest.TestCase):
 
             repaired_plan = plan_run_repairs(runs_dir=root, graph_id="legacy_graph")
             self.assertFalse(repaired_plan.has_actions)
+
+    def test_build_replay_report_returns_semantic_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_id = self._materialize_demo_run(root)
+
+            report = build_replay_report(
+                runs_dir=root,
+                graph_id="async_rl_demo",
+                run_id=run_id,
+            )
+
+            self.assertEqual(report.summary.run_id, run_id)
+            self.assertTrue(report.verification_success)
+            self.assertGreaterEqual(len(report.events), 1)
+            self.assertIn("staleness_invariant", report.output_node_ids)
+            node_summaries = {
+                node_summary.node_id: node_summary for node_summary in report.node_summaries
+            }
+            self.assertTrue(node_summaries["staleness_invariant"].invariant_passed)
+
+    def test_build_run_diff_detects_changed_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_a = self._materialize_demo_run(root, group_size=2)
+            run_b = self._materialize_demo_run(root, group_size=4)
+
+            diff = build_run_diff(
+                runs_dir=root,
+                graph_id="async_rl_demo",
+                run_a=run_a,
+                run_b=run_b,
+                node_id="sample_policy",
+            )
+
+            self.assertTrue(diff.differs)
+            self.assertEqual(len(diff.node_diffs), 1)
+            node_diff = diff.node_diffs[0]
+            self.assertEqual(node_diff.node_id, "sample_policy")
+            self.assertFalse(node_diff.outputs_equal)
+            self.assertTrue(node_diff.events_equal)
+
+    def test_build_run_diff_detects_invariant_outcome_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_a = self._materialize_demo_run(root, sampler_lag=0, max_off_policy_steps=0)
+            run_b = self._materialize_demo_run(root, sampler_lag=2, max_off_policy_steps=0)
+
+            diff = build_run_diff(
+                runs_dir=root,
+                graph_id="async_rl_demo",
+                run_a=run_a,
+                run_b=run_b,
+                invariant="staleness_invariant",
+            )
+
+            self.assertTrue(diff.differs)
+            self.assertEqual(len(diff.invariant_diffs), 1)
+            invariant_diff = diff.invariant_diffs[0]
+            self.assertEqual(invariant_diff.node_id, "staleness_invariant")
+            self.assertTrue(invariant_diff.outcome_run_a)
+            self.assertFalse(invariant_diff.outcome_run_b)
+
+    def test_run_summary_persists_resolved_otel_config(self) -> None:
+        module = importlib.import_module("mentalmodel.examples.async_rl.demo")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with patch.dict(
+                os.environ,
+                {
+                    "MENTALMODEL_OTEL_MODE": "console",
+                    "MENTALMODEL_OTEL_SERVICE_NAME": "mentalmodel-console",
+                },
+                clear=True,
+            ):
+                report = run_verification(build_program(), module=module, runs_dir=root)
+            self.assertTrue(report.success)
+            summary = resolve_run_summary(runs_dir=root, graph_id="async_rl_demo")
+            self.assertEqual(summary.trace_mode, "console")
+            self.assertEqual(summary.trace_service_name, "mentalmodel-console")
+            self.assertTrue(summary.trace_sink_configured)
+            self.assertTrue(summary.trace_mirror_to_disk)
 
 
 if __name__ == "__main__":

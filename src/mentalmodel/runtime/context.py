@@ -10,6 +10,7 @@ from mentalmodel.core.interfaces import RuntimeValue
 from mentalmodel.ir.graph import IRGraph, IRNode
 
 if TYPE_CHECKING:
+    from mentalmodel.observability.metrics import MetricContext, MetricEmitter
     from mentalmodel.observability.tracing import TracingAdapter
     from mentalmodel.runtime.recorder import ExecutionRecorder
 
@@ -29,6 +30,7 @@ class ExecutionContext:
     graph: IRGraph
     recorder: ExecutionRecorder
     tracing: TracingAdapter
+    metrics: MetricEmitter
     clock: Clock = field(default_factory=Clock)
     node_id: str | None = None
     node_kind: str | None = None
@@ -43,12 +45,14 @@ class ExecutionContext:
         graph: IRGraph,
         recorder: ExecutionRecorder,
         tracing: TracingAdapter,
+        metrics: MetricEmitter,
     ) -> ExecutionContext:
         return cls(
             run_id=f"run-{uuid4().hex}",
             graph=graph,
             recorder=recorder,
             tracing=tracing,
+            metrics=metrics,
         )
 
     def for_node(self, node: IRNode) -> ExecutionContext:
@@ -57,6 +61,7 @@ class ExecutionContext:
             graph=self.graph,
             recorder=self.recorder,
             tracing=self.tracing,
+            metrics=self.metrics,
             clock=self.clock,
             node_id=node.node_id,
             node_kind=node.kind,
@@ -78,3 +83,15 @@ class ExecutionContext:
         if extra:
             attrs.update(extra)
         return attrs
+
+    def metric_context(self) -> MetricContext:
+        from mentalmodel.observability.metrics import MetricContext
+
+        return MetricContext(
+            graph_id=self.graph.graph_id,
+            run_id=self.run_id,
+            node_id=self.node_id,
+            node_kind=self.node_kind,
+            runtime_context=self.runtime_context,
+            service_name=self.tracing.config.service_name,
+        )
