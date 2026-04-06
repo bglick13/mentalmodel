@@ -5,6 +5,7 @@ import unittest
 from mentalmodel.analysis import run_analysis
 from mentalmodel.docs import build_node_inventory, render_markdown_artifacts, render_mermaid
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.examples.runtime_environment.demo import build_program as build_runtime_program
 from mentalmodel.ir.lowering import lower_program
 
 
@@ -51,3 +52,8 @@ class DocsTest(unittest.TestCase):
         self.assertIn("## `staleness_invariant`", artifacts.invariants)
         self.assertIn("## `sandbox`", artifacts.runtime_contexts)
         self.assertIn("provenance=`runtime_context`", artifacts.runtime_contexts)
+
+    def test_node_inventory_surfaces_declared_resource_keys(self) -> None:
+        inventory = build_node_inventory(lower_program(build_runtime_program()))
+        scale = next(entry for entry in inventory if entry.node_id == "fixture_scaling.scale")
+        self.assertEqual(scale.resource_keys, ("multiplier",))

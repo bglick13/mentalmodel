@@ -42,12 +42,14 @@
           "pages": [
             "guides/authoring-workflows",
             "guides/reusable-blocks",
+            "guides/step-loops",
             "guides/effects-and-actors",
             "guides/parallel-and-join",
             "guides/runtime-contexts",
+            "guides/runtime-environments",
             "guides/metrics",
-              "guides/optimization"
-            ]
+            "guides/optimization"
+          ]
           },
           {
             "group": "Observability",

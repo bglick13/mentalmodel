@@ -15,10 +15,17 @@ from mentalmodel.core.interfaces import (
     RuntimeValue,
 )
 from mentalmodel.core.invariants import Invariant
+from mentalmodel.core.loop import (
+    LoopCarry,
+    LoopSummary,
+    StepLoop,
+    StepLoopResult,
+)
 from mentalmodel.core.models import ActorResult, InvariantResult
-from mentalmodel.core.refs import BlockRef, Ref
+from mentalmodel.core.refs import BlockRef, LoopItemRef, LoopStateRef, Ref
 from mentalmodel.core.use import Use
 from mentalmodel.core.workflow import Workflow
+from mentalmodel.environment import ResourceKey, RuntimeEnvironment, RuntimeProfile
 from mentalmodel.observability.metrics import (
     MetricContext,
     MetricDefinition,
@@ -47,6 +54,10 @@ __all__ = [
     "Join",
     "JoinReducer",
     "JsonValue",
+    "LoopCarry",
+    "LoopItemRef",
+    "LoopStateRef",
+    "LoopSummary",
     "MetricContext",
     "MetricDefinition",
     "MetricExtractor",
@@ -56,8 +67,13 @@ __all__ = [
     "OutputMetricSpec",
     "Parallel",
     "Ref",
+    "ResourceKey",
     "ResolvedInputs",
+    "RuntimeEnvironment",
+    "RuntimeProfile",
     "RuntimeValue",
+    "StepLoop",
+    "StepLoopResult",
     "Use",
     "Workflow",
     "extract_output_metrics",

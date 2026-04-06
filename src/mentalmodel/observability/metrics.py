@@ -43,6 +43,7 @@ class MetricContext:
     node_kind: str | None
     runtime_context: str | None
     service_name: str
+    runtime_profile: str | None = None
 
     def default_attributes(self) -> dict[str, MetricAttributeValue]:
         attributes: dict[str, MetricAttributeValue] = {
@@ -53,6 +54,8 @@ class MetricContext:
             attributes["node_kind"] = self.node_kind
         if self.runtime_context is not None:
             attributes["runtime_context"] = self.runtime_context
+        if self.runtime_profile is not None:
+            attributes["runtime_profile"] = self.runtime_profile
         return attributes
 
 
@@ -302,32 +305,51 @@ RUN_STARTED = MetricDefinition(
     name="mentalmodel.run.started",
     kind=MetricKind.COUNTER,
     description="Number of started mentalmodel runs.",
-    attribute_keys=("graph_id", "service_name"),
+    attribute_keys=("graph_id", "service_name", "runtime_profile"),
 )
 RUN_COMPLETED = MetricDefinition(
     name="mentalmodel.run.completed",
     kind=MetricKind.COUNTER,
     description="Number of completed mentalmodel runs.",
-    attribute_keys=("graph_id", "service_name", "success"),
+    attribute_keys=("graph_id", "service_name", "runtime_profile", "success"),
 )
 NODE_EXECUTIONS = MetricDefinition(
     name="mentalmodel.node.executions",
     kind=MetricKind.COUNTER,
     description="Number of executed mentalmodel nodes.",
-    attribute_keys=("graph_id", "service_name", "node_kind", "runtime_context"),
+    attribute_keys=(
+        "graph_id",
+        "service_name",
+        "node_kind",
+        "runtime_context",
+        "runtime_profile",
+    ),
 )
 NODE_DURATION_MS = MetricDefinition(
     name="mentalmodel.node.duration_ms",
     kind=MetricKind.HISTOGRAM,
     description="Execution duration for mentalmodel nodes in milliseconds.",
     unit="ms",
-    attribute_keys=("graph_id", "service_name", "node_kind", "runtime_context", "success"),
+    attribute_keys=(
+        "graph_id",
+        "service_name",
+        "node_kind",
+        "runtime_context",
+        "runtime_profile",
+        "success",
+    ),
 )
 INVARIANT_FAILURES = MetricDefinition(
     name="mentalmodel.invariant.failures",
     kind=MetricKind.COUNTER,
     description="Number of failed runtime invariants.",
-    attribute_keys=("graph_id", "service_name", "runtime_context", "severity"),
+    attribute_keys=(
+        "graph_id",
+        "service_name",
+        "runtime_context",
+        "runtime_profile",
+        "severity",
+    ),
 )
 
 

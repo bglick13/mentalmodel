@@ -1,6 +1,17 @@
 """Runtime exports."""
 
-from mentalmodel.runtime.errors import ExecutionError, InvariantViolationError
+from mentalmodel.environment import (
+    MissingRuntimeProfileError,
+    MissingRuntimeResourceError,
+    ResourceKey,
+    RuntimeEnvironment,
+    RuntimeProfile,
+    RuntimeProfileError,
+)
+from mentalmodel.runtime.errors import (
+    ExecutionError,
+    InvariantViolationError,
+)
 from mentalmodel.runtime.execution import ExecutionNodeMetadata
 from mentalmodel.runtime.executor import AsyncExecutor, ExecutionResult
 from mentalmodel.runtime.frame import ExecutionFrame, ExecutionFrameSegment
@@ -37,8 +48,14 @@ __all__ = [
     "ReplayEvent",
     "ReplayNodeSummary",
     "ReplayReport",
+    "ResourceKey",
     "RunDiff",
+    "RuntimeEnvironment",
+    "RuntimeProfile",
+    "RuntimeProfileError",
     "build_replay_report",
     "build_run_diff",
     "compile_program",
+    "MissingRuntimeProfileError",
+    "MissingRuntimeResourceError",
 ]

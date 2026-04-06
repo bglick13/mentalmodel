@@ -4,6 +4,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from mentalmodel.environment import ResourceKey
+
 if TYPE_CHECKING:
     from mentalmodel.core.interfaces import NamedPrimitive
 
@@ -32,6 +34,7 @@ class BlockDefaults:
 
     runtime_context: str | None = None
     metadata: Mapping[str, str] = field(default_factory=dict)
+    resources: Sequence[ResourceKey[object]] = field(default_factory=tuple)
 
 
 @dataclass(slots=True, frozen=True)

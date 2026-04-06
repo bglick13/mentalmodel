@@ -746,12 +746,14 @@ def run_runs_list(
                     "success": summary.success,
                     "record_count": summary.record_count,
                     "output_count": summary.output_count,
-                    "state_count": summary.state_count,
-                    "trace_mode": summary.trace_mode,
-                    "trace_mirror_to_disk": summary.trace_mirror_to_disk,
-                    "run_dir": str(summary.run_dir),
-                }
-                for summary in summaries
+                        "state_count": summary.state_count,
+                        "trace_mode": summary.trace_mode,
+                        "trace_mirror_to_disk": summary.trace_mirror_to_disk,
+                        "runtime_default_profile_name": summary.runtime_default_profile_name,
+                        "runtime_profile_names": list(summary.runtime_profile_names),
+                        "run_dir": str(summary.run_dir),
+                    }
+                    for summary in summaries
                 ],
                 indent=2,
                 sort_keys=True,
@@ -767,6 +769,7 @@ def run_runs_list(
     table.add_column("Outputs", justify="right")
     table.add_column("State", justify="right")
     table.add_column("Trace")
+    table.add_column("Profiles")
     table.add_column("Path")
     for summary in summaries:
         table.add_row(
@@ -777,6 +780,7 @@ def run_runs_list(
             str(summary.output_count),
             str(summary.state_count),
             summary.trace_mode,
+            ", ".join(summary.runtime_profile_names) or "none",
             str(summary.run_dir),
         )
     if not summaries:
@@ -814,6 +818,8 @@ def run_runs_show(
         "trace_mirror_to_disk": summary.trace_mirror_to_disk,
         "trace_capture_local_spans": summary.trace_capture_local_spans,
         "trace_service_name": summary.trace_service_name,
+        "runtime_default_profile_name": summary.runtime_default_profile_name,
+        "runtime_profile_names": list(summary.runtime_profile_names),
         "run_dir": str(summary.run_dir),
         "files": {
             "summary": str(summary.run_dir / "summary.json"),
@@ -846,6 +852,8 @@ def run_runs_show(
         ("Trace Endpoint", summary.trace_otlp_endpoint or ""),
         ("Trace Sink", "configured" if summary.trace_sink_configured else "disk fallback"),
         ("Mirror To Disk", "yes" if summary.trace_mirror_to_disk else "no"),
+        ("Default Profile", summary.runtime_default_profile_name or ""),
+        ("Profiles", ", ".join(summary.runtime_profile_names) or "none"),
         ("Run Dir", str(summary.run_dir)),
     ):
         summary_table.add_row(field, value)
@@ -888,6 +896,8 @@ def run_runs_latest(
         "state_count": summary.state_count,
         "trace_mode": summary.trace_mode,
         "trace_mirror_to_disk": summary.trace_mirror_to_disk,
+        "runtime_default_profile_name": summary.runtime_default_profile_name,
+        "runtime_profile_names": list(summary.runtime_profile_names),
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -902,6 +912,8 @@ def run_runs_latest(
         ("Success", "yes" if summary.success else "no"),
         ("Created", str(summary.created_at_ms)),
         ("Trace Mode", summary.trace_mode),
+        ("Default Profile", summary.runtime_default_profile_name or ""),
+        ("Profiles", ", ".join(summary.runtime_profile_names) or "none"),
         ("Run Dir", str(summary.run_dir)),
     ):
         table.add_row(field, value)

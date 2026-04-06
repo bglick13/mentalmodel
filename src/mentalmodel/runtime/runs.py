@@ -4,6 +4,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from mentalmodel.core.interfaces import JsonValue, RuntimeValue
 from mentalmodel.errors import RunInspectionError
@@ -20,7 +21,7 @@ from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 
 RUNS_DIRNAME = ".runs"
-RUN_SCHEMA_VERSION = 4
+RUN_SCHEMA_VERSION = 5
 
 
 @dataclass(slots=True, frozen=True)
@@ -57,6 +58,8 @@ class RunSummary:
     trace_mirror_to_disk: bool
     trace_capture_local_spans: bool
     trace_service_name: str
+    runtime_default_profile_name: str | None
+    runtime_profile_names: tuple[str, ...]
 
 
 @dataclass(slots=True, frozen=True)
@@ -133,6 +136,8 @@ def write_run_artifacts(
     verification_payload: dict[str, object] | None = None,
     trace_sink_configured: bool,
     trace_summary: dict[str, str | bool | None],
+    runtime_default_profile_name: str | None,
+    runtime_profile_names: tuple[str, ...],
 ) -> RunArtifacts:
     """Write one run bundle to disk."""
 
@@ -169,6 +174,8 @@ def write_run_artifacts(
                 trace_summary, "trace_capture_local_spans"
             ),
             "trace_service_name": _require_summary_str(trace_summary, "trace_service_name"),
+            "runtime_default_profile_name": runtime_default_profile_name,
+            "runtime_profile_names": list(runtime_profile_names),
         },
     )
     write_jsonl(records_path, (execution_record_to_json(record) for record in records))
@@ -284,6 +291,10 @@ def load_run_summary(run_dir: Path) -> RunSummary:
         trace_mirror_to_disk=_require_bool(summary_payload, "trace_mirror_to_disk"),
         trace_capture_local_spans=_require_bool(summary_payload, "trace_capture_local_spans"),
         trace_service_name=_require_str(summary_payload, "trace_service_name"),
+        runtime_default_profile_name=_optional_str(
+            summary_payload, "runtime_default_profile_name"
+        ),
+        runtime_profile_names=_require_str_list(summary_payload, "runtime_profile_names"),
     )
 
 
@@ -722,6 +733,11 @@ def normalize_summary_payload(
             payload, "trace_capture_local_spans", default=True
         ),
         "trace_service_name": _optional_str(payload, "trace_service_name") or "mentalmodel",
+        "runtime_default_profile_name": _optional_str(payload, "runtime_default_profile_name"),
+        "runtime_profile_names": cast(
+            JsonValue,
+            _optional_str_list(payload, "runtime_profile_names"),
+        ),
     }
 
 
@@ -787,6 +803,28 @@ def _optional_bool(payload: dict[str, JsonValue], key: str, *, default: bool) ->
     if isinstance(value, bool):
         return value
     raise RunInspectionError(f"Expected {key!r} to be a boolean when present.")
+
+
+def _optional_str_list(payload: dict[str, JsonValue], key: str) -> list[str]:
+    value = payload.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise RunInspectionError(f"Expected {key!r} to be a string array when present.")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise RunInspectionError(
+                f"Expected every value in {key!r} to be a string."
+            )
+        items.append(item)
+    return items
+
+
+def _require_str_list(payload: dict[str, JsonValue], key: str) -> tuple[str, ...]:
+    if key not in payload:
+        raise RunInspectionError(f"Expected {key!r} to be present.")
+    return tuple(_optional_str_list(payload, key))
 
 
 def _require_summary_str(summary: dict[str, str | bool | None], key: str) -> str:

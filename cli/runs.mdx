@@ -13,7 +13,7 @@ Run bundles are stored under the runs root directory (default: `.runs/`):
 .runs/
 └── <graph_id>/
     └── <run_id>/
-        ├── summary.json       # run metadata and trace config
+        ├── summary.json       # run metadata, trace config, and runtime profile summary
         ├── verification.json  # verification outcome
         ├── records.jsonl      # semantic execution records (one JSON object per line)
         ├── outputs.json       # node output payloads
@@ -91,7 +91,13 @@ It answers:
 
 - did the run succeed?
 - how many records and outputs exist?
+- which runtime profiles were configured for this run?
 - where are the files on disk?
+
+When runtime environments are in use, `runs show` also surfaces:
+
+- `runtime_default_profile_name`
+- `runtime_profile_names`
 
 ---
 

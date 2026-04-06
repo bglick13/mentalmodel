@@ -7,8 +7,19 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mentalmodel.core.interfaces import RuntimeValue
+from mentalmodel.environment import (
+    EMPTY_RUNTIME_ENVIRONMENT,
+    ResourceKey,
+    ResourceResolver,
+    RuntimeEnvironment,
+)
 from mentalmodel.ir.graph import IRGraph, IRNode
-from mentalmodel.runtime.frame import ROOT_FRAME, ExecutionFrame
+from mentalmodel.runtime.frame import (
+    ROOT_FRAME,
+    ExecutionFrame,
+    FramedNodeValue,
+    FramedStateValue,
+)
 
 if TYPE_CHECKING:
     from mentalmodel.observability.metrics import MetricContext, MetricEmitter
@@ -32,11 +43,17 @@ class ExecutionContext:
     recorder: ExecutionRecorder
     tracing: TracingAdapter
     metrics: MetricEmitter
+    environment: RuntimeEnvironment = field(default_factory=lambda: EMPTY_RUNTIME_ENVIRONMENT)
     clock: Clock = field(default_factory=Clock)
     node_id: str | None = None
     node_kind: str | None = None
     runtime_context: str | None = None
+    runtime_profile: str | None = None
     frame: ExecutionFrame = field(default_factory=lambda: ROOT_FRAME)
+    loop_item_values: dict[str, RuntimeValue] = field(default_factory=dict)
+    loop_state_values: dict[str, RuntimeValue] = field(default_factory=dict)
+    framed_outputs: list[FramedNodeValue[RuntimeValue]] = field(default_factory=list)
+    framed_state: list[FramedStateValue[RuntimeValue]] = field(default_factory=list)
     state_store: dict[str, RuntimeValue] = field(default_factory=dict)
     outputs: dict[str, RuntimeValue] = field(default_factory=dict)
 
@@ -48,6 +65,7 @@ class ExecutionContext:
         recorder: ExecutionRecorder,
         tracing: TracingAdapter,
         metrics: MetricEmitter,
+        environment: RuntimeEnvironment = EMPTY_RUNTIME_ENVIRONMENT,
     ) -> ExecutionContext:
         return cls(
             run_id=f"run-{uuid4().hex}",
@@ -55,20 +73,29 @@ class ExecutionContext:
             recorder=recorder,
             tracing=tracing,
             metrics=metrics,
+            environment=environment,
+            runtime_profile=environment.default_profile_name,
         )
 
     def for_node(self, node: IRNode) -> ExecutionContext:
+        runtime_context = node.metadata.get("runtime_context")
         return ExecutionContext(
             run_id=self.run_id,
             graph=self.graph,
             recorder=self.recorder,
             tracing=self.tracing,
             metrics=self.metrics,
+            environment=self.environment,
             clock=self.clock,
             node_id=node.node_id,
             node_kind=node.kind,
-            runtime_context=node.metadata.get("runtime_context"),
+            runtime_context=runtime_context,
+            runtime_profile=self.environment.resolve_profile_name(runtime_context),
             frame=self.frame,
+            loop_item_values=self.loop_item_values,
+            loop_state_values=self.loop_state_values,
+            framed_outputs=self.framed_outputs,
+            framed_state=self.framed_state,
             state_store=self.state_store,
             outputs=self.outputs,
         )
@@ -80,11 +107,44 @@ class ExecutionContext:
             recorder=self.recorder,
             tracing=self.tracing,
             metrics=self.metrics,
+            environment=self.environment,
             clock=self.clock,
             node_id=self.node_id,
             node_kind=self.node_kind,
             runtime_context=self.runtime_context,
+            runtime_profile=self.runtime_profile,
             frame=frame,
+            loop_item_values=self.loop_item_values,
+            loop_state_values=self.loop_state_values,
+            framed_outputs=self.framed_outputs,
+            framed_state=self.framed_state,
+            state_store=self.state_store,
+            outputs=self.outputs,
+        )
+
+    def with_loop_bindings(
+        self,
+        *,
+        item_values: Mapping[str, RuntimeValue] | None = None,
+        state_values: Mapping[str, RuntimeValue] | None = None,
+    ) -> ExecutionContext:
+        return ExecutionContext(
+            run_id=self.run_id,
+            graph=self.graph,
+            recorder=self.recorder,
+            tracing=self.tracing,
+            metrics=self.metrics,
+            environment=self.environment,
+            clock=self.clock,
+            node_id=self.node_id,
+            node_kind=self.node_kind,
+            runtime_context=self.runtime_context,
+            runtime_profile=self.runtime_profile,
+            frame=self.frame,
+            loop_item_values=dict(item_values or {}),
+            loop_state_values=dict(state_values or {}),
+            framed_outputs=self.framed_outputs,
+            framed_state=self.framed_state,
             state_store=self.state_store,
             outputs=self.outputs,
         )
@@ -99,6 +159,8 @@ class ExecutionContext:
             attrs["mentalmodel.node.kind"] = self.node_kind
         if self.runtime_context is not None:
             attrs["mentalmodel.runtime.context"] = self.runtime_context
+        if self.runtime_profile is not None:
+            attrs["mentalmodel.runtime.profile"] = self.runtime_profile
         attrs["mentalmodel.frame.id"] = self.frame.frame_id
         if self.frame.loop_node_id is not None:
             attrs["mentalmodel.loop.node_id"] = self.frame.loop_node_id
@@ -117,5 +179,18 @@ class ExecutionContext:
             node_id=self.node_id,
             node_kind=self.node_kind,
             runtime_context=self.runtime_context,
+            runtime_profile=self.runtime_profile,
             service_name=self.tracing.config.service_name,
         )
+
+    @property
+    def resources(self) -> ResourceResolver:
+        return ResourceResolver(
+            environment=self.environment,
+            active_profile_name=self.runtime_profile,
+            node_id=self.node_id,
+        )
+
+    def require_resources(self, keys: tuple[ResourceKey[object], ...]) -> None:
+        for key in keys:
+            self.resources.require(key)

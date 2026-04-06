@@ -165,10 +165,10 @@ These are lowering errors, so you catch them with `mentalmodel check` or `mental
 
 `Block` and `Use` solve reusable namespaced composition.
 
-They do not yet solve:
+They do not by themselves solve:
 
-- native loop bodies with iteration-local refs
-- typed shared runtime resources
+- richer runtime-resource injection
 - parameterized block templates beyond explicit authored definitions
 
-Those are follow-on phases in the roadmap.
+`StepLoop` now builds on `Use` directly, so reusable blocks already work as
+native loop bodies with iteration-local refs.

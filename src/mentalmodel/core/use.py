@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mentalmodel.core.block import Block, BlockDefaults
-from mentalmodel.core.refs import Ref
+from mentalmodel.core.refs import InputRef, Ref
+from mentalmodel.environment import ResourceKey, merge_resource_keys
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IRFragment, IRNode
 
@@ -20,7 +21,7 @@ class Use:
 
     name: str
     block: Block[NamedPrimitive]
-    bind: Mapping[str, Ref] = field(default_factory=dict)
+    bind: Mapping[str, InputRef] = field(default_factory=dict)
     defaults: BlockDefaults | None = None
     description: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
@@ -41,7 +42,7 @@ class Use:
 
         use_node_id = ctx.namespaced_name(self.name)
         resolved_bindings = {
-            logical_name: ctx.resolve_external_ref(binding)
+            logical_name: ctx.resolve_input_source(binding)
             for logical_name, binding in self.bind.items()
         }
 
@@ -65,10 +66,12 @@ class Use:
         fragment.nodes.append(lowered_use)
 
         for logical_name, binding in sorted(resolved_bindings.items()):
+            if binding.kind != "node_output":
+                continue
             fragment.edges.append(
                 ctx.make_edge(
-                    source_node_id=binding.target,
-                    source_port=binding.port,
+                    source_node_id=binding.key,
+                    source_port="default",
                     target_node_id=lowered_use.node_id,
                     target_port=logical_name,
                     kind="bind",
@@ -79,12 +82,17 @@ class Use:
             block_defaults=self.block.defaults,
             use_defaults=self.defaults,
         )
+        child_resources = _merged_block_resources(
+            block_defaults=self.block.defaults,
+            use_defaults=self.defaults,
+        )
         child_metadata["block_name"] = self.block.name
         child_metadata["use_name"] = use_node_id
         child_ctx = ctx.child_context(
             metadata=child_metadata,
             namespace_suffix=self.name,
             input_bindings=resolved_bindings,
+            inherited_resources=child_resources,
         )
         for child in self.block.children:
             child_fragment = child_ctx.lower(child)
@@ -174,3 +182,15 @@ def _merged_block_metadata(
     if runtime_context is not None:
         metadata["runtime_context"] = runtime_context
     return metadata
+
+
+def _merged_block_resources(
+    *,
+    block_defaults: BlockDefaults | None,
+    use_defaults: BlockDefaults | None,
+) -> tuple[ResourceKey[object], ...]:
+    block_resources = (
+        tuple(block_defaults.resources) if block_defaults is not None else tuple()
+    )
+    use_resources = tuple(use_defaults.resources) if use_defaults is not None else tuple()
+    return merge_resource_keys(block_resources, use_resources)

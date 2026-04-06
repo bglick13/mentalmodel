@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from mentalmodel.core.interfaces import InvariantChecker, JsonValue
 from mentalmodel.core.refs import InputRef
+from mentalmodel.environment import ResourceKey
 from mentalmodel.ir.graph import IRFragment, IRNode
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ class Invariant(Generic[InputT, DetailT]):
     name: str
     checker: InvariantChecker[InputT, DetailT]
     inputs: list[InputRef] = field(default_factory=list)
+    resources: tuple[ResourceKey[object], ...] = ()
     severity: str = "error"
     metadata: dict[str, str] = field(default_factory=dict)
 

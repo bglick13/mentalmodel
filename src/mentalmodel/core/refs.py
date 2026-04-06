@@ -20,4 +20,18 @@ class BlockRef:
     port: str = "default"
 
 
-InputRef: TypeAlias = Ref | BlockRef
+@dataclass(slots=True, frozen=True)
+class LoopItemRef:
+    """Reference to the current loop item inside a StepLoop body."""
+
+    logical_name: str = "item"
+
+
+@dataclass(slots=True, frozen=True)
+class LoopStateRef:
+    """Reference to loop-carried state inside a StepLoop body."""
+
+    logical_name: str
+
+
+InputRef: TypeAlias = Ref | BlockRef | LoopItemRef | LoopStateRef

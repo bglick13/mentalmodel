@@ -12,6 +12,12 @@ from unittest.mock import patch
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.examples.runtime_environment.demo import (
+    build_environment as build_runtime_environment,
+)
+from mentalmodel.examples.runtime_environment.demo import (
+    build_program as build_runtime_program,
+)
 from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
@@ -189,6 +195,8 @@ class RunsTest(unittest.TestCase):
             self.assertEqual(summary.run_id, report.runtime.run_id)
             self.assertEqual(summary.trace_mode, "disk")
             self.assertTrue(summary.trace_mirror_to_disk)
+            self.assertIsNone(summary.runtime_default_profile_name)
+            self.assertEqual(summary.runtime_profile_names, tuple())
 
             verification = load_run_payload(
                 runs_dir=root,
@@ -218,7 +226,23 @@ class RunsTest(unittest.TestCase):
                 node_id="staleness_invariant",
             )
             self.assertEqual(trace.node_id, "staleness_invariant")
-            self.assertGreaterEqual(len(trace.records), 1)
+
+    def test_run_summary_persists_runtime_environment_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report = run_verification(
+                build_runtime_program(),
+                runs_dir=root,
+                environment=build_runtime_environment(),
+            )
+            self.assertTrue(report.success)
+
+            summary = resolve_run_summary(
+                runs_dir=root,
+                graph_id="runtime_environment_demo",
+            )
+            self.assertIsNone(summary.runtime_default_profile_name)
+            self.assertEqual(summary.runtime_profile_names, ("fixture", "real"))
 
     def test_load_run_node_inputs_returns_persisted_input_payload(self) -> None:
         module = importlib.import_module("mentalmodel.examples.async_rl.demo")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, Protocol, TypeVar, cast
 
+from mentalmodel.core.bindings import InputBindingSource
 from mentalmodel.core.interfaces import JsonValue, RuntimeValue
+from mentalmodel.environment import ResourceKey
 from mentalmodel.observability.export import serialize_runtime_value
 from mentalmodel.observability.metrics import (
     OutputMetricSpec,
@@ -30,13 +32,18 @@ class ExecutionNodeMetadata:
     label: str
     runtime_context: str | None
     dependencies: tuple[str, ...]
-    input_bindings: tuple[tuple[str, str], ...]
+    input_bindings: tuple[tuple[str, InputBindingSource], ...]
+    resource_keys: tuple[ResourceKey[object], ...] = field(default_factory=tuple)
 
 
 class InputAdapter(Protocol[InputBoundT_co]):
     """Converts resolved upstream runtime values into a handler input shape."""
 
-    def bind(self, outputs: Mapping[str, RuntimeValue]) -> InputBoundT_co:
+    def bind(
+        self,
+        outputs: Mapping[str, RuntimeValue],
+        context: ExecutionContext,
+    ) -> InputBoundT_co:
         """Bind raw upstream outputs into the typed handler input."""
 
 
@@ -44,13 +51,18 @@ class InputAdapter(Protocol[InputBoundT_co]):
 class MappingInputAdapter(Generic[InputT]):
     """Default adapter that presents upstream outputs as a mapping."""
 
-    bindings: tuple[tuple[str, str], ...]
+    bindings: tuple[tuple[str, InputBindingSource], ...]
 
-    def bind(self, outputs: Mapping[str, RuntimeValue]) -> InputT:
-        bound = {
-            alias: outputs[source_node_id]
-            for alias, source_node_id in self.bindings
-        }
+    def bind(self, outputs: Mapping[str, RuntimeValue], context: ExecutionContext) -> InputT:
+        bound = {}
+        for alias, source in self.bindings:
+            if source.kind == "node_output":
+                bound[alias] = outputs[source.key]
+                continue
+            if source.kind == "loop_item":
+                bound[alias] = context.loop_item_values[source.key]
+                continue
+            bound[alias] = context.loop_state_values[source.key]
         return cast(InputT, bound)
 
 
@@ -92,7 +104,8 @@ class CompiledPluginNode(Generic[InputT, OutputT]):
         outputs: Mapping[str, RuntimeValue],
         context: ExecutionContext,
     ) -> RuntimeValue:
-        typed_inputs = self.input_adapter.bind(outputs)
+        context.require_resources(self.metadata.resource_keys)
+        typed_inputs = self.input_adapter.bind(outputs, context)
         record_resolved_inputs(context=context, metadata=self.metadata, inputs=typed_inputs)
         output = await self.handler.execute(typed_inputs, context)
         emit_metric_batch(

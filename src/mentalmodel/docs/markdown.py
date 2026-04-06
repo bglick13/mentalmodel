@@ -160,6 +160,11 @@ def render_node_inventory_markdown(
                 ),
             ]
         )
+        if entry.resource_keys:
+            lines.append(
+                "- Resource Keys: "
+                + ", ".join(f"`{name}`" for name in entry.resource_keys)
+            )
         if entry.metadata:
             lines.extend(["- Metadata:", "", indent(_metadata_list(entry.metadata), prefix="  ")])
         lines.append("")

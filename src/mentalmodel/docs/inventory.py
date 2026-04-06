@@ -30,6 +30,7 @@ class NodeInventoryEntry:
     block_name: str | None
     block_inputs: tuple[str, ...]
     block_outputs: tuple[str, ...]
+    resource_keys: tuple[str, ...]
     metadata: dict[str, str] = field(default_factory=dict)
 
 
@@ -72,6 +73,7 @@ def build_node_inventory(graph: IRGraph) -> tuple[NodeInventoryEntry, ...]:
             block_name=node.metadata.get("block_name"),
             block_inputs=_split_csv(node.metadata.get("block_inputs")),
             block_outputs=_split_csv(node.metadata.get("block_outputs")),
+            resource_keys=_split_csv(node.metadata.get("resource_keys")),
             metadata=dict(sorted(node.metadata.items())),
         )
         for node in sorted(graph.nodes, key=lambda item: (item.kind, item.node_id))

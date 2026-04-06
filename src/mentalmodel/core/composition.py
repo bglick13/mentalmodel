@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from mentalmodel.core.interfaces import JoinReducer
 from mentalmodel.core.refs import InputRef
+from mentalmodel.environment import ResourceKey
 from mentalmodel.ir.graph import IRFragment, IRNode
 
 if TYPE_CHECKING:
@@ -42,6 +43,7 @@ class Join(Generic[InputT, OutputT]):
     name: str
     inputs: list[InputRef] = field(default_factory=list)
     reducer: JoinReducer[InputT, OutputT] | None = None
+    resources: tuple[ResourceKey[object], ...] = ()
     metadata: dict[str, str] = field(default_factory=dict)
 
     def lower(self, ctx: LoweringContext) -> IRFragment:

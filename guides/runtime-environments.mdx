@@ -1,0 +1,142 @@
+---
+title: "Runtime Environments"
+description: "Bind fixture and real resources to the same authored workflow with RuntimeEnvironment, RuntimeProfile, and ResourceKey."
+---
+
+`RuntimeEnvironment` makes shared runtime binding a first-class package concept.
+
+Use it when the same authored workflow should run against different resource
+sets such as:
+
+- fixture vs real providers
+- local smoke vs production-like backends
+- different shared helper objects such as reward models, tokenizers, or clients
+
+## The core pieces
+
+```python
+from mentalmodel import ResourceKey, RuntimeEnvironment, RuntimeProfile
+
+reward_model = ResourceKey("reward_model", CompositeRewardModel)
+```
+
+```python
+RuntimeProfile(
+    name="fixture",
+    resources={reward_model: CompositeRewardModel(...)},
+)
+```
+
+```python
+RuntimeEnvironment(
+    profiles={
+        "fixture": RuntimeProfile(...),
+        "real": RuntimeProfile(...),
+    },
+    default_profile_name="fixture",
+)
+```
+
+## How handlers consume resources
+
+Primitives declare the resources they expect:
+
+```python
+Effect(
+    "reward_pangram",
+    handler=PangramRewardHandler(),
+    inputs=[Ref("reward_defense")],
+    resources=(reward_model,),
+)
+```
+
+Handlers resolve them through the execution context:
+
+```python
+model = ctx.resources.require(reward_model)
+```
+
+`require(...)` fails fast if the active profile is missing or the resource is
+not provided by that profile.
+
+## How profile selection works
+
+There are two common ways a node gets an active runtime profile:
+
+1. from `runtime_context`
+2. from the environment's `default_profile_name`
+
+That means:
+
+- a node inside `RuntimeContext(runtime="sandbox", ...)` uses profile `sandbox`
+- a node without `runtime_context` uses the environment default profile, if one
+  is configured
+
+## Full example
+
+The `runtime_environment` reference example reuses the same block twice under
+two different runtime profiles:
+
+```python
+fixture_scaling = Use(
+    "fixture_scaling",
+    block=scaling_block,
+    bind={"value": Ref("seed")},
+    defaults=BlockDefaults(runtime_context="fixture"),
+)
+
+real_scaling = Use(
+    "real_scaling",
+    block=scaling_block,
+    bind={"value": Ref("seed")},
+    defaults=BlockDefaults(runtime_context="real"),
+)
+```
+
+Both block instances share the same authored child effect, but each one resolves
+`MULTIPLIER_RESOURCE` from a different profile.
+
+## Using BlockDefaults for less noise
+
+`BlockDefaults.resources` lets a reusable block declare shared typed resources
+once instead of repeating them on each child:
+
+```python
+scaling_block = Block(
+    "scaling_block",
+    inputs={"value": BlockInput[object]()},
+    outputs={"scaled": BlockOutput[object]("scale")},
+    defaults=BlockDefaults(resources=(MULTIPLIER_RESOURCE,)),
+    children=(Effect("scale", handler=ScaleValue(), inputs=[BlockRef("value")]),),
+)
+```
+
+Then `Use(..., defaults=BlockDefaults(runtime_context="fixture"))` picks the
+profile for that instance.
+
+## Debugging and inspection
+
+Runtime profile metadata appears in the same places you already inspect runs:
+
+- `node.started` payloads include `runtime_profile`
+- span attributes include `mentalmodel.runtime.profile`
+- built-in metrics include `runtime_profile`
+- `summary.json` includes:
+  - `runtime_default_profile_name`
+  - `runtime_profile_names`
+
+That means `mentalmodel runs show --graph-id ...` tells you not just what ran,
+but which profile set the run was bound against.
+
+## What this unlocks
+
+The authored workflow no longer needs app-side bundles, closures, or hand-wired
+shared helper threading just to switch between resource sets.
+
+That keeps:
+
+- fixture verification
+- smoke testing
+- real-provider execution
+
+on the same semantic workflow surface.

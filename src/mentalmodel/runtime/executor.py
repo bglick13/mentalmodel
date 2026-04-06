@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from mentalmodel.core import Workflow
 from mentalmodel.core.interfaces import JsonValue, NamedPrimitive, RuntimeValue
+from mentalmodel.environment import (
+    EMPTY_RUNTIME_ENVIRONMENT,
+    RuntimeEnvironment,
+)
 from mentalmodel.ir.graph import IRGraph, IRNode
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.config import TracingConfig
@@ -21,16 +24,15 @@ from mentalmodel.observability.metrics import (
 )
 from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter, create_tracing_adapter
 from mentalmodel.runtime.context import ExecutionContext
-from mentalmodel.runtime.errors import ExecutionError
 from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 from mentalmodel.runtime.plan import (
     CompiledProgram,
-    ExecutionPlan,
     PlanNode,
     compile_program,
 )
 from mentalmodel.runtime.recorder import ExecutionRecorder
+from mentalmodel.runtime.scheduler import execute_plan_nodes
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,6 +48,8 @@ class ExecutionResult:
     framed_state: tuple[FramedStateValue[RuntimeValue], ...]
     spans: tuple[RecordedSpan, ...]
     trace_summary: dict[str, str | bool | None]
+    runtime_default_profile_name: str | None
+    runtime_profile_names: tuple[str, ...]
 
 
 class AsyncExecutor:
@@ -59,12 +63,14 @@ class AsyncExecutor:
         tracing: TracingAdapter | None = None,
         metrics: MetricEmitter | None = None,
         tracing_config: TracingConfig | None = None,
+        environment: RuntimeEnvironment = EMPTY_RUNTIME_ENVIRONMENT,
     ) -> None:
         self.max_concurrency = max(1, max_concurrency)
         self.recorder = recorder or ExecutionRecorder()
         self.tracing = tracing or create_tracing_adapter(config=tracing_config)
         metric_config = tracing_config if tracing_config is not None else self.tracing.config
         self.metrics = metrics or create_metric_emitter(config=metric_config)
+        self.environment = environment
 
     async def run(self, program: Workflow[NamedPrimitive]) -> ExecutionResult:
         compiled = compile_program(program)
@@ -73,6 +79,7 @@ class AsyncExecutor:
             recorder=self.recorder,
             tracing=self.tracing,
             metrics=self.metrics,
+            environment=self.environment,
         )
         emit_metric_batch(self.metrics, [run_started_observation(context.metric_context())])
         outputs: dict[str, RuntimeValue]
@@ -91,18 +98,14 @@ class AsyncExecutor:
             run_id=context.run_id,
             graph=compiled.graph,
             outputs=dict(outputs),
-            framed_outputs=tuple(
-                FramedNodeValue(node_id=node_id, frame=context.frame, value=value)
-                for node_id, value in sorted(outputs.items())
-            ),
+            framed_outputs=tuple(context.framed_outputs),
             records=tuple(self.recorder.records),
             state=dict(context.state_store),
-            framed_state=tuple(
-                FramedStateValue(state_key=state_key, frame=context.frame, value=value)
-                for state_key, value in sorted(context.state_store.items())
-            ),
+            framed_state=tuple(context.framed_state),
             spans=self.tracing.snapshot_spans(),
             trace_summary=self.tracing.trace_summary(),
+            runtime_default_profile_name=self.environment.default_profile_name,
+            runtime_profile_names=self.environment.profile_names(),
         )
 
     async def _execute(
@@ -111,56 +114,13 @@ class AsyncExecutor:
         compiled: CompiledProgram,
         context: ExecutionContext,
     ) -> dict[str, RuntimeValue]:
-        plan = compiled.plan
-        dependents = build_dependents(plan)
-        ready = sorted(
-            node_id for node_id, node in plan.nodes.items() if not node.metadata.dependencies
+        return await execute_plan_nodes(
+            plan=compiled.plan,
+            context=context,
+            run_node=self._run_node,
+            max_concurrency=self.max_concurrency,
+            initial_outputs=context.outputs,
         )
-        running: dict[asyncio.Task[tuple[str, RuntimeValue]], str] = {}
-        semaphore = asyncio.Semaphore(self.max_concurrency)
-        outputs = context.outputs
-
-        while ready or running:
-            while ready and len(running) < self.max_concurrency:
-                node_id = ready.pop(0)
-                node = plan.nodes[node_id]
-                task = asyncio.create_task(
-                    self._run_node(
-                        node=node,
-                        outputs=outputs,
-                        context=context,
-                        semaphore=semaphore,
-                    )
-                )
-                running[task] = node_id
-
-            if not running:
-                break
-
-            done, _ = await asyncio.wait(
-                list(running.keys()),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in done:
-                node_id = running.pop(task)
-                completed_node_id, output = task.result()
-                outputs[completed_node_id] = output
-                for dependent in sorted(dependents.get(node_id, set())):
-                    dependency_ids = set(plan.dependencies_for(dependent))
-                    if dependency_ids.issubset(outputs.keys()) and dependent not in ready:
-                        ready.append(dependent)
-                ready.sort()
-
-        unresolved = [
-            node_id
-            for node_id in plan.nodes
-            if node_id not in outputs and plan.nodes[node_id].metadata.kind != "invariant"
-        ]
-        if unresolved:
-            raise ExecutionError(
-                f"Execution finished with unresolved executable nodes: {sorted(unresolved)!r}"
-            )
-        return outputs
 
     async def _run_node(
         self,
@@ -187,16 +147,19 @@ class AsyncExecutor:
                 self.metrics,
                 [node_execution_observation(node_ctx.metric_context())],
             )
+            payload: dict[str, JsonValue] = {
+                "kind": node.metadata.kind,
+                "input_count": len(node.metadata.dependencies),
+            }
+            if node_ctx.runtime_profile is not None:
+                payload["runtime_profile"] = node_ctx.runtime_profile
             self.recorder.record(
                 run_id=node_ctx.run_id,
                 node_id=node.metadata.node_id,
                 event_type=NODE_STARTED,
                 timestamp_ms=node_ctx.clock.now_ms(),
                 frame=node_ctx.frame,
-                payload={
-                    "kind": node.metadata.kind,
-                    "input_count": len(node.metadata.dependencies),
-                },
+                payload=payload,
             )
             start_time_ms = node_ctx.clock.now_ms()
             node_success = False
@@ -240,21 +203,16 @@ class AsyncExecutor:
                     "output_type": type(output).__name__,
                 },
             )
+            node_ctx.framed_outputs.append(
+                FramedNodeValue(
+                    node_id=node.metadata.node_id,
+                    frame=node_ctx.frame,
+                    value=output,
+                )
+            )
             if node.metadata.kind == "invariant":
                 return node.metadata.node_id, output
             return node.metadata.node_id, output
-
-
-def build_dependents(plan: ExecutionPlan) -> dict[str, set[str]]:
-    """Build reverse dependency edges from a compiled plan."""
-
-    dependents: dict[str, set[str]] = defaultdict(set)
-    for node in plan.nodes.values():
-        for dependency in node.metadata.dependencies:
-            dependents[dependency].add(node.metadata.node_id)
-    return dependents
-
-
 def error_payload(exc: Exception) -> dict[str, JsonValue]:
     """Convert an exception into recorder-safe error metadata."""
 

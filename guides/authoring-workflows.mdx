@@ -233,11 +233,19 @@ That gives you:
 If the graph or docs become hard to read, the workflow is probably too hard to
 read too.
 
-## Current limitation
+## Native iteration is now available
 
 The package now has first-class reusable block instantiation via `Block` and
-`Use`, but it does not yet have native loop control flow. Larger iterative
-workflows still need extra authoring discipline until `StepLoop` lands.
+`Use`, and native sequential iteration via `StepLoop`.
+
+Use `StepLoop` when:
+
+- one block body should run once per item in a list
+- loop-carried state should be explicit
+- you want `.runs` and replay to preserve per-iteration causality
+
+Keep the top-level program readable by letting the loop body live in its own
+reusable block instead of inlining a large repeated fragment.
 
 ## Next steps
 
@@ -250,6 +258,9 @@ workflows still need extra authoring discipline until `StepLoop` lands.
   </Card>
   <Card title="Reusable blocks" icon="boxes-stacked" href="/guides/reusable-blocks">
     Learn how to reuse semantic fragments without manual prefix plumbing.
+  </Card>
+  <Card title="Step loops" icon="rotate" href="/guides/step-loops">
+    Learn how to model sequential multi-step workflows with carried state.
   </Card>
   <Card title="Parallel and join" icon="diagram-project" href="/guides/parallel-and-join">
     Go deeper on fanout, synchronization, and join reducers.

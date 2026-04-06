@@ -273,8 +273,9 @@ Some important clarifications:
 - `Parallel` is a grouping signal, not a magic scheduler override.
 - Child order is useful for readability, but true execution order comes from
   dependency edges and runtime readiness.
-- The current package does not yet have a native loop primitive. Multi-step
-  workflows are an active design area.
+- `StepLoop` is the current native iteration primitive. It is intentionally
+  narrower than a general `while` loop: sequential, block-based, and explicit
+  about loop-carried state.
 
 ## How to choose the right primitive
 
@@ -288,6 +289,7 @@ Ask these questions:
 | Am I fanning out independent work? | `Parallel` |
 | Am I synchronizing multiple upstream values? | `Join` |
 | Am I declaring a dependency edge? | `Ref` |
+| Am I iterating a reusable block over a list of items? | `StepLoop` |
 | Am I grouping nodes under a runtime boundary? | `RuntimeContext` |
 
 ## Next steps

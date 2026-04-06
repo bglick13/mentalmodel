@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from mentalmodel.core.interfaces import EffectHandler
 from mentalmodel.core.refs import InputRef
+from mentalmodel.environment import ResourceKey
 from mentalmodel.ir.graph import IRFragment, IRNode
 from mentalmodel.observability.metrics import OutputMetricSpec
 
@@ -22,6 +23,7 @@ class Effect(Generic[InputT, OutputT]):
     name: str
     handler: EffectHandler[InputT, OutputT]
     inputs: list[InputRef] = field(default_factory=list)
+    resources: tuple[ResourceKey[object], ...] = ()
     metrics: list[OutputMetricSpec[OutputT]] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
 

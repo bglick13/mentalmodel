@@ -16,6 +16,8 @@ The package is intended to provide:
 - An extension model so domain-specific primitives such as `RuntimeContext` can
   be added without changing the base package
 - Reusable verification helpers for common graph/runtime assertions
+- First-class runtime environments and typed shared resources via
+  `RuntimeEnvironment`, `RuntimeProfile`, and `ResourceKey`
 - A lightweight objective/search layer for bounded optimization over verifiable
   metric signals
 
@@ -129,6 +131,8 @@ Milestone 8 run-inspection commands:
   frames, use `--frame-id`, `--loop-node-id`, or `--iteration-index` to make
   `runs inputs`, `runs outputs`, `runs trace`, `runs records`, and `replay`
   target the exact iteration you mean
+- run summaries now also surface runtime environment metadata such as
+  `runtime_default_profile_name` and `runtime_profile_names`
 
 Run bundle versioning:
 

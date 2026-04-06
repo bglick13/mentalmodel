@@ -44,6 +44,7 @@ High-level metadata for the run:
 - node and edge counts
 - record/output/state counts
 - resolved tracing summary
+- runtime environment summary, including default profile and configured profile names
 
 Use this first when you want to know:
 
@@ -93,9 +94,10 @@ Each record now also carries execution-frame metadata:
 - `loop_node_id`
 - `iteration_index`
 
-Today most workflows only emit the root frame. The additive frame metadata is
-there so future looped workflows can remain inspectable without changing the
-bundle model again.
+Non-iterative workflows usually only emit the root frame. Looped workflows emit
+additional frames such as `steps[0]`, `steps[1]`, and `steps[2]`, and the same
+bundle model keeps those repeated executions inspectable without changing the
+artifact shape again.
 
 ### `outputs.json`
 

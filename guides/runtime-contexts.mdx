@@ -3,7 +3,15 @@ title: "Runtime Contexts"
 description: "Use RuntimeContext to annotate groups of nodes with named runtime boundaries and catch accidental boundary crossings at analysis time."
 ---
 
-`RuntimeContext` is a plugin primitive that wraps a group of children under a named runtime boundary. Today, `mentalmodel` uses this annotation for IR/docs visibility, metrics and tracing attributes, and boundary-crossing checks. It is not yet a built-in multi-runtime scheduler by itself.
+`RuntimeContext` is a plugin primitive that wraps a group of children under a
+named runtime boundary. Today, `mentalmodel` uses this annotation for:
+
+- IR and docs visibility
+- metrics and tracing attributes
+- boundary-crossing checks
+- runtime profile selection when a `RuntimeEnvironment` is configured
+
+It is still not a built-in multi-process scheduler by itself.
 
 ## Declaring a RuntimeContext
 
@@ -30,7 +38,9 @@ Supported runtime strings depend on your deployment configuration. The two most 
 | `"sandbox"` | Runs in an isolated compute environment |
 
 <Note>
-The `runtime` string is a free-form annotation. mentalmodel does not enforce a fixed enum — your execution backend reads the `runtime_context` metadata field from the IR and routes nodes accordingly.
+The `runtime` string is a free-form annotation. When a `RuntimeEnvironment` is
+present, `mentalmodel` treats it as the active runtime profile name for that
+subtree. Without a configured environment it remains a structural annotation.
 </Note>
 
 ## How RuntimeContext annotates the IR
@@ -106,6 +116,7 @@ assert_runtime_boundary_crossings(
 The `runtime_context` metadata field currently affects these surfaces directly:
 
 - generated docs and node inventory
+- runtime profile selection when a matching profile exists
 - span and metric attributes
 - runtime-boundary verification helpers
 - replay and run-bundle inspection

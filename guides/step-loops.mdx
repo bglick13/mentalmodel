@@ -1,0 +1,193 @@
+---
+title: "Step Loops"
+description: "Author sequential multi-step workflows with StepLoop, loop-carried state, and frame-aware inspection."
+---
+
+`StepLoop` is the first native iteration primitive in `mentalmodel`.
+
+Use it when one workflow body should execute repeatedly over a list of items,
+optionally carrying state from one iteration to the next.
+
+## What StepLoop gives you
+
+- explicit iteration in the authored model
+- loop-carried state via `LoopCarry`
+- iteration-local input binding via `LoopItemRef` and `LoopStateRef`
+- frame-aware `.runs`, replay, and trace inspection
+
+`StepLoop` is intentionally narrow in its first version:
+
+- iteration is sequential
+- `for_each` must resolve to a list
+- the loop body is a `Use(...)` of a reusable `Block`
+
+That constraint is deliberate. It keeps the semantics stable and legible while
+the package grows stronger temporal primitives.
+
+## Minimal example
+
+```python
+from mentalmodel import (
+    Block,
+    BlockInput,
+    BlockOutput,
+    BlockRef,
+    Effect,
+    Join,
+    LoopCarry,
+    LoopItemRef,
+    LoopStateRef,
+    LoopSummary,
+    Ref,
+    StepLoop,
+    Use,
+    Workflow,
+)
+
+step_block = Block(
+    "training_step",
+    inputs={
+        "item": BlockInput[object](),
+        "running_total": BlockInput[object](),
+    },
+    outputs={
+        "next_total": BlockOutput[object]("next_total"),
+        "step_report": BlockOutput[object]("step_report"),
+    },
+    children=(
+        Effect("square_item", handler=..., inputs=[BlockRef("item")]),
+        Join("next_total", reducer=..., inputs=[Ref("square_item"), BlockRef("running_total")]),
+        Join("step_report", reducer=..., inputs=[Ref("square_item"), BlockRef("running_total")]),
+    ),
+)
+
+program = Workflow(
+    "step_loop_demo",
+    children=(
+        Effect("numbers", handler=...),
+        StepLoop(
+            "steps",
+            body=Use(
+                "step",
+                block=step_block,
+                bind={
+                    "item": LoopItemRef(),
+                    "running_total": LoopStateRef("running_total"),
+                },
+            ),
+            for_each=Ref("numbers"),
+            carry=LoopCarry(
+                state_name="running_total",
+                initial=0,
+                next_state_output="next_total",
+            ),
+            summary=LoopSummary(
+                final_outputs=("next_total",),
+                history_outputs=("step_report",),
+            ),
+        ),
+    ),
+)
+```
+
+## How to read the model
+
+- `for_each=Ref("numbers")`
+  The loop iterates once per item from `numbers`.
+- `body=Use(...)`
+  The loop body is a real reusable block instance, not a special case.
+- `LoopItemRef()`
+  Bind the current iteration item into one block input.
+- `LoopStateRef("running_total")`
+  Bind the current carry state into one block input.
+- `LoopCarry(...)`
+  Declare the carried state name, its initial value, and which body output
+  becomes the next iteration's state.
+- `LoopSummary(...)`
+  Choose which body outputs to keep as final values and which to accumulate
+  across the whole loop history.
+
+## What the loop node returns
+
+The loop node itself returns a structured `StepLoopResult`:
+
+```python
+StepLoopResult(
+    iteration_count=3,
+    final_outputs={"next_total": 14},
+    history_outputs={
+        "step_report": [
+            {"item": 1, "squared": 1, "prior_total": 0, "next_total": 1},
+            {"item": 2, "squared": 4, "prior_total": 1, "next_total": 5},
+            {"item": 3, "squared": 9, "prior_total": 5, "next_total": 14},
+        ],
+    },
+    final_carry_state=14,
+)
+```
+
+Use `final_outputs` when downstream nodes care about the loop's final semantic
+result. Use `history_outputs` when you want a per-iteration audit trail.
+
+## How loop execution appears in `.runs`
+
+Loop bodies execute in nested frames such as:
+
+- `steps[0]`
+- `steps[1]`
+- `steps[2]`
+
+That means a loop body node like `steps.step.step_report` can produce multiple
+materialized outputs in one run. The inspection commands stay explicit about
+that:
+
+```bash
+mentalmodel runs outputs --graph-id step_loop_demo --node-id steps.step.step_report --frame-id steps[1]
+mentalmodel replay --graph-id step_loop_demo --loop-node-id steps --iteration-index 1
+```
+
+## Interpreting the output
+
+If `runs outputs` returns:
+
+```json
+{
+  "item": 2,
+  "squared": 4,
+  "prior_total": 1,
+  "next_total": 5
+}
+```
+
+that means:
+
+- you selected the second loop iteration
+- `step_report` executed inside frame `steps[1]`
+- the carried total entering that iteration was `1`
+- after processing item `2`, the carried total became `5`
+
+If `replay --frame-id steps[1]` shows `square_item`, `next_total`, and
+`step_report`, you are looking at the semantic event narrative for exactly that
+one iteration rather than the whole loop.
+
+## Validation rules
+
+`mentalmodel` rejects these at lowering time:
+
+- unknown loop body bindings
+- `LoopStateRef(...)` without `LoopCarry(...)`
+- `LoopStateRef(...)` names that do not match the declared carry state
+- `LoopSummary(...)` outputs that are not declared block outputs
+- negative `max_iterations`
+
+## Current scope
+
+Phase 19 intentionally keeps `StepLoop` narrow:
+
+- no parallel iteration execution
+- no `while`-style predicate loop
+- no multi-source zip iteration
+- no implicit mutation outside declared `LoopCarry`
+
+Those can be added later on top of the current frame-aware runtime model if
+they prove worth the added complexity.

@@ -8,6 +8,7 @@ from types import ModuleType
 from mentalmodel.analysis import AnalysisReport, run_analysis
 from mentalmodel.core.interfaces import NamedPrimitive, RuntimeValue
 from mentalmodel.core.workflow import Workflow
+from mentalmodel.environment import EMPTY_RUNTIME_ENVIRONMENT, RuntimeEnvironment
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import write_json
@@ -140,12 +141,20 @@ class RuntimeExecutionCapture:
     spans: tuple[RecordedSpan, ...]
     trace_sink_configured: bool
     trace_summary: dict[str, str | bool | None]
+    runtime_default_profile_name: str | None
+    runtime_profile_names: tuple[str, ...]
 
 
-def execute_program(program: Workflow[NamedPrimitive]) -> ExecutionResult:
+def execute_program(
+    program: Workflow[NamedPrimitive],
+    *,
+    environment: RuntimeEnvironment | None = None,
+) -> ExecutionResult:
     """Run one workflow through the deterministic async executor."""
 
-    return asyncio.run(AsyncExecutor().run(program))
+    return asyncio.run(
+        AsyncExecutor(environment=environment or EMPTY_RUNTIME_ENVIRONMENT).run(program)
+    )
 
 
 def run_verification(
@@ -154,12 +163,13 @@ def run_verification(
     module: ModuleType | None = None,
     runs_dir: Path | None = None,
     persist_run_artifacts: bool = True,
+    environment: RuntimeEnvironment | None = None,
 ) -> VerificationReport:
     """Run static analysis, runtime execution, and property checks."""
 
     graph = lower_program(program)
     analysis = run_analysis(graph)
-    runtime_capture = _capture_runtime(program)
+    runtime_capture = _capture_runtime(program, environment=environment)
     property_checks = (
         run_property_checks(module, program)
         if module is not None
@@ -187,6 +197,8 @@ def run_verification(
         verification_payload=report.as_dict(),
         trace_sink_configured=runtime_capture.trace_sink_configured,
         trace_summary=runtime_capture.trace_summary,
+        runtime_default_profile_name=runtime_capture.runtime_default_profile_name,
+        runtime_profile_names=runtime_capture.runtime_profile_names,
     )
     runtime = RuntimeVerificationResult(
         success=runtime_capture.result.success,
@@ -209,9 +221,16 @@ def run_verification(
     return final_report
 
 
-def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCapture:
+def _capture_runtime(
+    program: Workflow[NamedPrimitive],
+    *,
+    environment: RuntimeEnvironment | None = None,
+) -> RuntimeExecutionCapture:
     recorder = ExecutionRecorder()
-    executor = AsyncExecutor(recorder=recorder)
+    executor = AsyncExecutor(
+        recorder=recorder,
+        environment=environment or EMPTY_RUNTIME_ENVIRONMENT,
+    )
     try:
         result = asyncio.run(executor.run(program))
     except Exception as exc:
@@ -234,6 +253,8 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
             spans=executor.tracing.snapshot_spans(),
             trace_sink_configured=executor.tracing.sink_configured,
             trace_summary=executor.tracing.trace_summary(),
+            runtime_default_profile_name=executor.environment.default_profile_name,
+            runtime_profile_names=executor.environment.profile_names(),
         )
     return RuntimeExecutionCapture(
         result=RuntimeVerificationResult(
@@ -252,6 +273,8 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
         spans=result.spans,
         trace_sink_configured=executor.tracing.sink_configured,
         trace_summary=result.trace_summary,
+        runtime_default_profile_name=result.runtime_default_profile_name,
+        runtime_profile_names=result.runtime_profile_names,
     )
 
 

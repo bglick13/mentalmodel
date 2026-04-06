@@ -152,9 +152,9 @@ Important files include:
 - `state.json`
 - `otel-spans.jsonl` when local span mirroring is enabled
 
-The artifact model is already frame-aware even though native loop execution is
-still planned work. That is intentional: iteration support should land on top
-of a stable inspection model rather than forcing a second run-schema migration.
+The artifact model is frame-aware because loop bodies can now execute in nested
+frames such as `steps[0]` and `steps[1]`. That same additive model also keeps
+future temporal primitives from forcing a second run-schema migration.
 
 This is the main local debugging surface. A good mental model is:
 
@@ -187,12 +187,13 @@ much more useful.
 A few things to understand clearly:
 
 - the runtime is DAG-oriented today
-- there is not yet a native loop primitive
+- `StepLoop` is the current native loop primitive
 - execution is one run of one compiled workflow
-- `.runs` and replay already carry frame metadata, but current authored
-  workflows usually only use the root frame until native loop execution lands
+- `.runs` and replay carry frame metadata so repeated logical-node execution
+  stays inspectable instead of collapsing into one node id
 
-That is an active area of planned package work, not an accidental omission.
+More general temporal control flow is still an active roadmap area, but native
+sequential iteration is now part of the shipped model.
 
 ## The most useful commands to pair with the runtime
 
