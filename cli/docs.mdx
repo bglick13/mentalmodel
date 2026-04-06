@@ -1,0 +1,127 @@
+---
+title: "docs"
+description: "Generate markdown documentation artifacts from a mentalmodel program's IR."
+---
+
+The `docs` command lowers your program to the IR, runs analysis, and renders a set of markdown documentation artifacts. You can write the files to a directory, stream them to stdout, or both.
+
+## Usage
+
+```bash
+mentalmodel docs --entrypoint module:function --output-dir docs/mentalmodel
+```
+
+## Flags
+
+<ParamField query="--entrypoint" type="string" default="mentalmodel.examples.async_rl.demo:build_program">
+  Program entrypoint in `module.submodule:function_name` format. The CLI imports the module, calls the function, and expects a `Workflow` instance in return.
+</ParamField>
+
+<ParamField query="--output-dir" type="path">
+  Directory to write the generated markdown files. The directory is created if it does not exist. When omitted without `--stdout`, the artifacts are printed to stdout automatically.
+</ParamField>
+
+<ParamField query="--stdout" type="flag">
+  Also render each artifact to stdout as a Rich panel, even when `--output-dir` is provided. When neither `--output-dir` nor `--stdout` is specified, stdout rendering is the default.
+</ParamField>
+
+## Generated artifacts
+
+The command produces four files:
+
+| Filename | Description |
+|---|---|
+| `topology.md` | Topology overview: node count, edge count, finding count, node kinds, edge list, and findings summary |
+| `node-inventory.md` | Per-node documentation: kind, label, runtime context, plugin provenance, data dependencies/dependents, container relationships, and raw metadata |
+| `invariants.md` | Invariant catalog: severity, checker, and input dependencies for each invariant node |
+| `runtime-contexts.md` | Runtime context map: nodes grouped by their declared runtime context |
+
+### topology.md example
+
+```markdown
+# my-graph Topology
+
+- Nodes: 5
+- Edges: 4
+- Findings: 0
+
+## Node Kinds
+
+- `actor`: 2
+- `effect`: 1
+- `invariant`: 1
+- `workflow`: 1
+
+## Edges
+
+- `collect_data` -> `process_results` (`data`)
+- `process_results` -> `reward_signal` (`data`)
+- `workflow_root` -> `collect_data` (`contains`)
+
+## Findings
+
+- No findings.
+```
+
+### node-inventory.md example
+
+```markdown
+# my-graph Node Inventory
+
+## `collect_data`
+
+- Kind: `actor`
+- Label: `Collect Data`
+- Runtime Context: `async`
+- Plugin Kind: `builtin`
+- Plugin Origin: `mentalmodel.core`
+- Plugin Version: `1.0.0`
+- Data Dependencies: none
+- Data Dependents: `process_results`
+- Container Parent: `workflow_root`
+- Contained Children: none
+```
+
+### invariants.md example
+
+```markdown
+# my-graph Invariants
+
+## `output_bounds_check`
+
+- Severity: `error`
+- Checker: `range`
+- Inputs: `process_results`
+```
+
+### runtime-contexts.md example
+
+```markdown
+# my-graph Runtime Contexts
+
+## `async`
+
+- `collect_data` (`actor`, provenance=`builtin`)
+- `process_results` (`actor`, provenance=`builtin`)
+```
+
+## Examples
+
+<CodeGroup>
+```bash Write to directory
+mentalmodel docs \
+  --entrypoint mypackage.workflows:build_program \
+  --output-dir docs/mentalmodel
+```
+
+```bash Print to stdout only
+mentalmodel docs --entrypoint mypackage.workflows:build_program
+```
+
+```bash Write to directory and also print to stdout
+mentalmodel docs \
+  --entrypoint mypackage.workflows:build_program \
+  --output-dir docs/mentalmodel \
+  --stdout
+```
+</CodeGroup>

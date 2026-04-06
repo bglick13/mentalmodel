@@ -1,0 +1,58 @@
+---
+title: "CLI Overview"
+description: "Reference for all top-level mentalmodel CLI commands."
+---
+
+The `mentalmodel` CLI is installed as a console script when you install the package. After installation you can invoke it directly from your terminal:
+
+```bash
+mentalmodel --help
+```
+
+## Entrypoint format
+
+Several commands accept an `--entrypoint` flag. The value must be a Python import path and callable name separated by a colon:
+
+```
+module.submodule:function_name
+```
+
+For example:
+
+```bash
+mentalmodel check --entrypoint mypackage.workflows.main:build_program
+```
+
+The CLI imports `mypackage.workflows.main`, calls `build_program()`, and expects the return value to be a `Workflow` instance. If the attribute is not callable, the CLI uses it directly.
+
+## Machine-readable output
+
+Most commands support a `--json` flag. When you pass `--json`, the command writes a single JSON object to stdout instead of rendering Rich tables. Use this flag when piping output to other tools or calling the CLI from automation scripts:
+
+```bash
+mentalmodel check --entrypoint mypackage.workflows:build --json | jq .error_count
+```
+
+## Top-level commands
+
+| Command | Description |
+|---|---|
+| [`check`](/cli/check) | Run structural and semantic analysis on a program |
+| [`graph`](/cli/graph) | Render a Mermaid topology diagram from the IR |
+| [`docs`](/cli/docs) | Generate markdown documentation artifacts from the IR |
+| [`verify`](/cli/verify) | Run analysis, runtime verification, and property/Hypothesis checks |
+| [`replay`](/cli/replay) | Reconstruct the full semantic event timeline for one persisted run |
+| [`runs`](/cli/runs) | Inspect and compare persisted run bundles |
+| [`otel`](/cli/otel) | Inspect resolved OpenTelemetry config or materialize a demo stack |
+| [`install-skills`](/cli/install-skills) | Install packaged coding-agent skill templates |
+| [`demo`](/cli/demo) | Run or materialize a packaged reference demo |
+| [`doctor`](/cli/doctor) | Run preflight checks for agent and debugging setup |
+
+## Exit codes
+
+Commands that perform validation or verification return a non-zero exit code when issues are found:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success — no errors found |
+| `1` | Failure — one or more errors found |

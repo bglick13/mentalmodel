@@ -1,0 +1,227 @@
+---
+title: "OpenTelemetry"
+description: "mentalmodel emits OTel spans and metrics automatically for every run. Configure export mode, endpoint, and headers through environment variables, or write a self-hosted demo stack with a single command."
+---
+
+mentalmodel instruments every workflow execution with OpenTelemetry spans and metrics automatically. You do not need to add any instrumentation code to your handlers. The runtime records spans and metrics through its `TracingAdapter` and `MetricEmitter` for every node that executes.
+
+## Span attributes
+
+Every span the runtime emits carries a stable set of attributes drawn directly from the execution context:
+
+| Attribute | Type | Description |
+|---|---|---|
+| `mentalmodel.run_id` | string | Unique identifier for the current run |
+| `mentalmodel.node.id` | string | Node identifier as declared in the workflow |
+| `mentalmodel.node.kind` | string | Primitive kind: `actor`, `effect`, `invariant`, `join`, etc. |
+| `mentalmodel.runtime.context` | string | `RuntimeContext` name the node belongs to, if set |
+
+Span names follow the pattern `<kind>:<node_id>`, for example `effect:fetch_model` or `invariant:staleness_invariant`.
+
+<Note>
+The `mentalmodel.node.label`, `mentalmodel.workflow.id`, `mentalmodel.stateful`, and `mentalmodel.effectful` attributes shown in generated docs are derived from the IR node metadata and lowering context. They are stamped during lowering, not at runtime span emission.
+</Note>
+
+## Built-in metrics
+
+mentalmodel emits the following metrics for every run. All metrics carry `graph_id` and `service_name` as base attributes; node-level metrics add `node_kind` and `runtime_context` where applicable.
+
+| Metric | Instrument | Description |
+|---|---|---|
+| `mentalmodel.run.started` | Counter | Incremented once when a run begins |
+| `mentalmodel.run.completed` | Counter | Incremented once when a run ends; carries a `success` attribute |
+| `mentalmodel.node.executions` | Counter | Incremented once per node execution |
+| `mentalmodel.node.duration_ms` | Histogram | Node execution duration in milliseconds; carries a `success` attribute |
+| `mentalmodel.invariant.failures` | Counter | Incremented each time an invariant node throws; carries a `severity` attribute |
+
+These metrics are emitted by the runtime around every node call — no configuration required on your part.
+
+You can also attach output-derived metrics to any node using `infer_output_metrics()` or `extract_output_metrics()`:
+
+```python
+from mentalmodel import Effect, extract_output_metrics
+from mentalmodel import MetricContext, MetricExtractor, MetricObservation, MetricDefinition, MetricKind
+
+class SortMetricsExtractor(MetricExtractor[SortOutput]):
+    def extract(self, output: SortOutput, context: MetricContext) -> tuple[MetricObservation, ...]:
+        return (
+            MetricObservation(
+                definition=MetricDefinition(
+                    name="myapp.sort.comparison_count",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Total comparison count for one sorting run.",
+                ),
+                value=output["comparison_count"],
+                attributes=context.default_attributes(),
+            ),
+        )
+
+effect = Effect(
+    "sort_arrays",
+    handler=SortArrays(algorithm="merge"),
+    metrics=[extract_output_metrics(SortMetricsExtractor())],
+)
+```
+
+For flat numeric dictionaries you can skip the extractor entirely:
+
+```python
+from mentalmodel import Actor, infer_output_metrics
+
+actor = Actor(
+    "score_model",
+    handler=ScoreModelHandler(),
+    metrics=[infer_output_metrics(prefix="myapp.scoring")],
+)
+```
+
+`infer_output_metrics` only fires when the output is a mapping with up to eight numeric fields and safe key names. It emits one histogram per field.
+
+## Tracing modes
+
+The `TracingMode` enum controls how spans are exported. Resolve the active mode through environment variables or by passing a `TracingConfig` directly.
+
+| Mode | Behavior |
+|---|---|
+| `disk` | Spans are captured in-memory and written to the `.runs` bundle only. Default when no OTLP endpoint is set. |
+| `otlp_http` | Spans are exported via OTLP HTTP to an external sink and optionally mirrored to disk. |
+| `otlp_grpc` | Spans are exported via OTLP gRPC to an external sink and optionally mirrored to disk. |
+| `console` | Spans are printed to `stderr`. Useful for quick local inspection. |
+| `disabled` | All span capture and export is suppressed. The `mirror_to_disk` and `capture_local_spans` flags are forced to `false`. |
+
+## Environment configuration
+
+Set these variables before running any `mentalmodel` command to control tracing behavior:
+
+```bash
+# Required for OTLP export
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf   # or: grpc
+
+# Optional: authenticate to a managed OTLP backend
+OTEL_EXPORTER_OTLP_HEADERS=x-api-key=your-key,x-org-id=123
+
+# Optional: allow insecure gRPC connections
+OTEL_EXPORTER_OTLP_INSECURE=true
+
+# mentalmodel-specific overrides
+MENTALMODEL_OTEL_MODE=otlp_http             # explicit mode override
+MENTALMODEL_OTEL_SERVICE_NAME=my-service
+MENTALMODEL_OTEL_SERVICE_NAMESPACE=my-team
+MENTALMODEL_OTEL_SERVICE_VERSION=1.0.0
+MENTALMODEL_OTEL_MIRROR_TO_DISK=true        # write spans to .runs even with external sink
+MENTALMODEL_OTEL_CAPTURE_LOCAL_SPANS=true   # capture spans in-process for bundle writing
+```
+
+The runtime resolves `MENTALMODEL_OTEL_MODE` first. If it is absent, it infers the mode from `OTEL_TRACES_EXPORTER` and the presence of `OTEL_EXPORTER_OTLP_ENDPOINT`. When neither is set, the mode defaults to `disk`.
+
+<Warning>
+For OTLP HTTP export, the endpoint must end with `/v1/traces`. The runtime appends `/v1/traces` automatically if you supply only the base URL (e.g. `http://localhost:4318`), but it is cleaner to be explicit. The metrics exporter similarly rewrites the path to `/v1/metrics`.
+</Warning>
+
+## Inspecting the resolved configuration
+
+Run this command to print the fully resolved tracing configuration without starting a run:
+
+```bash
+mentalmodel otel show-config
+```
+
+The output maps directly to `TracingConfig.summary()`:
+
+```json
+{
+  "trace_mode": "otlp_http",
+  "trace_otlp_endpoint": "http://localhost:4318/v1/traces",
+  "trace_mirror_to_disk": true,
+  "trace_capture_local_spans": true,
+  "trace_sink_configured": true,
+  "trace_service_name": "mentalmodel-demo",
+  "trace_service_namespace": null,
+  "trace_service_version": null
+}
+```
+
+## Self-hosted demo stack
+
+`mentalmodel otel write-demo` materializes a complete self-hosted OpenTelemetry stack to a local directory without requiring you to write any Docker or env files.
+
+<Steps>
+  <Step title="Write the demo assets">
+    ```bash
+    mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
+    ```
+
+    This writes `docker-compose.otel-lgtm.yml`, `mentalmodel.otel.env`, and `OTEL-DEMO.md` to the output directory. The LGTM stack exposes:
+    - Grafana UI at `http://localhost:3000`
+    - OTLP HTTP ingest at `http://localhost:4318`
+    - OTLP gRPC ingest at `http://localhost:4317`
+  </Step>
+  <Step title="Start the stack">
+    ```bash
+    cd /tmp/mentalmodel-otel
+    docker compose -f docker-compose.otel-lgtm.yml up -d
+    ```
+  </Step>
+  <Step title="Export the tracing environment">
+    ```bash
+    set -a
+    source mentalmodel.otel.env
+    set +a
+    ```
+
+    The bundled env file sets:
+    ```bash
+    MENTALMODEL_OTEL_MODE=otlp_http
+    MENTALMODEL_OTEL_SERVICE_NAME=mentalmodel-demo
+    MENTALMODEL_OTEL_MIRROR_TO_DISK=true
+    MENTALMODEL_OTEL_CAPTURE_LOCAL_SPANS=true
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+    OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+    ```
+  </Step>
+  <Step title="Verify the resolved config">
+    ```bash
+    mentalmodel otel show-config
+    ```
+  </Step>
+  <Step title="Run a workflow and view traces">
+    ```bash
+    mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
+    ```
+
+    Open Grafana at `http://localhost:3000` to explore the traces.
+  </Step>
+</Steps>
+
+<CodeGroup>
+```bash Jaeger (traces only)
+mentalmodel otel write-demo --stack jaeger --output-dir /tmp/mentalmodel-jaeger
+cd /tmp/mentalmodel-jaeger
+docker compose -f docker-compose.otel-jaeger.yml up -d
+set -a
+source mentalmodel.otel.jaeger.env
+set +a
+# Jaeger UI: http://localhost:16686
+```
+
+```bash LGTM (full stack)
+mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
+cd /tmp/mentalmodel-otel
+docker compose -f docker-compose.otel-lgtm.yml up -d
+set -a
+source mentalmodel.otel.env
+set +a
+# Grafana: http://localhost:3000
+```
+</CodeGroup>
+
+## mirror_to_disk
+
+When `MENTALMODEL_OTEL_MIRROR_TO_DISK=true` (the default), the runtime writes captured spans to `otel-spans.jsonl` inside the `.runs` bundle even when an external OTLP sink is configured. This means you always have a local debugging surface regardless of whether your external collector is reachable.
+
+Set `MENTALMODEL_OTEL_MIRROR_TO_DISK=false` to suppress disk writes when you are sending to a managed backend and do not need the local copy.
+
+<Tip>
+Use `mentalmodel doctor` to verify your tracing configuration before a run. The doctor check calls `load_tracing_config()` and reports the resolved mode and endpoint as part of its standard output.
+</Tip>

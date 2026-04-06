@@ -1,0 +1,210 @@
+---
+title: "IR"
+description: "The intermediate representation (IR) that every primitive lowers into — the stable center of the mentalmodel system."
+---
+
+The IR (intermediate representation) is a directed graph of typed nodes and edges that all primitives compile into. It is the single artifact that every downstream tool consumes: docs generation, diagram rendering, static analysis, and the async runtime scheduler all read from the same `IRGraph`. Nothing downstream touches the authoring-layer primitives directly.
+
+---
+
+## Why the IR exists
+
+Writing programs as typed primitives (`Workflow`, `Actor`, `Effect`, etc.) gives you an ergonomic authoring layer. But running, analyzing, and documenting those programs requires a stable, uniform representation. The IR provides that contract. A new primitive added as a plugin lowers into the same `IRGraph`; every existing tool immediately works with it without modification.
+
+The IR also enforces two key properties:
+
+- **Stable identity** — every node's `node_id` equals the primitive's `name`, so the graph is deterministic and diff-friendly.
+- **Provenance** — every node records where it came from (`plugin_kind`, `plugin_origin`, `plugin_version`), so tooling can trace which plugin produced each part of the graph.
+
+---
+
+## Core data structures
+
+### IRNode
+
+```python
+@dataclass(slots=True, frozen=True)
+class IRNode:
+    """Canonical node in the lowered semantic graph."""
+
+    node_id: str
+    kind: str
+    label: str
+    metadata: dict[str, str] = field(default_factory=dict)
+```
+
+Each primitive becomes exactly one `IRNode`. The `kind` field matches the primitive type; `metadata` carries all semantic annotations as string key-value pairs.
+
+<AccordionGroup>
+  <Accordion title="Common metadata keys">
+
+| Key | Set by | Description |
+| --- | --- | --- |
+| `stateful` | `Actor.lower` | `"true"` when the node manages durable state. |
+| `effectful` | `Effect.lower` | `"true"` when the node crosses an impure boundary. |
+| `handler` | `Actor`, `Effect` | Class name of the registered handler. |
+| `checker` | `Invariant` | Class name of the registered checker. |
+| `reducer` | `Join` | Class name of the reducer, when present. |
+| `severity` | `Invariant` | `"error"` or `"warning"` (default `"error"`). |
+| `runtime_context` | `RuntimeContext` (propagated) | Name of the deployment context inherited by children. |
+| `plugin_kind` | Provenance | `"core"` for built-ins; plugin `kind` for extensions. |
+| `plugin_origin` | Provenance | Module path of the origin plugin. |
+| `plugin_version` | Provenance | Semver string, when the plugin declares one. |
+| `description` | `Workflow` | Human-readable description passed at construction. |
+
+  </Accordion>
+</AccordionGroup>
+
+### IREdge
+
+```python
+@dataclass(slots=True, frozen=True)
+class IREdge:
+    """Canonical directed edge in the lowered graph."""
+
+    edge_id: str
+    source_node_id: str
+    source_port: str
+    target_node_id: str
+    target_port: str
+    kind: str = "data"
+```
+
+Edges have two semantic kinds:
+
+- **`data`** — a `Ref` from one node's output port to another node's `input` port. The runtime scheduler reads these to determine execution order.
+- **`contains`** — a structural edge from a container node (workflow, parallel, runtime_context) to its direct children. Used by diagram renderers and docs generators.
+
+Edge ids are deterministic: `{source}:{source_port}->{target}:{target_port}:{kind}`.
+
+### IRFragment
+
+```python
+@dataclass(slots=True)
+class IRFragment:
+    """Fragment emitted by a primitive during lowering."""
+
+    nodes: list[IRNode] = field(default_factory=list)
+    edges: list[IREdge] = field(default_factory=list)
+
+    def extend(self, other: IRFragment) -> None:
+        self.nodes.extend(other.nodes)
+        self.edges.extend(other.edges)
+```
+
+Each `lower()` call returns one `IRFragment`. Container primitives extend their fragment with every child's fragment during the recursive traversal.
+
+### IRGraph
+
+```python
+@dataclass(slots=True, frozen=True)
+class IRGraph:
+    """Complete lowered graph for a program."""
+
+    graph_id: str
+    nodes: tuple[IRNode, ...]
+    edges: tuple[IREdge, ...]
+    metadata: dict[str, str] = field(default_factory=dict)
+
+    def node_ids(self) -> set[str]:
+        return {node.node_id for node in self.nodes}
+```
+
+`lower_program` assembles all fragments into a single frozen `IRGraph`. The `graph_id` equals the root `Workflow`'s `name` and is used as the directory name for run bundles under `.runs/`.
+
+---
+
+## Lowering primitives into the IR
+
+Call `lower_program` to compile a complete workflow:
+
+```python
+from mentalmodel import Workflow, Actor, Effect, Ref
+from mentalmodel.ir.lowering import lower_program
+
+workflow = Workflow(
+    name="my-pipeline",
+    children=[
+        Actor(name="fetch", handler=..., inputs=[]),
+        Effect(name="store", handler=..., inputs=[Ref("fetch")]),
+    ],
+)
+
+graph = lower_program(workflow)
+
+# Inspect nodes
+for node in graph.nodes:
+    print(node.node_id, node.kind, node.metadata.get("plugin_kind"))
+
+# Inspect edges
+for edge in graph.edges:
+    print(edge.source_node_id, "->", edge.target_node_id, f"({edge.kind})")
+```
+
+The `LoweringContext` drives the traversal. It:
+
+1. Resolves a lowering strategy — built-in `lower()` method or a registered `PrimitivePlugin`.
+2. Calls `lower_container` or `lower_leaf` depending on whether the primitive has children.
+3. Merges inherited metadata from parent containers into each node.
+4. Stamps provenance metadata onto every node.
+5. Raises `LoweringError` on duplicate node ids.
+
+---
+
+## What the IR powers
+
+<AccordionGroup>
+  <Accordion title="Docs generation">
+    The `mentalmodel.docs` package reads `IRGraph` nodes and edges to produce Markdown inventories and Mermaid diagrams. Because every primitive lowers to the same IR, docs are always in sync with the program structure.
+  </Accordion>
+
+  <Accordion title="Static analysis">
+    `run_graph_checks` and `run_semantic_checks` operate directly on `IRGraph`. They detect duplicate node ids, dangling edges, missing workflow roots, missing `runtime_context` annotations on `actor`/`effect`/`invariant` nodes, and missing plugin provenance. All findings reference nodes by `node_id`.
+
+    ```python
+    from mentalmodel.analysis.graph_checks import run_graph_checks
+    from mentalmodel.analysis.semantic_checks import run_semantic_checks
+
+    findings = run_graph_checks(graph) + run_semantic_checks(graph)
+    for f in findings:
+        print(f.severity, f.code, f.node_id, f.message)
+    ```
+  </Accordion>
+
+  <Accordion title="Runtime scheduling">
+    The async executor derives an `ExecutionPlan` directly from the `IRGraph`. It reads `data` edges to build a dependency map, then schedules nodes concurrently as their dependencies complete. The `graph_id` is embedded in every `ExecutionContext` so telemetry and recorder events are always tied back to the graph.
+  </Accordion>
+
+  <Accordion title="Debug bundles">
+    Each run writes artifacts under `.runs/<graph_id>/<run_id>/`. The `graph_id` comes from `IRGraph.graph_id`. `summary.json` records `node_count` and `edge_count` directly from the graph at the time of execution.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Inspecting the IR
+
+```python
+# Count nodes by kind
+from collections import Counter
+
+kind_counts = Counter(node.kind for node in graph.nodes)
+print(kind_counts)
+# Counter({'actor': 3, 'effect': 1, 'workflow': 1, 'runtime_context': 1, 'invariant': 1})
+
+# Find all stateful nodes
+stateful = [n for n in graph.nodes if n.metadata.get("stateful") == "true"]
+
+# Find all data edges crossing runtime contexts
+metadata_by_id = {n.node_id: n.metadata for n in graph.nodes}
+crossings = [
+    e for e in graph.edges
+    if e.kind == "data"
+    and metadata_by_id.get(e.source_node_id, {}).get("runtime_context")
+    != metadata_by_id.get(e.target_node_id, {}).get("runtime_context")
+]
+```
+
+<Note>
+The `IRGraph` is frozen (`frozen=True`). Once produced by `lower_program` it is never mutated. All analysis and execution operate on the same immutable snapshot.
+</Note>

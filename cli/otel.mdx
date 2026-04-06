@@ -1,0 +1,118 @@
+---
+title: "otel"
+description: "Inspect resolved OpenTelemetry configuration or materialize a self-hosted demo stack."
+---
+
+The `otel` command group provides two subcommands: one that shows the fully resolved tracing configuration for the current process, and one that writes a self-hosted OTel collector demo stack to disk.
+
+## otel show-config
+
+Show the fully resolved tracing configuration that `mentalmodel` will use at runtime. The config is assembled from environment variables and package defaults.
+
+```bash
+mentalmodel otel show-config
+```
+
+<ParamField query="--json" type="flag">
+  Emit a single JSON object instead of a Rich table.
+</ParamField>
+
+### Fields
+
+| Field | Description |
+|---|---|
+| `service_name` | OTel service name |
+| `service_namespace` | OTel service namespace |
+| `service_version` | OTel service version |
+| `mode` | Tracing mode (e.g. `disk`, `otlp`) |
+| `otlp_endpoint` | OTLP exporter endpoint URL |
+| `otlp_headers` | OTLP exporter headers (dict) |
+| `otlp_insecure` | Whether OTLP uses an insecure connection |
+| `mirror_to_disk` | Whether spans are also written to `.runs/` |
+| `capture_local_spans` | Whether local in-process spans are captured |
+| `external_sink_configured` | Whether an external OTLP sink is configured |
+
+### Example output
+
+```bash
+mentalmodel otel show-config --json
+```
+
+```json
+{
+  "capture_local_spans": true,
+  "external_sink_configured": false,
+  "mirror_to_disk": true,
+  "mode": "disk",
+  "otlp_endpoint": null,
+  "otlp_headers": {},
+  "otlp_insecure": false,
+  "service_name": "mentalmodel",
+  "service_namespace": "default",
+  "service_version": "0.1.0"
+}
+```
+
+---
+
+## otel write-demo
+
+Materialize a self-hosted OpenTelemetry demo stack to a local directory. Use this to spin up a working collector and visualization environment alongside your `mentalmodel` workflows.
+
+```bash
+mentalmodel otel write-demo --stack lgtm --output-dir ./otel-demo
+```
+
+<ParamField query="--stack" type="string" default="lgtm">
+  The demo stack to materialize. Accepted values:
+
+  - `lgtm` — Grafana + Loki + Tempo + Mimir (docker-compose)
+  - `jaeger` — Jaeger all-in-one (docker-compose)
+</ParamField>
+
+<ParamField query="--output-dir" type="path" required>
+  Directory where the stack files are written. Created if it does not exist.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON object listing the stack name, output directory, and written file paths.
+</ParamField>
+
+### Example
+
+```bash
+mentalmodel otel write-demo --stack lgtm --output-dir ./otel-demo
+```
+
+```bash
+mentalmodel otel write-demo --stack lgtm --output-dir ./otel-demo --json
+```
+
+```json
+{
+  "files": [
+    "./otel-demo/docker-compose.yml",
+    "./otel-demo/otel-collector-config.yaml"
+  ],
+  "output_dir": "./otel-demo",
+  "stack": "lgtm"
+}
+```
+
+---
+
+## Environment variables
+
+You can configure the OTLP exporter without code changes by setting environment variables before running any `mentalmodel` command:
+
+| Variable | Description |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC or HTTP endpoint (e.g. `http://localhost:4317`) |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Comma-separated `key=value` header pairs |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Set to `true` to disable TLS verification |
+| `OTEL_SERVICE_NAME` | Override the service name reported in traces |
+| `MENTALMODEL_MIRROR_TO_DISK` | Set to `true` to mirror OTLP spans to `.runs/` as well |
+
+<Tip>
+  After writing the demo stack, start it with `docker compose -f ./otel-demo/docker-compose.yml up -d`, then set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` before running `mentalmodel verify` to send traces to the local collector.
+</Tip>

@@ -1,0 +1,213 @@
+---
+title: "Runtime Contexts"
+description: "Use RuntimeContext to annotate groups of nodes with named runtime boundaries and catch accidental boundary crossings at analysis time."
+---
+
+`RuntimeContext` is a plugin primitive that wraps a group of children under a named runtime boundary. The executor and analysis layer use this annotation to enforce isolation, surface boundary crossings, and pass scheduling hints to the underlying compute backend.
+
+## Declaring a RuntimeContext
+
+`RuntimeContext` accepts a `name`, a `runtime` string, and a `children` list. Every child (and all of its descendants) inherits the `runtime_context` annotation in the IR.
+
+```python
+from mentalmodel.plugins.runtime_context import RuntimeContext
+
+RuntimeContext(
+    name="local_control_plane",
+    runtime="local",
+    children=[
+        Actor("policy_snapshot", handler=...),
+        Actor("batch_source", handler=...),
+    ],
+)
+```
+
+Supported runtime strings depend on your deployment configuration. The two most common values used in the built-in demos are:
+
+| Value | Meaning |
+|---|---|
+| `"local"` | Runs in the same process as the executor |
+| `"sandbox"` | Runs in an isolated compute environment |
+
+<Note>
+The `runtime` string is a free-form annotation. mentalmodel does not enforce a fixed enum — your execution backend reads the `runtime_context` metadata field from the IR and routes nodes accordingly.
+</Note>
+
+## How RuntimeContext annotates the IR
+
+When the program is lowered, `RuntimeContextPlugin` propagates the `runtime_context` value from the parent node down to every child via a child context. Each child node in the IR receives `runtime_context` in its `metadata` dict:
+
+```python
+# IRNode.metadata after lowering
+{
+    "runtime_context": "sandbox",
+    "handler": "PolicySampler",
+    "effectful": "true",
+}
+```
+
+This metadata is what analysis and verification helpers read when they check for boundary crossings.
+
+## Nesting RuntimeContexts
+
+You can nest `RuntimeContext` objects to build hierarchical isolation. The inner context overrides the outer one for its subtree:
+
+```python
+RuntimeContext(
+    name="local_control_plane",
+    runtime="local",
+    children=[
+        Actor("policy_snapshot", handler=...),
+        Actor("batch_source", handler=...),
+        RuntimeContext(
+            name="remote_sampling",
+            runtime="sandbox",
+            children=[
+                Effect(
+                    "sample_policy",
+                    handler=PolicySampler(group_size=4, sampler_lag=0),
+                    inputs=[Ref("batch_source"), Ref("policy_snapshot")],
+                )
+            ],
+        ),
+    ],
+)
+```
+
+In this structure `policy_snapshot` and `batch_source` are annotated `runtime_context=local` while `sample_policy` is annotated `runtime_context=sandbox`. The `sample_policy` node references `batch_source` and `policy_snapshot` via `Ref`, which creates a `local → sandbox` boundary crossing on that data edge.
+
+## Context-crossing checks
+
+Use `collect_runtime_boundary_observations` and `assert_runtime_boundary_crossings` from `mentalmodel.testing` to verify that your program only crosses boundaries you intend:
+
+```python
+from mentalmodel.testing.verification_helpers import (
+    collect_runtime_boundary_observations,
+    assert_runtime_boundary_crossings,
+)
+from mentalmodel.ir.lowering import lower_program
+
+graph = lower_program(build_program())
+observations = collect_runtime_boundary_observations(graph)
+
+assert_runtime_boundary_crossings(
+    observations,
+    allowed={
+        ("local", "sandbox"),   # data flows from local actors into remote sampling
+        ("sandbox", "local"),   # sampled output flows back to local reward fanout
+    },
+)
+```
+
+`assert_runtime_boundary_crossings` raises `AssertionError` listing every crossing that is not in your `allowed` set. This prevents accidental leaks where a node in a sensitive boundary reads from a node in an untrusted one.
+
+## Scheduling hints to the executor
+
+The `runtime_context` metadata field is a scheduling hint. When you configure a multi-runtime executor backend, it reads this field from each node's IR metadata and dispatches the node to the appropriate compute resource. Nodes with no `runtime_context` annotation run in the default local environment.
+
+<Tip>
+You do not need a multi-runtime executor to use `RuntimeContext`. Even in single-process mode the annotations appear in the IR and are surfaced by `assert_runtime_boundary_crossings` — giving you the same structural checks without deployment overhead.
+</Tip>
+
+## Full example: local_control_plane → remote_sampling
+
+The following is the complete `RuntimeContext` structure from the `async_rl` demo. `local_control_plane` wraps the entire program. Inside it, `remote_sampling` carves out a sandbox boundary for the expensive sampling `Effect`.
+
+```python
+from mentalmodel import Actor, Effect, Invariant, Join, Parallel, Ref, Workflow
+from mentalmodel.plugins.runtime_context import RuntimeContext
+
+
+def build_program(
+    group_size: int = 4,
+    *,
+    sampler_lag: int = 0,
+    max_off_policy_steps: int = 0,
+    initial_policy_version: int = 3,
+) -> Workflow[AsyncRlNode]:
+    return Workflow(
+        name="async_rl_demo",
+        description="Milestone 2 async RL demo authored in semantic primitives.",
+        children=[
+            RuntimeContext(
+                name="local_control_plane",
+                runtime="local",
+                children=[
+                    Actor[PolicySnapshotInputs, PolicySnapshotOutput, PolicySnapshotState](
+                        "policy_snapshot",
+                        handler=PolicySnapshot(initial_policy_version=initial_policy_version),
+                    ),
+                    Actor[BatchSourceInputs, list[PromptRecord], BatchState](
+                        "batch_source",
+                        handler=BatchSource(),
+                    ),
+                    # nested context: sandbox boundary for remote sampling
+                    RuntimeContext(
+                        name="remote_sampling",
+                        runtime="sandbox",
+                        children=[
+                            Effect[SamplePolicyInputs, SamplePolicyOutput](
+                                "sample_policy",
+                                handler=PolicySampler(
+                                    group_size=group_size,
+                                    sampler_lag=sampler_lag,
+                                ),
+                                inputs=[Ref("batch_source"), Ref("policy_snapshot")],
+                            )
+                        ],
+                    ),
+                    # remaining nodes inherit runtime="local" from the outer context
+                    Parallel[...](name="reward_fanout", children=[...]),
+                    Join[RolloutJoinInputs, RolloutJoinOutput](
+                        "rollout_join",
+                        inputs=[
+                            Ref("policy_snapshot"),
+                            Ref("sample_policy"),
+                            Ref("pangram_reward"),
+                            Ref("quality_reward"),
+                            Ref("kl_prefetch"),
+                        ],
+                        reducer=RolloutJoinReducer(),
+                    ),
+                    Invariant[InvariantInputs, int](
+                        "staleness_invariant",
+                        checker=PolicyStalenessChecker(
+                            max_off_policy_steps=max_off_policy_steps
+                        ),
+                        inputs=[Ref("rollout_join")],
+                    ),
+                    Actor[LearnerInputs, LearnerOutput, LearnerState](
+                        "learner_update",
+                        handler=LearnerUpdate(),
+                        inputs=[Ref("rollout_join")],
+                    ),
+                    Effect[RefreshInputs, RefreshOutput](
+                        "refresh_sampler",
+                        handler=RefreshSampler(),
+                        inputs=[Ref("learner_update")],
+                    ),
+                ],
+            )
+        ],
+    )
+```
+
+After lowering this program you can assert the exact set of boundary crossings you expect:
+
+```python
+from mentalmodel.ir.lowering import lower_program
+from mentalmodel.testing.verification_helpers import (
+    collect_runtime_boundary_observations,
+    assert_runtime_boundary_crossings,
+)
+
+graph = lower_program(build_program())
+observations = collect_runtime_boundary_observations(graph)
+
+# Only the local→sandbox crossing (batch_source/policy_snapshot → sample_policy)
+# and the sandbox→local crossing (sample_policy → reward fanout) are permitted.
+assert_runtime_boundary_crossings(
+    observations,
+    allowed={("local", "sandbox"), ("sandbox", "local")},
+)
+```

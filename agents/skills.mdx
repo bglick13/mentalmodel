@@ -1,0 +1,147 @@
+---
+title: "Agent Skills"
+description: "mentalmodel ships installable skill files for Codex and Claude. Install them once and your coding agent automatically follows the mentalmodel programming model, authoring rules, and debugging workflow."
+---
+
+mentalmodel bundles four skill files for AI coding agents. Each skill is a structured Markdown document the agent loads as context. Once installed, the agent knows how to author workflows correctly, write and debug invariants, build plugins, and follow the standard debugging workflow — without you having to repeat these rules in every prompt.
+
+## Bundled skills
+
+| Skill name | Purpose |
+|---|---|
+| `mentalmodel-base` | Core primitives, IR-first design, authoring rules, CLI reference, working loop |
+| `mentalmodel-plugin-authoring` | Plugin contract, lowering patterns, provenance requirements, proof points |
+| `mentalmodel-invariants-testing` | Invariant quality, property checks, verification workflow, helper selection |
+| `mentalmodel-debugging` | Full debugging order, what to inspect, investigation patterns, recipe docs |
+
+## Installing skills
+
+<CodeGroup>
+```bash Codex
+mentalmodel install-skills --agent codex
+```
+
+```bash Claude
+mentalmodel install-skills --agent claude
+```
+</CodeGroup>
+
+Skills install to the agent's conventional directory:
+- Codex: `~/.codex/skills/<skill-name>/SKILL.md`
+- Claude: `~/.claude/skills/<skill-name>/SKILL.md`
+
+Pass `--dry-run` to preview the install plan without writing any files:
+
+```bash
+mentalmodel install-skills --agent codex --dry-run
+mentalmodel install-skills --agent claude --dry-run
+```
+
+The dry-run output shows the resolved target directory and the full list of files that would be written. No files are created or modified.
+
+You can also target a custom directory:
+
+```bash
+mentalmodel install-skills --agent codex --target-dir /path/to/my/skills
+```
+
+The underlying API is `install_skills` from `mentalmodel.skills`:
+
+```python
+from mentalmodel.skills import install_skills
+
+plan = install_skills("codex", dry_run=True)
+print(plan.target_dir)
+for file in plan.files:
+    print(file.path)
+```
+
+## What skills teach agents
+
+Each skill covers a different layer of the mentalmodel programming model. Here is what the agent learns from each one.
+
+<AccordionGroup>
+  <Accordion title="mentalmodel-base">
+    The agent learns the core primitives — `Workflow`, `Actor`, `Effect`, `Invariant`, `Parallel`, `Join`, `Ref`, `RuntimeContext` — and the authoring rules that govern them:
+
+    - Prefer semantic primitives over ad hoc orchestration
+    - Route all impure work through `Effect`
+    - Keep dependencies explicit with `Ref`
+    - Add or update invariants at joins, state transitions, and policy boundaries
+    - Use `infer_output_metrics(...)` for flat, bounded numeric summaries
+    - Use `extract_output_metrics(...)` with a typed extractor for richer output shapes
+    - Preserve strong typing — never introduce `Any` to move faster
+
+    The skill also covers the full CLI reference (`check`, `verify`, `graph`, `docs`, `runs`, `replay`, `otel`, `doctor`) and the working loop:
+
+    ```python
+    from mentalmodel import Actor, Effect, Invariant, Ref, Workflow
+
+    program = Workflow(
+        name="hello_world",
+        children=[
+            Actor("source", handler=SourceHandler()),
+            Effect("transform", handler=TransformEffect(), inputs=[Ref("source")]),
+            Invariant("shape_ok", checker=ShapeChecker(), inputs=[Ref("transform")]),
+        ],
+    )
+    ```
+  </Accordion>
+  <Accordion title="mentalmodel-plugin-authoring">
+    The agent learns the plugin contract: implement `kind`, `origin`, and `version`; make `supports()` precise and non-overlapping; emit canonical IR only from `lower()`; stamp provenance through `LoweringContext`.
+
+    Required proof points the agent must verify before calling a plugin complete:
+    - Registry can resolve the plugin
+    - Lowered nodes include `plugin_kind` and `plugin_origin`
+    - Docs surface plugin provenance
+    - Missing plugin registration fails lowering
+    - Provenance regressions fail analysis
+    - Executable plugins emit normal runtime records, spans, metrics, and `.runs` artifacts
+  </Accordion>
+  <Accordion title="mentalmodel-invariants-testing">
+    The agent learns what makes a good invariant (checks semantic truths, falsifiable by a realistic bug, makes compared values explicit) and the common smells to avoid (invariant compares two values produced by the same step, property check only validates lengths).
+
+    It also learns the helper selection rules:
+    - `assert_aligned_key_sets(...)` for fanout/join map consistency
+    - `assert_monotonic_non_decreasing(...)` for version/cursor/epoch progress
+    - `assert_causal_order(...)` for observed-versus-current causal relationships
+    - `collect_runtime_boundary_observations(...)` + `assert_runtime_boundary_crossings(...)` for policy checks
+  </Accordion>
+  <Accordion title="mentalmodel-debugging">
+    The agent learns the full debugging order: `check` → `docs` → `doctor` → `verify` → `runs latest` → `otel show-config` → `replay` → `runs inputs/outputs/trace` → `runs diff` → `runs repair` → source inspection.
+
+    It also learns what to inspect for each bug class: topology bugs in `graph` and `topology.md`, boundary/provenance bugs in `node-inventory.md`, invariant bugs in `invariants.md` and checker inputs, runtime failures in `verification.json` and `records.jsonl`.
+  </Accordion>
+</AccordionGroup>
+
+## Verifying installation
+
+After installing, confirm the skills are readable with `mentalmodel doctor`:
+
+```bash
+mentalmodel doctor --agent codex
+```
+
+The `skills` check in the doctor report scans the target directory for each expected `SKILL.md` file and returns either `pass` (all present) or `fail` (with a list of missing skills):
+
+```json
+{
+  "name": "skills",
+  "status": "pass",
+  "message": "All packaged skills are installed.",
+  "details": {
+    "agent": "codex",
+    "target_dir": "/home/you/.codex/skills",
+    "installed_skills": [
+      "mentalmodel-base",
+      "mentalmodel-plugin-authoring",
+      "mentalmodel-invariants-testing",
+      "mentalmodel-debugging"
+    ]
+  }
+}
+```
+
+<Note>
+Skills are plain Markdown files. You can edit them after installation to add project-specific context or conventions. Re-running `mentalmodel install-skills` overwrites the files with the bundled versions, so keep custom edits in a separate file the agent loads alongside the skill files.
+</Note>

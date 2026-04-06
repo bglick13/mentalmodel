@@ -1,0 +1,188 @@
+---
+title: "Debugging"
+description: "Use mentalmodel doctor for preflight checks, the runs CLI to inspect execution bundles, replay to reconstruct run timelines, and runs diff to localize regressions across two runs."
+---
+
+mentalmodel gives you a structured debugging workflow built around the `.runs` bundle. Semantic records are the primary source of truth. OTel spans are the export layer. Start with records and escalate to spans only after the semantic picture is clear.
+
+## Preflight: mentalmodel doctor
+
+Run `mentalmodel doctor` before debugging a runtime issue to rule out setup problems:
+
+```bash
+mentalmodel doctor --entrypoint mentalmodel.examples.async_rl.demo:build_program
+```
+
+The doctor command runs five checks:
+
+| Check | What it verifies |
+|---|---|
+| `skills` | All packaged skill files are installed for the target agent |
+| `entrypoint` | The entrypoint module loads and returns a `Workflow` |
+| `runs` | The `.runs` directory exists and contains at least one persisted run |
+| `tracing` | The resolved `TracingConfig` is valid (no endpoint/mode conflict) |
+| `package_data` | Bundled skill templates and OTel demo files are present on disk |
+
+Each check returns a `DoctorStatus` of `pass`, `warn`, `fail`, or `skip`. Any `fail` causes the overall report to return `success: false`.
+
+<CodeGroup>
+```bash Human-readable output
+mentalmodel doctor --entrypoint mentalmodel.examples.async_rl.demo:build_program
+```
+
+```bash JSON output for automation
+mentalmodel doctor --json
+```
+</CodeGroup>
+
+<Tip>
+Run `mentalmodel doctor` as the first step whenever entrypoint resolution, skill availability, or tracing configuration looks suspicious. The tracing check calls `load_tracing_config()` directly and reports the full resolved config in its `details` map.
+</Tip>
+
+## Standard inspection workflow
+
+<Steps>
+  <Step title="Run verification and persist a bundle">
+    ```bash
+    mentalmodel verify --entrypoint <module:function>
+    ```
+    This writes a run bundle to `.runs/<graph_id>/<run_id>/`. Every subsequent inspection command reads from this bundle.
+  </Step>
+  <Step title="Identify the run">
+    ```bash
+    mentalmodel runs list --graph-id <graph_id>
+    mentalmodel runs latest --graph-id <graph_id>
+    ```
+    Use `runs list` to see all available run IDs sorted newest-first. Use `runs latest` when you want the most recent run summary without selecting by ID.
+  </Step>
+  <Step title="Read the run summary">
+    ```bash
+    mentalmodel runs show --graph-id <graph_id>
+    ```
+    The summary tells you whether the run succeeded, how many nodes and records were written, and what tracing mode was active.
+  </Step>
+  <Step title="Reconstruct the semantic event timeline">
+    ```bash
+    mentalmodel replay --graph-id <graph_id>
+    ```
+    `replay` builds a `ReplayReport` from `records.jsonl` and returns every `ReplayEvent` in sequence order plus a per-node `ReplayNodeSummary`. Each node summary includes `succeeded`, `failed`, and `invariant_passed` flags. This is the fastest way to understand the full run lifecycle without manually joining records and summary metadata.
+  </Step>
+  <Step title="Inspect a specific node">
+    ```bash
+    mentalmodel runs inputs --graph-id <graph_id> --node-id <node_id>
+    mentalmodel runs outputs --graph-id <graph_id> --node-id <node_id>
+    mentalmodel runs trace --graph-id <graph_id> --node-id <node_id>
+    ```
+    `runs inputs` reads the `node.inputs_resolved` event payload — the exact values the runtime bound before handler execution. `runs outputs` reads `outputs.json`. `runs trace` joins both records and OTel spans for the node into a single `RunNodeTrace`.
+  </Step>
+</Steps>
+
+## Debugging by error type
+
+### Structure bugs
+
+Use this recipe when a workflow shape looks wrong in generated docs, a node is missing, or edges are incorrect.
+
+<Steps>
+  <Step title="Check the lowered IR">
+    ```bash
+    mentalmodel check --entrypoint <module:function>
+    mentalmodel graph --entrypoint <module:function>
+    mentalmodel docs --entrypoint <module:function>
+    ```
+    Inspect the generated `topology.md`, `node-inventory.md`, and `runtime-contexts.md` to confirm the authored program lowered into the expected structure. Plugin provenance bugs and missing `Ref(...)` edges appear here, not at runtime.
+  </Step>
+  <Step title="Confirm structure before runtime debugging">
+    Do not start debugging a runtime symptom when the structure is already wrong in generated docs. Fix the authored workflow first, then re-run verification.
+  </Step>
+</Steps>
+
+Common patterns:
+- A plugin primitive lowered but provenance is missing — check `plugin_kind` and `plugin_origin` in `node-inventory.md`
+- A `Ref(...)` edge was not declared — the data edge will be absent from `topology.md`
+- An extension primitive was not registered — lowering fails or the node shape drifts silently
+
+### Invariant bugs
+
+Use this recipe when an invariant fails, looks vacuous, or appears to be checking the wrong values.
+
+```bash
+mentalmodel verify --entrypoint <module:function>
+mentalmodel runs inputs --graph-id <graph_id> --node-id <invariant_node>
+mentalmodel runs outputs --graph-id <graph_id> --node-id <invariant_node>
+mentalmodel runs trace --graph-id <graph_id> --node-id <invariant_node>
+mentalmodel runs outputs --graph-id <graph_id> --node-id <producer_node>
+```
+
+Ask:
+- Could the compared values ever diverge in a realistic bug?
+- Do the values come from truly independent sources?
+- Is the invariant using the real source values rather than a post-processed summary?
+
+Common strengthening moves: replace length-only checks with key-set equality, compare sampled versus current state directly, use `assert_causal_order(...)` for version/lag relationships.
+
+### Runtime failures
+
+Use this recipe when execution fails, a node throws, or a workflow succeeds but produces suspicious outputs.
+
+```bash
+mentalmodel doctor --entrypoint <module:function>
+mentalmodel verify --entrypoint <module:function>
+mentalmodel runs latest --graph-id <graph_id>
+mentalmodel runs show --graph-id <graph_id>
+mentalmodel replay --graph-id <graph_id>
+mentalmodel runs records --graph-id <graph_id> --node-id <node_id>
+mentalmodel runs trace --graph-id <graph_id> --node-id <node_id>
+mentalmodel runs inputs --graph-id <graph_id> --node-id <node_id>
+mentalmodel runs outputs --graph-id <graph_id> --node-id <node_id>
+```
+
+<Warning>
+Only check `otel show-config` or inspect `otel-spans.jsonl` after the semantic records picture is clear. Semantic records are the primary debugging source. OTel spans add timing and error context but do not replace records.
+</Warning>
+
+Common failure classes:
+- Missing upstream dependency or wrong `Ref(...)` — the node will not appear in `records.jsonl` or will show `node.failed`
+- Effect handler exception — look for `node.failed` with an `error` payload
+- Invariant failure — look for `invariant.checked` with `passed: false`
+- Plugin execution failure — the error type and message appear in the `node.failed` payload
+- Tracing config error — reported by `mentalmodel doctor` and does not affect semantic execution
+
+## Comparing two runs with runs diff
+
+`runs diff` builds a `RunDiff` that compares two persisted bundles from the same graph. Use it to localize a regression when behavior changes across a code or configuration change.
+
+```bash
+# List available run IDs
+mentalmodel runs list --graph-id <graph_id>
+
+# Full diff
+mentalmodel runs diff --graph-id <graph_id> --run-a <run_a_id> --run-b <run_b_id>
+
+# Narrow to one node
+mentalmodel runs diff --graph-id <graph_id> \
+  --run-a <run_a_id> --run-b <run_b_id> \
+  --node-id <node_id>
+
+# Narrow to one invariant
+mentalmodel runs diff --graph-id <graph_id> \
+  --run-a <run_a_id> --run-b <run_b_id> \
+  --invariant <invariant_node>
+```
+
+The diff surfaces:
+- `state_equal` — whether final state maps match
+- Per-node `events_equal`, `inputs_equal`, `outputs_equal`, and the full payloads for both runs
+- Per-invariant `outcome_run_a` / `outcome_run_b` and details
+
+Once you identify the diverged node with `runs diff`, drop back into `runs inputs`, `runs outputs`, and `runs trace` for that node specifically.
+
+## Per-node span inspection
+
+When timing precision matters or you need error details from a specific span, use `runs trace` to see the merged records-and-spans view for a node:
+
+```bash
+mentalmodel runs trace --graph-id <graph_id> --node-id <node_id>
+```
+
+The command returns a `RunNodeTrace` with two arrays: `records` (filtered rows from `records.jsonl`) and `spans` (filtered rows from `otel-spans.jsonl` matched by the `mentalmodel.node.id` span attribute). Span objects include `duration_ns`, `error_type`, and `error_message` for precise failure diagnosis.

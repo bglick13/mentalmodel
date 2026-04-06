@@ -1,0 +1,177 @@
+---
+title: "Run Bundles"
+description: "Every mentalmodel verify run writes a structured bundle to .runs/<graph_id>/<run_id>/. Use the CLI to list, inspect, compare, and repair bundles without writing any custom code."
+---
+
+Every time you run `mentalmodel verify`, the runtime persists a **run bundle** under `.runs/<graph_id>/<run_id>/`. The bundle is the canonical local debugging surface when no external observability sink is configured, and it remains available even when `mirror_to_disk` is enabled alongside an OTLP backend.
+
+## Bundle layout
+
+```
+.runs/
+└── <graph_id>/
+    └── <run_id>/
+        ├── summary.json         # Run metadata and tracing config snapshot
+        ├── verification.json    # Combined verification result
+        ├── records.jsonl        # Semantic execution events (one per line)
+        ├── outputs.json         # Per-node output payloads
+        ├── state.json           # Stateful node state at run end
+        └── otel-spans.jsonl     # OTel span mirror (written when mirror_to_disk=true)
+```
+
+## File reference
+
+<AccordionGroup>
+  <Accordion title="summary.json">
+    Contains run metadata and a snapshot of the resolved tracing configuration. The `schema_version` field lets the `runs repair` command backfill bundles written by older releases.
+
+    ```json
+    {
+      "schema_version": 3,
+      "graph_id": "async_rl_demo",
+      "run_id": "run-4a3f...",
+      "created_at_ms": 1712345678000,
+      "success": true,
+      "node_count": 6,
+      "edge_count": 5,
+      "record_count": 42,
+      "output_count": 4,
+      "state_count": 1,
+      "trace_mode": "disk",
+      "trace_sink_configured": false,
+      "trace_mirror_to_disk": true,
+      "trace_capture_local_spans": true,
+      "trace_service_name": "mentalmodel"
+    }
+    ```
+  </Accordion>
+  <Accordion title="verification.json">
+    Written by `mentalmodel verify`. Contains the combined verification result including per-invariant outcomes and any runtime error. Use this file first when a run fails — it shows both the `success` flag and a structured `runtime.error` field if execution threw.
+  </Accordion>
+  <Accordion title="records.jsonl">
+    Newline-delimited JSON. Each line is one `ExecutionRecord` serialized by `execution_record_to_json`. Records carry `node_id`, `event_type`, `sequence`, `timestamp_ms`, and `payload`.
+
+    The event types you will see most often are:
+
+    | Event type | When it fires |
+    |---|---|
+    | `node.started` | Before a node executes |
+    | `node.inputs_resolved` | After upstream outputs are bound |
+    | `node.succeeded` | After a node returns successfully |
+    | `node.failed` | When a node throws |
+    | `effect.invoked` | Before an effect handler runs |
+    | `effect.completed` | After an effect handler returns |
+    | `invariant.checked` | After an invariant checker runs |
+    | `state.read` | When a stateful actor reads its state |
+    | `state.transition` | When a stateful actor writes new state |
+
+    Start with `records.jsonl` before looking at OTel spans. Semantic records are the primary debugging source.
+  </Accordion>
+  <Accordion title="outputs.json">
+    A `{"outputs": {...}}` mapping from node ID to the serialized output value for every node that produced one. Use `runs outputs --node-id <name>` to read a single node's output without parsing the file manually.
+  </Accordion>
+  <Accordion title="state.json">
+    A `{"state": {...}}` mapping from node ID to the final persisted state for every stateful actor in the run. Useful when debugging state-transition bugs.
+  </Accordion>
+  <Accordion title="otel-spans.jsonl">
+    Written only when `mirror_to_disk=true` (the default). Each line is one `RecordedSpan` serialized by `recorded_span_to_json`. Each object carries `name`, `start_time_ns`, `end_time_ns`, `duration_ns`, `attributes`, `error_type`, and `error_message`.
+
+    Inspect this file after the semantic records are understood — spans add timing precision and error context, but they do not replace records as the primary source.
+  </Accordion>
+</AccordionGroup>
+
+## CLI commands
+
+All `runs` subcommands resolve the run bundle by `graph_id` and optionally by `run_id`. When `run_id` is omitted, the command uses the most recent run for that graph.
+
+<Steps>
+  <Step title="List all runs">
+    ```bash
+    mentalmodel runs list
+    mentalmodel runs list --graph-id async_rl_demo
+    ```
+    Returns runs sorted newest-first. Use this to find the run IDs you need for `diff` or targeted inspection.
+  </Step>
+  <Step title="Show run summary">
+    ```bash
+    mentalmodel runs show --graph-id async_rl_demo
+    mentalmodel runs show --graph-id async_rl_demo --run-id run-4a3f...
+    ```
+    Prints the parsed `RunSummary` including schema version, node/edge counts, and tracing config snapshot.
+  </Step>
+  <Step title="Resolve the latest run">
+    ```bash
+    mentalmodel runs latest --graph-id async_rl_demo
+    ```
+    Equivalent to `runs show` but always picks the most recent run. Useful in scripts.
+  </Step>
+  <Step title="Inspect node inputs">
+    ```bash
+    mentalmodel runs inputs --graph-id async_rl_demo --node-id staleness_invariant
+    ```
+    Reads the `node.inputs_resolved` event payload for the named node. This is exactly what the runtime bound before the handler executed — no inference, no re-derivation.
+  </Step>
+  <Step title="Inspect node outputs">
+    ```bash
+    mentalmodel runs outputs --graph-id async_rl_demo --node-id staleness_invariant
+    ```
+    Reads the serialized output payload from `outputs.json` for the named node.
+  </Step>
+  <Step title="Inspect the semantic trace for one node">
+    ```bash
+    mentalmodel runs trace --graph-id async_rl_demo --node-id staleness_invariant
+    ```
+    Returns the filtered `records.jsonl` rows for the node alongside matching OTel spans from `otel-spans.jsonl`. The combined view — a `RunNodeTrace` — is the fastest way to understand what happened at a specific node without manually joining files.
+  </Step>
+  <Step title="Inspect raw records">
+    ```bash
+    mentalmodel runs records --graph-id async_rl_demo --node-id staleness_invariant
+    ```
+    Returns only the `records.jsonl` rows for the node. Useful when you want event-type filtering without span data.
+  </Step>
+</Steps>
+
+## Comparing two runs
+
+`runs diff` compares two bundles from the same graph and returns a structured `RunDiff` containing per-node payload comparisons and per-invariant outcome diffs.
+
+```bash
+# Compare the two most recent runs for a graph
+mentalmodel runs diff --graph-id async_rl_demo --run-a <run_a_id> --run-b <run_b_id>
+
+# Narrow to one node
+mentalmodel runs diff --graph-id async_rl_demo \
+  --run-a <run_a_id> --run-b <run_b_id> \
+  --node-id staleness_invariant
+
+# Narrow to one invariant
+mentalmodel runs diff --graph-id async_rl_demo \
+  --run-a <run_a_id> --run-b <run_b_id> \
+  --invariant staleness_invariant
+```
+
+The diff result shows:
+
+- `state_equal` — whether the final state maps are identical
+- `node_diffs` — per-node `events_equal`, `inputs_equal`, `outputs_equal`, and the full payload for each run
+- `invariant_diffs` — per-invariant `outcome_run_a` / `outcome_run_b` and details payloads
+
+Use `runs diff` to localize a regression, then drop into `runs inputs`, `runs outputs`, and `runs trace` for the specific node that changed.
+
+## Schema versioning and repair
+
+The `summary.json` file carries a `schema_version` field (currently `3`). When you upgrade mentalmodel, older bundles may be missing fields that new code expects. Run the repair command to backfill them:
+
+```bash
+# Preview what would change without writing anything
+mentalmodel runs repair --dry-run
+
+# Apply repairs
+mentalmodel runs repair
+```
+
+`runs repair` calls `normalize_summary_payload` on every `summary.json` it finds, backfilling missing fields with safe defaults and updating `schema_version` to the current value. It only writes files that actually need changes.
+
+<Note>
+Repairs are deterministic. Running `runs repair` twice produces the same result as running it once.
+</Note>

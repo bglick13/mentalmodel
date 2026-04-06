@@ -1,0 +1,196 @@
+---
+title: "Runtime"
+description: "How the async runtime compiles a program, schedules nodes by dependency order, and records every execution event into a per-run debug bundle."
+---
+
+The mentalmodel runtime takes an authored `Workflow`, compiles it into an `IRGraph` plus a typed `ExecutionPlan`, and executes every node asynchronously in dependency order. Each run produces a self-contained debug bundle on disk and returns a structured `ExecutionResult`.
+
+---
+
+## Compilation pipeline
+
+Before any node executes, the program is compiled in two steps:
+
+<Steps>
+  <Step title="Lower to IR">
+    `lower_program(workflow)` traverses all primitives, calls each primitive's `lower()` method or dispatches to a registered plugin, and assembles a frozen `IRGraph`.
+  </Step>
+  <Step title="Build the execution plan">
+    `build_execution_plan(graph, primitives, registry)` reads the `IRGraph`'s `data` edges to build a dependency map, then compiles each node into a typed runtime node (`CompiledActorNode`, `CompiledEffectNode`, `CompiledJoinNode`, `CompiledInvariantNode`, or `CompiledPluginNode`). The result is an `ExecutionPlan`.
+  </Step>
+</Steps>
+
+```python
+from mentalmodel.runtime.plan import compile_program
+
+compiled = compile_program(workflow)
+# compiled.graph   — IRGraph
+# compiled.plan    — ExecutionPlan
+# compiled.program — original Workflow
+```
+
+---
+
+## AsyncExecutor
+
+`AsyncExecutor` runs a compiled plan. Construct it once and reuse it across runs.
+
+```python
+from mentalmodel.runtime.executor import AsyncExecutor
+import asyncio
+
+executor = AsyncExecutor(max_concurrency=8)
+result = asyncio.run(executor.run(workflow))
+
+print(result.run_id)          # "run-<uuid>"
+print(result.outputs)         # {node_id: output_value, ...}
+print(result.records)         # tuple[ExecutionRecord, ...]
+print(result.state)           # {state_key: last_state_value, ...}
+```
+
+**Scheduling algorithm:** the executor maintains a `ready` queue of nodes whose dependencies are all satisfied. At each step it launches up to `max_concurrency` nodes concurrently using `asyncio.create_task`. When a task completes it checks which downstream nodes have all their dependencies resolved and appends them to the ready queue. The queue is kept sorted to give deterministic traversal order across runs.
+
+---
+
+## ExecutionContext
+
+Every node receives a per-node `ExecutionContext` derived from the top-level run context. It carries everything a handler needs to interact with the runtime.
+
+```python
+@dataclass(slots=True)
+class ExecutionContext:
+    run_id: str           # "run-<uuid>" — stable across the entire run
+    graph: IRGraph        # the compiled graph
+    recorder: ExecutionRecorder
+    tracing: TracingAdapter
+    metrics: MetricEmitter
+    clock: Clock
+    node_id: str | None         # set per-node
+    node_kind: str | None       # set per-node
+    runtime_context: str | None # inherited from IRNode metadata
+    state_store: dict[str, RuntimeValue]
+    outputs: dict[str, RuntimeValue]
+```
+
+`ExecutionContext.create` generates a new `run_id` from `uuid4`. `for_node(ir_node)` creates a shallow copy with `node_id`, `node_kind`, and `runtime_context` set from the IR node — sharing the same `state_store` and `outputs` dicts across all nodes in the run.
+
+Handlers access the context through the `ctx` argument to `handle`, `invoke`, `check`, or `reduce`. Use `ctx.run_id` for correlation, `ctx.state_store` to read sibling actor state, and `ctx.recorder` to emit custom events.
+
+---
+
+## Execution events
+
+The recorder captures a sequential, timestamped event stream for every run. Each event is an `ExecutionRecord` with a `record_id`, `run_id`, `node_id`, `event_type`, `sequence`, `timestamp_ms`, and a `payload` dict.
+
+| Event type | Emitted by | Payload fields |
+| --- | --- | --- |
+| `node.started` | Executor | `kind`, `input_count` |
+| `node.inputs_resolved` | All node types | `input_keys`, `inputs` (serialized) |
+| `node.succeeded` | Executor | `kind`, `output_type` |
+| `node.failed` | Executor | `error`, `message` |
+| `state.read` | `CompiledActorNode` | `had_state` |
+| `state.transition` | `CompiledActorNode` | `from_state`, `to_state` (summarized) |
+| `effect.invoked` | `CompiledEffectNode` | `input_keys` |
+| `effect.completed` | `CompiledEffectNode` | `output_type` |
+| `join.resolved` | `CompiledJoinNode` | `input_keys` |
+| `invariant.checked` | `CompiledInvariantNode` | `passed`, `severity` |
+
+Events are appended in ascending `sequence` order. The sequence is global across all nodes in a single `ExecutionRecorder` instance.
+
+---
+
+## ExecutionRecorder
+
+```python
+@dataclass(slots=True)
+class ExecutionRecorder:
+    records: list[ExecutionRecord] = field(default_factory=list)
+    last_run_id: str | None = None
+
+    def record(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        event_type: str,
+        timestamp_ms: int,
+        payload: Mapping[str, JsonValue] | None = None,
+    ) -> ExecutionRecord: ...
+```
+
+By default the `AsyncExecutor` creates its own `ExecutionRecorder`. Pass a custom instance if you want to inspect records mid-run or share state across multiple executor calls:
+
+```python
+from mentalmodel.runtime.recorder import ExecutionRecorder
+
+recorder = ExecutionRecorder()
+executor = AsyncExecutor(recorder=recorder)
+result = asyncio.run(executor.run(workflow))
+
+node_events = [r for r in recorder.records if r.node_id == "scorer"]
+for event in node_events:
+    print(event.event_type, event.payload)
+```
+
+---
+
+## Per-run debug bundles
+
+When you call `write_run_artifacts`, the runtime writes a self-contained bundle to `.runs/<graph_id>/<run_id>/`:
+
+```
+.runs/
+└── order-pipeline/
+    └── run-<uuid>/
+        ├── summary.json        # schema_version, graph_id, run_id, node_count, ...
+        ├── records.jsonl       # one ExecutionRecord per line
+        ├── outputs.json        # serialized node output values
+        ├── state.json          # final actor state values
+        └── otel-spans.jsonl    # OpenTelemetry spans (when mirror_to_disk is enabled)
+```
+
+`summary.json` fields:
+
+| Field | Description |
+| --- | --- |
+| `schema_version` | Schema version (currently 3). |
+| `graph_id` | Matches `IRGraph.graph_id` and the directory name. |
+| `run_id` | Unique run identifier. |
+| `created_at_ms` | Timestamp of the first recorder event. |
+| `success` | Whether the run completed without raising. |
+| `node_count` / `edge_count` | Counts from the compiled `IRGraph`. |
+| `record_count` | Number of `ExecutionRecord` entries. |
+| `output_count` / `state_count` | Number of serialized output and state keys. |
+
+```python
+from mentalmodel.runtime.runs import list_run_summaries, load_run_records
+
+# List all runs for a graph, newest first
+summaries = list_run_summaries(graph_id="order-pipeline")
+
+# Load all records for one run
+records = load_run_records(graph_id="order-pipeline", run_id=summaries[0].run_id)
+
+# Filter to a specific node and event type
+scored_events = load_run_records(
+    graph_id="order-pipeline",
+    node_id="scorer",
+    event_type="state.transition",
+)
+```
+
+---
+
+## Deterministic execution
+
+The runtime provides deterministic execution guarantees:
+
+- **Stable node ids** — derived from primitive `name` fields, not positions.
+- **Stable edge ids** — `{source}:{port}->{target}:{port}:{kind}`.
+- **Sorted ready queue** — nodes are launched in alphabetical order when multiple become ready simultaneously.
+- **Sorted dependency tuples** — `ExecutionNodeMetadata.dependencies` is always `tuple(sorted(...))`.
+- **Stable run bundle paths** — `.runs/<graph_id>/<run_id>/` uses the stable `graph_id` and a UUID-based `run_id`.
+
+<Warning>
+If you rename a primitive, its `node_id` changes. Existing run bundles stored under the old name will not be found by queries that filter by `graph_id` or `node_id`.
+</Warning>

@@ -36,6 +36,22 @@ Verification:
 See [PLAN.md](/Users/ben/repos/mentalmodel/PLAN.md) for the concrete package
 plan, module layout, core interfaces, CLI surface, and a minimal async RL demo.
 
+## Docs
+
+The Mintlify docs source now lives in this repository.
+
+- Mintlify config: [docs.json](/Users/ben/repos/mentalmodel/docs.json)
+- Site entry pages: [index.mdx](/Users/ben/repos/mentalmodel/index.mdx),
+  [introduction.mdx](/Users/ben/repos/mentalmodel/introduction.mdx),
+  [quickstart.mdx](/Users/ben/repos/mentalmodel/quickstart.mdx),
+  [installation.mdx](/Users/ben/repos/mentalmodel/installation.mdx)
+- Existing operational docs and recipes remain under
+  [docs/](/Users/ben/repos/mentalmodel/docs)
+
+This repo should be treated as the source of truth for both package code and
+docs. The temporary generated docs repo should not be the long-term editing
+surface.
+
 ## Tooling
 
 The project uses a single `pyproject.toml` as the source of truth for Python

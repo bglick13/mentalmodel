@@ -1,0 +1,271 @@
+---
+title: "Optimization"
+description: "Define search objectives over workflows with VerifiableObjective, score candidates with evaluate_objective, and run bounded searches with search_objective or the AutoResearch plugin."
+---
+
+mentalmodel's optimization layer lets you define a verifiable objective over any workflow, run it against one or more candidate configurations, and select the best result. The `AutoResearch` plugin embeds this bounded search as a first-class node inside a larger workflow.
+
+## Core types
+
+Import everything from the top-level package:
+
+```python
+from mentalmodel import (
+    VerifiableObjective,
+    ObjectiveSignal,
+    ObjectiveDirection,
+    ObjectiveAggregation,
+    ObjectiveResult,
+    SearchResult,
+    evaluate_objective,
+    search_objective,
+)
+```
+
+### ObjectiveSignal
+
+`ObjectiveSignal` names the metric you want to optimize and tells the runtime how to aggregate and compare it:
+
+```python
+from mentalmodel import ObjectiveSignal, ObjectiveDirection, ObjectiveAggregation
+
+ObjectiveSignal(
+    metric_name="mentalmodel.demo.sorting.comparison_count",
+    direction=ObjectiveDirection.MINIMIZE,
+    aggregation=ObjectiveAggregation.LAST,
+    success_threshold=None,   # optional: run must reach this score to count as successful
+)
+```
+
+**`ObjectiveDirection`** controls which end of the score range is better:
+
+| Value | Meaning |
+|---|---|
+| `MAXIMIZE` | Higher score is better |
+| `MINIMIZE` | Lower score is better |
+
+**`ObjectiveAggregation`** controls how multiple observations of the same metric within one run are collapsed to a single score:
+
+| Value | Meaning |
+|---|---|
+| `LAST` | Use the final observed value |
+| `MAX` | Use the maximum observed value |
+| `MIN` | Use the minimum observed value |
+| `MEAN` | Use the arithmetic mean |
+| `SUM` | Use the sum |
+
+### VerifiableObjective
+
+`VerifiableObjective` wraps the signal with a factory function that builds the candidate program:
+
+```python
+from mentalmodel import VerifiableObjective
+
+VerifiableObjective(
+    name="sorting_efficiency",
+    signal=ObjectiveSignal(
+        metric_name="mentalmodel.demo.sorting.comparison_count",
+        direction=ObjectiveDirection.MINIMIZE,
+        aggregation=ObjectiveAggregation.LAST,
+    ),
+    build_candidate=build_candidate_program,    # Callable[[CandidateT], Workflow]
+    describe_candidate=lambda c: c,             # Callable[[CandidateT], str] — default is str()
+)
+```
+
+`build_candidate` receives one candidate value and returns a fully-built `Workflow`. The runtime lowers, verifies, and executes it with a `RecordingMetricEmitter` to capture the signal.
+
+### ObjectiveResult
+
+`evaluate_objective` returns an `ObjectiveResult` for a single candidate:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `objective_name` | `str` | Name of the objective |
+| `candidate_label` | `str` | String representation of the candidate |
+| `signal` | `ObjectiveSignal` | The signal used for scoring |
+| `score` | `float` | Aggregated score |
+| `metric_values` | `tuple[float, ...]` | All raw observations of the metric |
+| `verification_success` | `bool` | Whether IR analysis found no errors |
+| `success` | `bool` | `verification_success and threshold_passes(score)` |
+| `graph_id` | `str` | IR graph ID |
+| `run_id` | `str \| None` | Run ID from the executor |
+| `error` | `str \| None` | Error message if execution raised an exception |
+
+### SearchResult
+
+`search_objective` returns a `SearchResult` over a bounded candidate set:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `objective_name` | `str` | Name of the objective |
+| `best_candidate` | `CandidateT` | The candidate with the best successful score |
+| `best_result` | `ObjectiveResult` | Full result for the best candidate |
+| `results` | `tuple[ObjectiveResult, ...]` | All results in candidate order |
+
+`search_objective` raises `ObjectiveEvaluationError` if no candidate produces a successful result.
+
+## evaluate_objective
+
+Use `evaluate_objective` to score a single candidate synchronously:
+
+```python
+from mentalmodel import evaluate_objective
+
+result = evaluate_objective(objective, candidate="merge")
+print(result.score, result.success)
+```
+
+An async variant is also available:
+
+```python
+from mentalmodel.optimization import evaluate_objective_async
+
+result = await evaluate_objective_async(objective, candidate="merge")
+```
+
+## search_objective
+
+Use `search_objective` to evaluate a bounded set of candidates and return the best one:
+
+```python
+from mentalmodel import search_objective
+
+SortAlgorithm = Literal["insertion", "selection", "merge"]
+CANDIDATES: tuple[SortAlgorithm, ...] = ("insertion", "selection", "merge")
+
+result = search_objective(objective, CANDIDATES)
+print(result.best_candidate, result.best_result.score)
+```
+
+Candidates are evaluated sequentially. The winner is the candidate with the best score among those where `ObjectiveResult.success is True`.
+
+## Full example: autoresearch_sorting demo
+
+The following is the complete optimization setup from the `autoresearch_sorting` demo. It searches over three sorting algorithms and selects the one with the fewest comparisons.
+
+<Steps>
+  <Step title="Define the candidate program factory">
+    Each candidate is a `SortAlgorithm` string. `build_candidate_program` instantiates a `Workflow` around a `SortArrays` effect that runs the algorithm and emits `comparison_count` as a domain metric.
+
+    ```python
+    from mentalmodel import Effect, Invariant, Ref, Workflow, extract_output_metrics
+    from mentalmodel.plugins.runtime_context import RuntimeContext
+
+    def build_candidate_program(algorithm: SortAlgorithm) -> Workflow[CandidateSortingNode]:
+        return Workflow(
+            name=f"sorting_candidate_{algorithm}",
+            description="Bounded sorting candidate program evaluated by AutoResearch.",
+            children=[
+                RuntimeContext(
+                    name="sandbox_sorting",
+                    runtime="sandbox",
+                    children=[
+                        Effect[CandidateSortInputs, SortExecutionOutput](
+                            "sort_arrays",
+                            handler=SortArrays(algorithm=algorithm),
+                            metrics=[
+                                extract_output_metrics(
+                                    SortingMetricsExtractor(prefix="mentalmodel.demo.sorting")
+                                )
+                            ],
+                        ),
+                        Invariant[CandidateSortInvariantInputs, int](
+                            "sorting_invariant",
+                            checker=CandidateSortingInvariant(),
+                            inputs=[Ref("sort_arrays")],
+                        ),
+                    ],
+                )
+            ],
+        )
+    ```
+  </Step>
+  <Step title="Define the objective">
+    ```python
+    from mentalmodel import (
+        ObjectiveAggregation, ObjectiveDirection,
+        ObjectiveSignal, VerifiableObjective,
+    )
+
+    def build_objective() -> VerifiableObjective[SortAlgorithm]:
+        return VerifiableObjective(
+            name="sorting_efficiency",
+            signal=ObjectiveSignal(
+                metric_name="mentalmodel.demo.sorting.comparison_count",
+                direction=ObjectiveDirection.MINIMIZE,
+                aggregation=ObjectiveAggregation.LAST,
+            ),
+            build_candidate=build_candidate_program,
+            describe_candidate=lambda candidate: candidate,
+        )
+    ```
+  </Step>
+  <Step title="Run the search">
+    ```python
+    from mentalmodel import search_objective
+
+    SORT_CANDIDATES = ("insertion", "selection", "merge")
+
+    result = search_objective(build_objective(), SORT_CANDIDATES)
+    print(result.best_candidate)   # "merge"
+    print(result.best_result.score)
+    ```
+  </Step>
+</Steps>
+
+## AutoResearch plugin
+
+`AutoResearch` embeds the bounded search inside a workflow as a first-class node. Instead of calling `search_objective` imperatively, you declare the search as part of the program structure and attach downstream invariants or metrics to its output.
+
+```python
+from mentalmodel import AutoResearch, Invariant, Ref, Workflow, extract_output_metrics
+from mentalmodel.plugins.runtime_context import RuntimeContext
+
+def build_program() -> Workflow[SortingDemoNode]:
+    return Workflow(
+        name="autoresearch_sorting_demo",
+        description="Runtime-executable AutoResearch demo over bounded sorting candidates.",
+        children=[
+            RuntimeContext(
+                name="local_control_plane",
+                runtime="local",
+                children=[
+                    AutoResearch[SortAlgorithm](
+                        "autoresearch_sorting",
+                        objective=build_objective(),
+                        candidates=SORT_CANDIDATES,
+                        metrics=[
+                            extract_output_metrics(
+                                AutoResearchMetricsExtractor(
+                                    prefix="mentalmodel.demo.autoresearch"
+                                )
+                            )
+                        ],
+                    ),
+                    Invariant[SortInvariantInputs, float](
+                        "search_result_invariant",
+                        checker=SearchResultInvariant(),
+                        inputs=[Ref("autoresearch_sorting")],
+                    ),
+                ],
+            )
+        ],
+    )
+```
+
+`AutoResearch` produces an `AutoResearchOutput` dict at runtime:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `objective_name` | `str` | Name of the objective |
+| `metric_name` | `str` | Metric used for scoring |
+| `best_candidate` | `str` | String label of the winning candidate |
+| `best_score` | `float` | Score of the winning candidate |
+| `evaluated_candidate_count` | `int` | Total candidates evaluated |
+| `successful_candidate_count` | `int` | Candidates that passed both verification and threshold |
+| `candidate_results` | `list[CandidateResultPayload]` | Per-candidate details |
+
+<Note>
+`AutoResearch` runs `search_objective_async` internally. All candidate programs are executed with a `RecordingMetricEmitter`, so domain metrics from candidate programs do not leak into the outer program's OTel stream.
+</Note>

@@ -1,0 +1,185 @@
+---
+title: "AutoResearch"
+description: "AutoResearch embeds a bounded candidate search inside a mentalmodel workflow. Use it to evaluate competing implementations against a verifiable metric signal and pick the best one automatically."
+---
+
+`AutoResearch` is a plugin-authored primitive that runs a bounded search over a set of candidate workflows at runtime. You give it an objective — a named metric signal with a direction and an optional success threshold — and a list of candidates. At execution time it evaluates every candidate, scores them, and returns the best successful result as a structured `AutoResearchOutput`.
+
+## How it works
+
+`AutoResearch` lowers to a single IR node of kind `autoresearch`. At runtime, its executor calls `search_objective_async`, which:
+
+1. Builds one `Workflow` per candidate using your `build_candidate` function
+2. Lowers and executes each candidate in sequence using an `AsyncExecutor` with a `RecordingMetricEmitter`
+3. Scores each run by resolving the named metric signal from the captured observations
+4. Returns a `SearchResult` containing the best successful candidate and all per-candidate `ObjectiveResult` records
+
+A candidate is considered successful only when both conditions hold:
+- The verification analysis reports no errors (`not analysis.has_errors`)
+- The metric score clears the `success_threshold` (if one is set)
+
+If no candidate succeeds, `search_objective_async` raises `ObjectiveEvaluationError`.
+
+## Core types
+
+```python
+from mentalmodel.optimization import (
+    ObjectiveSignal,
+    ObjectiveDirection,
+    ObjectiveAggregation,
+    VerifiableObjective,
+    SearchResult,
+    ObjectiveResult,
+    search_objective,
+)
+from mentalmodel.integrations.autoresearch.plugin import AutoResearch, AutoResearchOutput
+```
+
+**`VerifiableObjective[CandidateT]`** — the lightweight objective wrapper:
+
+```python
+@dataclass(slots=True, frozen=True)
+class VerifiableObjective(Generic[CandidateT]):
+    name: str
+    signal: ObjectiveSignal
+    build_candidate: Callable[[CandidateT], Workflow[NamedPrimitive]]
+    describe_candidate: Callable[[CandidateT], str] = str
+```
+
+**`ObjectiveSignal`** — names the metric, direction, aggregation strategy, and optional threshold:
+
+```python
+@dataclass(slots=True, frozen=True)
+class ObjectiveSignal:
+    metric_name: str
+    direction: ObjectiveDirection       # "maximize" or "minimize"
+    aggregation: ObjectiveAggregation   # "last", "max", "min", "mean", "sum"
+    success_threshold: float | None = None
+```
+
+**`AutoResearchOutput`** — the typed dict returned by the plugin node at runtime:
+
+```python
+class AutoResearchOutput(TypedDict):
+    objective_name: str
+    metric_name: str
+    best_candidate: str
+    best_score: float
+    evaluated_candidate_count: int
+    successful_candidate_count: int
+    candidate_results: list[CandidateResultPayload]
+```
+
+## Using AutoResearch in a workflow
+
+The `autoresearch-sorting` demo (run with `mentalmodel demo autoresearch-sorting`) is the reference example. It searches over three sorting algorithms and picks the one with the lowest comparison count:
+
+```python
+from mentalmodel import Workflow, Invariant, Ref
+from mentalmodel.integrations.autoresearch.plugin import AutoResearch
+from mentalmodel.optimization import (
+    ObjectiveSignal, ObjectiveDirection, ObjectiveAggregation, VerifiableObjective,
+)
+from mentalmodel.plugins.runtime_context import RuntimeContext
+from mentalmodel import extract_output_metrics
+
+def build_objective() -> VerifiableObjective[SortAlgorithm]:
+    return VerifiableObjective(
+        name="sorting_efficiency",
+        signal=ObjectiveSignal(
+            metric_name="mentalmodel.demo.sorting.comparison_count",
+            direction=ObjectiveDirection.MINIMIZE,
+            aggregation=ObjectiveAggregation.LAST,
+        ),
+        build_candidate=build_candidate_program,
+        describe_candidate=lambda candidate: candidate,
+    )
+
+def build_program() -> Workflow[SortingDemoNode]:
+    return Workflow(
+        name="autoresearch_sorting_demo",
+        description="Runtime-executable AutoResearch demo over bounded sorting candidates.",
+        children=[
+            RuntimeContext(
+                name="local_control_plane",
+                runtime="local",
+                children=[
+                    AutoResearch[SortAlgorithm](
+                        "autoresearch_sorting",
+                        objective=build_objective(),
+                        candidates=SORT_CANDIDATES,
+                        metrics=[
+                            extract_output_metrics(
+                                AutoResearchMetricsExtractor(
+                                    prefix="mentalmodel.demo.autoresearch"
+                                )
+                            )
+                        ],
+                    ),
+                    Invariant[SortInvariantInputs, float](
+                        "search_result_invariant",
+                        checker=SearchResultInvariant(),
+                        inputs=[Ref("autoresearch_sorting")],
+                    ),
+                ],
+            )
+        ],
+    )
+```
+
+The downstream `Invariant` receives the full `AutoResearchOutput` and can assert on properties like `best_candidate` or `successful_candidate_count`.
+
+## Running the demo
+
+```bash
+# Run the demo and print the search result
+mentalmodel demo autoresearch-sorting
+
+# Run and emit JSON output
+mentalmodel demo autoresearch-sorting --json
+
+# Run and write the artifact bundle to disk
+mentalmodel demo autoresearch-sorting --write-artifacts --output-dir /tmp/demo
+```
+
+## Artifact bundle
+
+Call `write_autoresearch_bundle(output_dir)` to materialize a `program.md` + objective metadata bundle from the sorting demo. This is the autoresearch-style artifact format that defines a machine-readable research contract for an external search loop.
+
+```python
+from pathlib import Path
+from mentalmodel.integrations.autoresearch.adapter import write_autoresearch_bundle
+
+bundle = write_autoresearch_bundle(Path("/tmp/demo"))
+# bundle.program_path    → /tmp/demo/program.md
+# bundle.objective_path  → /tmp/demo/objective.json
+# bundle.candidates_path → /tmp/demo/candidates.json
+```
+
+The three files produced are:
+
+| File | Contents |
+|---|---|
+| `program.md` | Human- and machine-readable description of the objective, metric signal, and evaluation loop |
+| `objective.json` | Serialized `ObjectiveSignal` — `metric_name`, `direction`, `aggregation`, `success_threshold` |
+| `candidates.json` | Candidate list and evaluation notes |
+
+The `program.md` format mirrors the `karpathy/autoresearch` `program.md` convention — a machine-readable objective contract for a bounded, deterministic search space over mentalmodel workflows.
+
+## Relationship to VerifiableObjective and search_objective
+
+`AutoResearch` wraps `VerifiableObjective` for use inside the runtime execution graph. If you want to run the search directly from Python without embedding it in a workflow, use `search_objective` or `search_objective_async` directly:
+
+```python
+from mentalmodel.optimization import search_objective
+
+result = search_objective(build_objective(), SORT_CANDIDATES)
+print(result.best_candidate)    # "merge"
+print(result.best_result.score) # lowest comparison count
+```
+
+`search_objective` is a synchronous wrapper around `search_objective_async`. Both return a `SearchResult[CandidateT]` with the best candidate and the full list of per-candidate `ObjectiveResult` objects.
+
+<Note>
+`AutoResearch` uses a `RecordingMetricEmitter` internally to capture metric observations from candidate runs. The metric signal must be emitted during candidate execution — either through `extract_output_metrics(...)` or `infer_output_metrics(...)` on the candidate node — or `search_objective_async` will raise `ObjectiveEvaluationError` when it tries to resolve the signal.
+</Note>

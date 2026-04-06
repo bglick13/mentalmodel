@@ -1,0 +1,67 @@
+---
+title: "mentalmodel"
+description: "A Python SDK for authoring programs with mechanically recoverable topology, causality, state transitions, effects, and invariants — built for humans and AI coding agents."
+---
+
+`mentalmodel` gives your Python programs a first-class semantic structure. Instead of ad hoc orchestration code, you describe your program using a small set of typed primitives — `Workflow`, `Actor`, `Effect`, `Invariant`, `Parallel`, `Join` — and the SDK takes care of execution, observability, static analysis, and documentation generation automatically.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="bolt" href="/quickstart">
+    Install the package and run your first workflow in minutes.
+  </Card>
+  <Card title="Core Concepts" icon="layer-group" href="/concepts/primitives">
+    Learn about primitives, the IR, and the runtime model.
+  </Card>
+  <Card title="Guides" icon="book-open" href="/guides/authoring-workflows">
+    Step-by-step walkthroughs of common patterns and use cases.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/cli/overview">
+    Explore all CLI commands for checking, graphing, and inspecting runs.
+  </Card>
+</CardGroup>
+
+## Why mentalmodel?
+
+Most programs grow opaque over time. Side effects scatter, invariants go unwritten, and execution order becomes implicit. `mentalmodel` makes every aspect of your program's structure explicit and machine-readable.
+
+<CardGroup cols={3}>
+  <Card title="Semantic Structure" icon="diagram-project">
+    Express topology, data flow, and runtime boundaries in code — not comments.
+  </Card>
+  <Card title="Built-in Observability" icon="chart-line">
+    Every run emits OpenTelemetry spans and structured execution records automatically.
+  </Card>
+  <Card title="AI-Ready" icon="robot">
+    Install coding-agent skills so AI tools understand your program's structure.
+  </Card>
+</CardGroup>
+
+## Get started in 3 steps
+
+<Steps>
+  <Step title="Install">
+    ```bash
+    pip install mentalmodel
+    ```
+  </Step>
+  <Step title="Author a workflow">
+    ```python
+    from mentalmodel import Workflow, Actor, Effect, Ref
+
+    def build_program():
+        return Workflow(
+            name="my_pipeline",
+            children=[
+                Actor("fetch_data", handler=FetchData()),
+                Effect("store_result", handler=StoreResult(), inputs=[Ref("fetch_data")]),
+            ],
+        )
+    ```
+  </Step>
+  <Step title="Check and run">
+    ```bash
+    mentalmodel check --entrypoint mymodule:build_program
+    mentalmodel verify --entrypoint mymodule:build_program
+    ```
+  </Step>
+</Steps>

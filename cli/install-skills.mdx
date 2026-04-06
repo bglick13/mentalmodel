@@ -1,0 +1,72 @@
+---
+title: "install-skills"
+description: "Install packaged coding-agent skill templates for mentalmodel."
+---
+
+The `install-skills` command writes a set of packaged skill template files to the default skill directory for a supported coding agent. Skills teach the agent how to work with `mentalmodel` programs, write invariants, author plugins, and debug runs.
+
+## Usage
+
+```bash
+mentalmodel install-skills --agent codex
+```
+
+## Flags
+
+<ParamField query="--agent" type="string" default="codex">
+  The coding agent to install skills for. Accepted values: `codex`, `claude`.
+</ParamField>
+
+<ParamField query="--target-dir" type="path">
+  Override the default skill installation directory. When omitted, skills are written to the agent's standard skill directory.
+</ParamField>
+
+<ParamField query="--dry-run" type="flag">
+  Preview what files would be written without writing anything. The same table is rendered, but no files are created on disk.
+</ParamField>
+
+## Installed skills
+
+The following skill templates are installed for each supported agent:
+
+| Skill | Description |
+|---|---|
+| `mentalmodel-base` | Core concepts: workflows, actors, effects, invariants, and the IR |
+| `mentalmodel-plugin-authoring` | How to author and register custom plugins |
+| `mentalmodel-invariants-testing` | Writing, testing, and debugging invariants |
+| `mentalmodel-debugging` | Inspecting run bundles and replaying executions with the CLI |
+
+## Examples
+
+<CodeGroup>
+```bash Install for Codex (default)
+mentalmodel install-skills
+```
+
+```bash Install for Claude
+mentalmodel install-skills --agent claude
+```
+
+```bash Custom target directory
+mentalmodel install-skills --agent codex --target-dir ./agent-skills
+```
+
+```bash Preview without writing
+mentalmodel install-skills --agent codex --dry-run
+```
+</CodeGroup>
+
+## Output
+
+The command renders a table showing the agent, target directory, and full path of each file that was (or would be) written:
+
+| Agent | Target | File |
+|---|---|---|
+| codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-base.md |
+| codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-plugin-authoring.md |
+| codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-invariants-testing.md |
+| codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-debugging.md |
+
+<Note>
+  Use `--dry-run` to verify the target paths before committing to installation, especially when using `--target-dir` with a custom location.
+</Note>

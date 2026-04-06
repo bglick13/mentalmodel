@@ -1,0 +1,372 @@
+---
+title: "Quick start"
+description: "Install mentalmodel, write a workflow, and run the CLI tools in five minutes."
+---
+
+## Prerequisites
+
+- Python 3.11 or higher
+- `pip` or `uv` (uv recommended)
+
+<Steps>
+
+<Step title="Install mentalmodel">
+
+<CodeGroup>
+
+```bash pip
+pip install mentalmodel
+```
+
+```bash uv
+uv add mentalmodel
+```
+
+</CodeGroup>
+
+Verify the install:
+
+```bash
+mentalmodel --help
+```
+
+</Step>
+
+<Step title="Write your first workflow">
+
+Create a file called `demo.py`. The example below is the `async_rl` reference demo that ships with `mentalmodel`. It models an async reinforcement learning pipeline using semantic primitives.
+
+```python
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import TypedDict
+
+from mentalmodel.core import (
+    Actor,
+    ActorHandler,
+    Effect,
+    EffectHandler,
+    Invariant,
+    InvariantChecker,
+    InvariantResult,
+    Join,
+    JoinReducer,
+    Parallel,
+    Ref,
+    Workflow,
+)
+from mentalmodel.core.models import ActorResult
+from mentalmodel.plugins.runtime_context import RuntimeContext
+from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.testing import assert_causal_order, invariant_fail, invariant_pass
+
+
+# --- Type definitions ---
+
+class BatchSourceInputs(TypedDict):
+    pass
+
+class BatchState(TypedDict):
+    cursor: int
+
+class PromptRecord(TypedDict):
+    prompt_id: str
+    prompt_text: str
+
+class SamplePolicyInputs(TypedDict):
+    batch_source: list[PromptRecord]
+
+class SampleRecord(TypedDict):
+    prompt_id: str
+    sample_index: int
+    completion_text: str
+
+class SamplePolicyOutput(TypedDict):
+    sampled_policy_version: int
+    samples: list[SampleRecord]
+
+RewardScores = dict[str, float]
+
+class RewardInputs(TypedDict):
+    sample_policy: SamplePolicyOutput
+
+class RolloutJoinInputs(TypedDict):
+    sample_policy: SamplePolicyOutput
+    pangram_reward: RewardScores
+    quality_reward: RewardScores
+
+class RolloutJoinOutput(TypedDict):
+    sampled_policy_version: int
+    samples: list[SampleRecord]
+    pangram_scores: RewardScores
+    quality_scores: RewardScores
+
+class LearnerState(TypedDict):
+    policy_version: int
+
+class LearnerInputs(TypedDict):
+    rollout_join: RolloutJoinOutput
+
+class LearnerOutput(TypedDict):
+    updated_policy_version: int
+    sample_count: int
+
+class InvariantInputs(TypedDict):
+    rollout_join: RolloutJoinOutput
+
+
+# --- Handlers ---
+
+@dataclass(slots=True)
+class BatchSource(ActorHandler[BatchSourceInputs, BatchState, list[PromptRecord]]):
+    async def handle(self, inputs: BatchSourceInputs, state: BatchState | None, ctx: ExecutionContext) -> ActorResult[list[PromptRecord], BatchState]:
+        del inputs, ctx
+        cursor = 0 if state is None else state["cursor"]
+        batch: list[PromptRecord] = [
+            {"prompt_id": f"prompt-{cursor}", "prompt_text": "Rewrite this sentence clearly."},
+            {"prompt_id": f"prompt-{cursor + 1}", "prompt_text": "Humanize this paragraph."},
+        ]
+        return ActorResult(output=batch, next_state={"cursor": cursor + len(batch)})
+
+
+@dataclass(slots=True)
+class PolicySampler(EffectHandler[SamplePolicyInputs, SamplePolicyOutput]):
+    group_size: int
+
+    async def invoke(self, inputs: SamplePolicyInputs, ctx: ExecutionContext) -> SamplePolicyOutput:
+        del ctx
+        batch = inputs["batch_source"]
+        await asyncio.sleep(0.01)
+        samples: list[SampleRecord] = [
+            {"prompt_id": p["prompt_id"], "sample_index": i, "completion_text": f"sample {i}"}
+            for p in batch
+            for i in range(self.group_size)
+        ]
+        return {"sampled_policy_version": 0, "samples": samples}
+
+
+@dataclass(slots=True)
+class PangramScorer(EffectHandler[RewardInputs, RewardScores]):
+    async def invoke(self, inputs: RewardInputs, ctx: ExecutionContext) -> RewardScores:
+        del ctx
+        samples = inputs["sample_policy"]["samples"]
+        await asyncio.sleep(0.02)
+        return {f"{s['prompt_id']}:{s['sample_index']}": 0.8 for s in samples}
+
+
+@dataclass(slots=True)
+class QualityScorer(EffectHandler[RewardInputs, RewardScores]):
+    async def invoke(self, inputs: RewardInputs, ctx: ExecutionContext) -> RewardScores:
+        del ctx
+        samples = inputs["sample_policy"]["samples"]
+        await asyncio.sleep(0.015)
+        return {f"{s['prompt_id']}:{s['sample_index']}": 0.6 for s in samples}
+
+
+@dataclass(slots=True)
+class RolloutJoinReducer(JoinReducer[RolloutJoinInputs, RolloutJoinOutput]):
+    async def reduce(self, inputs: RolloutJoinInputs, ctx: ExecutionContext) -> RolloutJoinOutput:
+        del ctx
+        sp = inputs["sample_policy"]
+        return {
+            "sampled_policy_version": sp["sampled_policy_version"],
+            "samples": sp["samples"],
+            "pangram_scores": inputs["pangram_reward"],
+            "quality_scores": inputs["quality_reward"],
+        }
+
+
+@dataclass(slots=True)
+class LearnerUpdate(ActorHandler[LearnerInputs, LearnerState, LearnerOutput]):
+    async def handle(self, inputs: LearnerInputs, state: LearnerState | None, ctx: ExecutionContext) -> ActorResult[LearnerOutput, LearnerState]:
+        del ctx
+        rollout = inputs["rollout_join"]
+        prev = 0 if state is None else state["policy_version"]
+        next_ver = prev + 1
+        return ActorResult(
+            output={"updated_policy_version": next_ver, "sample_count": len(rollout["samples"])},
+            next_state={"policy_version": next_ver},
+        )
+
+
+@dataclass(slots=True)
+class PolicyStalenessChecker(InvariantChecker[InvariantInputs, int]):
+    max_off_policy_steps: int
+
+    async def check(self, inputs: InvariantInputs, ctx: ExecutionContext) -> InvariantResult[int]:
+        del ctx
+        rollout = inputs["rollout_join"]
+        sampled = rollout["sampled_policy_version"]
+        current = rollout.get("sampled_policy_version", sampled)
+        details = {"sampled_policy_version": sampled, "current_policy_version": current}
+        try:
+            assert_causal_order(sampled, current, max_lag=self.max_off_policy_steps)
+        except AssertionError:
+            return invariant_fail(details=details)
+        return invariant_pass(details=details)
+
+
+# --- Program ---
+
+def build_program() -> Workflow:
+    return Workflow(
+        name="async_rl_demo",
+        description="Async RL pipeline authored in semantic primitives.",
+        children=[
+            RuntimeContext(
+                name="local_control_plane",
+                runtime="local",
+                children=[
+                    Actor("batch_source", handler=BatchSource()),
+                    RuntimeContext(
+                        name="remote_sampling",
+                        runtime="sandbox",
+                        children=[
+                            Effect(
+                                "sample_policy",
+                                handler=PolicySampler(group_size=4),
+                                inputs=[Ref("batch_source")],
+                            ),
+                        ],
+                    ),
+                    Parallel(
+                        name="reward_fanout",
+                        children=[
+                            Effect("pangram_reward", handler=PangramScorer(), inputs=[Ref("sample_policy")]),
+                            Effect("quality_reward", handler=QualityScorer(), inputs=[Ref("sample_policy")]),
+                        ],
+                    ),
+                    Join(
+                        "rollout_join",
+                        inputs=[Ref("sample_policy"), Ref("pangram_reward"), Ref("quality_reward")],
+                        reducer=RolloutJoinReducer(),
+                    ),
+                    Invariant(
+                        "staleness_invariant",
+                        checker=PolicyStalenessChecker(max_off_policy_steps=0),
+                        inputs=[Ref("rollout_join")],
+                    ),
+                    Actor("learner_update", handler=LearnerUpdate(), inputs=[Ref("rollout_join")]),
+                ],
+            )
+        ],
+    )
+```
+
+<Tip>
+The full reference demo with metrics, KL prefetch, and Hypothesis property checks lives at
+`mentalmodel/examples/async_rl/demo.py` in the source tree. Run it with
+`mentalmodel demo async-rl`.
+</Tip>
+
+</Step>
+
+<Step title="Check your workflow">
+
+Run `mentalmodel check` to lower your program into the IR and run static analysis:
+
+```bash
+mentalmodel check --entrypoint demo:build_program
+```
+
+A clean workflow produces no findings:
+
+```text
+No findings.
+```
+
+If there are structural problems—unresolved `Ref` targets, orphaned nodes, or missing invariants on stateful actors—they appear here with codes and node IDs before any code runs.
+
+</Step>
+
+<Step title="Verify your workflow">
+
+`mentalmodel verify` executes the program, checks invariants at runtime, and writes a debugging bundle to `.runs/<graph_id>/<run_id>/`:
+
+```bash
+mentalmodel verify --entrypoint demo:build_program
+```
+
+Expected output:
+
+```text
+Run complete. Invariants: 1 checked, 0 failed.
+Bundle written to .runs/async_rl_demo/<run_id>/
+```
+
+The bundle includes `verification.json`, `summary.json`, `records.jsonl`, `outputs.json`, and `state.json`. Use `mentalmodel runs latest --graph-id async_rl_demo` to inspect the most recent run.
+
+</Step>
+
+<Step title="Generate a Mermaid diagram">
+
+`mentalmodel graph` renders your program topology as a Mermaid flowchart:
+
+```bash
+mentalmodel graph --entrypoint demo:build_program
+```
+
+Output (truncated):
+
+```text
+flowchart LR
+    batch_source["batch_source<br/>actor"]
+    learner_update["learner_update<br/>actor"]
+    sample_policy["sample_policy<br/>effect"]
+    pangram_reward["pangram_reward<br/>effect"]
+    quality_reward["quality_reward<br/>effect"]
+    staleness_invariant["staleness_invariant<br/>invariant"]
+    rollout_join["rollout_join<br/>join"]
+    reward_fanout["reward_fanout<br/>parallel"]
+    local_control_plane["local_control_plane<br/>runtime_context"]
+    remote_sampling["remote_sampling<br/>runtime_context"]
+    async_rl_demo["async_rl_demo<br/>workflow"]
+    async_rl_demo -->|"contains"| local_control_plane
+    local_control_plane -->|"contains"| batch_source
+    ...
+    batch_source -->|"data"| sample_policy
+    sample_policy -->|"data"| pangram_reward
+    sample_policy -->|"data"| quality_reward
+    ...
+```
+
+Pass `--format json` to get the raw IR instead.
+
+</Step>
+
+<Step title="Generate markdown docs">
+
+`mentalmodel docs` writes a markdown documentation bundle derived from the IR:
+
+```bash
+mentalmodel docs --entrypoint demo:build_program --output docs/mentalmodel
+```
+
+This creates four files under `docs/mentalmodel/`:
+
+```text
+docs/mentalmodel/
+  topology.md        # node counts, edge list, findings summary
+  node-inventory.md  # per-node metadata
+  invariants.md      # invariant catalog with checkers and inputs
+  runtime-contexts.md # runtime boundary map
+```
+
+These files stay in sync with your code automatically because they are generated from the IR on every run.
+
+</Step>
+
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Core primitives" icon="shapes" href="/concepts/primitives">
+    Deep dive into Workflow, Actor, Effect, Invariant, Parallel, Join, Ref, and RuntimeContext.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/cli/overview">
+    Full reference for every mentalmodel command.
+  </Card>
+</CardGroup>

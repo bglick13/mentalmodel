@@ -1,0 +1,100 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "mentalmodel",
+  "theme": "luma",
+  "colors": {
+    "primary": "#5B6CF9",
+    "light": "#EEF0FF",
+    "dark": "#2E3570"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/bglick13/mentalmodel"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/primitives",
+              "concepts/ir",
+              "concepts/runtime",
+              "concepts/invariants",
+              "concepts/plugins"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/authoring-workflows",
+              "guides/effects-and-actors",
+              "guides/parallel-and-join",
+              "guides/runtime-contexts",
+              "guides/metrics",
+              "guides/optimization"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/opentelemetry",
+              "observability/run-bundles",
+              "observability/debugging",
+              "docs/otel-self-hosted"
+            ]
+          },
+          {
+            "group": "Recipes",
+            "pages": [
+              "docs/recipes/structure-debugging",
+              "docs/recipes/invariant-debugging",
+              "docs/recipes/runtime-failure-debugging",
+              "docs/recipes/run-comparison"
+            ]
+          },
+          {
+            "group": "Agent Integration",
+            "pages": [
+              "agents/skills",
+              "agents/autoresearch"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "Commands",
+            "pages": [
+              "cli/overview",
+              "cli/check",
+              "cli/graph",
+              "cli/docs",
+              "cli/verify",
+              "cli/replay",
+              "cli/runs",
+              "cli/otel",
+              "cli/install-skills",
+              "cli/demo",
+              "cli/doctor"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

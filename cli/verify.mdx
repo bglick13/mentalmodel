@@ -1,0 +1,106 @@
+---
+title: "verify"
+description: "Run analysis, runtime verification, and property/Hypothesis checks against a mentalmodel program."
+---
+
+The `verify` command combines static analysis, a live runtime execution, and any property-based tests defined in your module into a single pass. It persists a debug bundle to `.runs/` after each execution.
+
+## Usage
+
+```bash
+mentalmodel verify --entrypoint module:function
+```
+
+## Flags
+
+<ParamField query="--entrypoint" type="string" default="mentalmodel.examples.async_rl.demo:build_program">
+  Program entrypoint in `module.submodule:function_name` format. The CLI imports the module, calls the function, and expects a `Workflow` instance in return.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for persisted run artifacts. Defaults to `./.runs` in the current working directory.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a single JSON object to stdout instead of rendering Rich tables.
+</ParamField>
+
+## What it runs
+
+`verify` executes three phases in order:
+
+1. **Static analysis** — runs the same structural and semantic checks as [`mentalmodel check`](/cli/check).
+2. **Runtime verification** — executes the workflow and records outputs, state entries, and execution records.
+3. **Property checks** — discovers and runs any property-based tests (including Hypothesis-backed tests) defined in the module.
+
+Each run writes a debug bundle to `.runs/<graph_id>/<run_id>/`. Use [`mentalmodel runs`](/cli/runs) or [`mentalmodel replay`](/cli/replay) to inspect the bundle.
+
+## Output
+
+When you run without `--json`, the command renders up to three tables.
+
+**Summary table:**
+
+| Graph | Static Errors | Warnings | Runtime | Property Checks |
+|---|---|---|---|---|
+| my-graph | 0 | 1 | pass | 3 |
+
+**Runtime Verification table:**
+
+| Success | Records | Outputs | State Entries | Run Artifacts | Error |
+|---|---|---|---|---|---|
+| yes | 12 | 3 | 2 | .runs/my-graph/run-abc123 | |
+
+**Property Checks table** (shown when property checks exist):
+
+| Name | Hypothesis | Success | Error |
+|---|---|---|---|
+| test_output_bounds | yes | yes | |
+| test_invariant_holds | no | yes | |
+
+When no property checks are discovered, the CLI prints a yellow notice.
+
+## Examples
+
+<CodeGroup>
+```bash Basic verify
+mentalmodel verify --entrypoint mypackage.workflows:build_program
+```
+
+```bash Custom runs directory
+mentalmodel verify \
+  --entrypoint mypackage.workflows:build_program \
+  --runs-dir /tmp/my-runs
+```
+
+```bash JSON output
+mentalmodel verify \
+  --entrypoint mypackage.workflows:build_program \
+  --json
+```
+</CodeGroup>
+
+## Run artifacts
+
+After each invocation, `verify` writes a bundle to the runs directory:
+
+```
+.runs/
+└── <graph_id>/
+    └── <run_id>/
+        ├── summary.json
+        ├── verification.json
+        ├── records.jsonl
+        ├── outputs.json
+        ├── state.json
+        └── otel-spans.jsonl
+```
+
+Use [`mentalmodel runs show`](/cli/runs) to inspect the bundle contents.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | All phases passed — no static errors, runtime succeeded, all property checks passed |
+| `1` | One or more phases failed |

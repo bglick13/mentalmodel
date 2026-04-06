@@ -1,0 +1,88 @@
+---
+title: "Installation"
+description: "Install mentalmodel with pip or uv. Requires Python 3.11 or higher."
+---
+
+## Requirements
+
+- **Python 3.11 or higher** — required by the `pyproject.toml` constraint (`requires-python = ">=3.11"`)
+- `pip` or `uv`
+
+## Install
+
+<CodeGroup>
+
+```bash pip
+pip install mentalmodel
+```
+
+```bash uv (recommended)
+uv add mentalmodel
+```
+
+</CodeGroup>
+
+<Tip>
+`uv` is recommended for projects that already use it. It resolves the full dependency tree (including `opentelemetry-sdk`, `hypothesis`, and `rich`) faster and produces a lockfile you can commit.
+</Tip>
+
+## Verify the install
+
+Run the CLI help command to confirm the entry point is available:
+
+```bash
+mentalmodel --help
+```
+
+For a full preflight check—skill installation status, `.runs` directory availability, tracing config, and optional entrypoint resolution—use `mentalmodel doctor`:
+
+```bash
+mentalmodel doctor
+```
+
+Pass `--json` for machine-readable output useful in CI or agent automation:
+
+```bash
+mentalmodel doctor --json
+```
+
+## Runtime dependencies
+
+`mentalmodel` installs the following packages automatically:
+
+| Package | Purpose |
+|---|---|
+| `opentelemetry-sdk` | Async tracing and span export |
+| `opentelemetry-exporter-otlp-proto-http` | OTLP HTTP trace export |
+| `opentelemetry-exporter-otlp-proto-grpc` | OTLP gRPC trace export |
+| `hypothesis` | Property-based verification via `mentalmodel verify` |
+| `rich` | CLI output formatting |
+
+## Optional: pre-commit setup
+
+If your project uses `pre-commit`, add `ruff` hooks to lint and format your code automatically on every `git commit`. Install `pre-commit` separately if needed:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Or with uv:
+
+```bash
+uv add --dev pre-commit
+uv run pre-commit install
+```
+
+Once installed, `ruff check --fix` and `ruff format` run automatically on every `git commit`.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quick start" icon="bolt" href="/quickstart">
+    Write a workflow, run the CLI tools, and see your first generated diagram.
+  </Card>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Overview of mentalmodel's design and core primitives.
+  </Card>
+</CardGroup>

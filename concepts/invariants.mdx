@@ -1,0 +1,235 @@
+---
+title: "Invariants"
+description: "Named checkers that verify program constraints at runtime and as Hypothesis-backed property tests."
+---
+
+An `Invariant` is a named checker attached to explicit program values. It expresses a constraint — a range, an ordering, an alignment — that must hold either during every execution or across a range of generated inputs. When a check fails at runtime the executor raises `InvariantViolationError` immediately and records the failure as a metric observation.
+
+---
+
+## The InvariantChecker protocol
+
+Every invariant is backed by an `InvariantChecker` implementation:
+
+```python
+class InvariantChecker(Protocol[InputT_contra, DetailT]):
+    async def check(
+        self,
+        inputs: InputT_contra,
+        ctx: ExecutionContext,
+    ) -> InvariantResult[DetailT]:
+        """Evaluate the invariant against resolved inputs."""
+```
+
+`inputs` is a mapping from dependency node ids to their runtime output values. `ctx` provides `run_id`, recorder, and clock. Return an `InvariantResult`:
+
+```python
+@dataclass(slots=True)
+class InvariantResult(Generic[DetailT]):
+    passed: bool
+    details: Mapping[str, DetailT] = field(default_factory=dict)
+```
+
+`details` is a typed mapping of evidence attached to the result — useful for debugging failures. Use the provided helpers to construct results:
+
+```python
+from mentalmodel.testing.verification_helpers import invariant_pass, invariant_fail
+
+# passing result with optional evidence
+return invariant_pass(details={"score": score})
+
+# failing result — details are required
+return invariant_fail(details={"score": score, "max_allowed": 1.0})
+```
+
+---
+
+## Declaring an invariant
+
+```python
+from dataclasses import dataclass
+from mentalmodel import Invariant, Ref
+from mentalmodel.core.interfaces import InvariantChecker
+from mentalmodel.testing.verification_helpers import invariant_pass, invariant_fail
+
+@dataclass
+class ScoreInRangeChecker:
+    async def check(self, inputs, ctx):
+        score = inputs["scorer"]["score"]
+        if 0.0 <= score <= 1.0:
+            return invariant_pass(details={"score": score})
+        return invariant_fail(details={"score": score})
+
+score_check = Invariant(
+    name="score-in-range",
+    checker=ScoreInRangeChecker(),
+    inputs=[Ref("scorer")],
+    severity="error",   # "error" (default) or "warning"
+)
+```
+
+At runtime the executor:
+
+1. Resolves `inputs` from completed upstream outputs.
+2. Calls `checker.check(inputs, ctx)`.
+3. Records an `invariant.checked` event with `passed` and `severity`.
+4. If `passed=False`, raises `InvariantViolationError` and emits an `invariant_failure` metric.
+
+---
+
+## Severity
+
+Set `severity` to `"error"` (default) or `"warning"`. Both produce an `INVARIANT_CHECKED` record. Only `"error"` invariants that fail raise `InvariantViolationError` and halt execution. Use `"warning"` for non-fatal advisory checks.
+
+---
+
+## Property checks
+
+Property checks verify structural or semantic constraints against the authored program itself — before any runtime execution. They live in a module and are discovered by `discover_property_checks`.
+
+### Plain property checks
+
+Use `@property_check` for deterministic assertions:
+
+```python
+from mentalmodel.testing.invariants import property_check
+from mentalmodel.ir.lowering import lower_program
+
+@property_check("workflow-has-at-least-one-actor")
+def test_has_actor(program):
+    graph = lower_program(program)
+    actors = [n for n in graph.nodes if n.kind == "actor"]
+    assert actors, "expected at least one actor node"
+```
+
+### Hypothesis-backed property checks
+
+Use `@hypothesis_property_check` to run Hypothesis against generated inputs:
+
+```python
+from hypothesis.strategies import integers
+from mentalmodel.testing.invariants import hypothesis_property_check
+
+@hypothesis_property_check(
+    "score-stays-in-range",
+    raw_score=integers(min_value=0, max_value=200),
+)
+def test_score_range(program, raw_score):
+    # assert program-level constraints hold for generated inputs
+    assert 0 <= raw_score <= 200
+```
+
+The decorator wraps the function with `hypothesis.given` and configures `deadline=None, derandomize=True, max_examples=10`.
+
+### Running property checks
+
+```python
+import my_checks_module
+from mentalmodel.testing.invariants import run_property_checks
+
+results = run_property_checks(my_checks_module, program=workflow)
+for result in results:
+    print(result.name, "passed" if result.success else result.error)
+```
+
+---
+
+## Verification helpers
+
+The `mentalmodel.testing.verification_helpers` module provides ready-made assertions you can call inside `InvariantChecker.check` implementations or property checks.
+
+<AccordionGroup>
+  <Accordion title="assert_aligned_key_sets">
+
+Assert that every mapping exposes the same key set. Optionally check against an expected set.
+
+```python
+from mentalmodel.testing.verification_helpers import assert_aligned_key_sets
+
+shared = assert_aligned_key_sets(
+    snapshot_a,
+    snapshot_b,
+    expected_keys={"user_id", "score", "timestamp"},
+    labels=["snapshot_a", "snapshot_b"],
+)
+```
+
+  </Accordion>
+
+  <Accordion title="assert_causal_order">
+
+Assert that an observed value does not exceed a current value and stays within a maximum lag.
+
+```python
+from mentalmodel.testing.verification_helpers import assert_causal_order
+
+assert_causal_order(observed=42, current=45, max_lag=5)
+```
+
+  </Accordion>
+
+  <Accordion title="assert_monotonic_non_decreasing">
+
+Assert that a numeric sequence never decreases.
+
+```python
+from mentalmodel.testing.verification_helpers import assert_monotonic_non_decreasing
+
+assert_monotonic_non_decreasing([1, 2, 2, 3], label="epoch_loss")
+```
+
+  </Accordion>
+
+  <Accordion title="collect_runtime_boundary_observations">
+
+Scan a lowered `IRGraph` for data edges that cross `runtime_context` boundaries. Returns a tuple of `BoundaryObservation` objects, each with `producer_node_id`, `consumer_node_id`, `producer_runtime`, and `consumer_runtime`.
+
+```python
+from mentalmodel.testing.verification_helpers import collect_runtime_boundary_observations
+
+observations = collect_runtime_boundary_observations(graph)
+for obs in observations:
+    print(obs.producer_node_id, "->", obs.consumer_node_id)
+    print(obs.producer_runtime, "->", obs.consumer_runtime)
+```
+
+  </Accordion>
+
+  <Accordion title="assert_runtime_boundary_crossings">
+
+Assert that every detected runtime-context crossing is in an explicit allow-list. Raises `AssertionError` naming all unexpected crossings.
+
+```python
+from mentalmodel.testing.verification_helpers import (
+    collect_runtime_boundary_observations,
+    assert_runtime_boundary_crossings,
+)
+
+observations = collect_runtime_boundary_observations(graph)
+assert_runtime_boundary_crossings(
+    observations,
+    allowed={("edge", "cloud"), ("cloud", "edge")},
+)
+```
+
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Static analysis for stateful actors
+
+The static analysis pass (`run_semantic_checks`) raises a `missing-runtime-context` warning for every `actor`, `effect`, or `invariant` node that does not carry a `runtime_context` metadata value. Because `Actor` nodes always lower with `metadata["stateful"] = "true"`, any stateful actor without a `RuntimeContext` wrapper will produce this warning.
+
+```python
+from mentalmodel.analysis.semantic_checks import run_semantic_checks
+from mentalmodel.ir.lowering import lower_program
+
+graph = lower_program(workflow)
+findings = run_semantic_checks(graph)
+for f in findings:
+    if f.code == "missing-runtime-context":
+        print(f"[{f.severity}] {f.node_id}: {f.message}")
+```
+
+Wrap stateful actors in a `RuntimeContext` to propagate the context label through child metadata and silence this warning.

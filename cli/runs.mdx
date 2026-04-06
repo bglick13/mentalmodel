@@ -1,0 +1,333 @@
+---
+title: "runs"
+description: "Inspect, compare, and repair persisted run bundles."
+---
+
+The `runs` command group lets you explore run bundles that were written to disk by [`mentalmodel verify`](/cli/verify) or a live workflow execution. Each subcommand targets a different slice of the bundle data.
+
+## Bundle directory structure
+
+Run bundles are stored under the runs root directory (default: `.runs/`):
+
+```
+.runs/
+└── <graph_id>/
+    └── <run_id>/
+        ├── summary.json       # run metadata and trace config
+        ├── verification.json  # verification outcome
+        ├── records.jsonl      # semantic execution records (one JSON object per line)
+        ├── outputs.json       # node output payloads
+        ├── state.json         # actor state snapshots
+        └── otel-spans.jsonl   # OpenTelemetry spans (one JSON object per line)
+```
+
+---
+
+## runs list
+
+List recent run bundles, newest first.
+
+```bash
+mentalmodel runs list
+```
+
+<ParamField query="--graph-id" type="string">
+  Filter by graph ID. When omitted, runs from all graphs are listed.
+</ParamField>
+
+<ParamField query="--limit" type="integer" default="20">
+  Maximum number of runs to show.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON array of run summaries.
+</ParamField>
+
+**Example:**
+
+```bash
+mentalmodel runs list --graph-id my-graph --limit 5
+```
+
+---
+
+## runs show
+
+Show metadata and file index for one run bundle.
+
+```bash
+mentalmodel runs show --graph-id my-graph --run-id run-abc123
+```
+
+<ParamField query="--graph-id" type="string">
+  Filter by graph ID.
+</ParamField>
+
+<ParamField query="--run-id" type="string">
+  Specific run ID to show. When omitted, the newest run for the graph is used.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON object with full run metadata and file paths.
+</ParamField>
+
+---
+
+## runs latest
+
+Resolve and display the newest matching run for a graph.
+
+```bash
+mentalmodel runs latest --graph-id my-graph
+```
+
+<ParamField query="--graph-id" type="string">
+  Filter by graph ID.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON object with the resolved run summary.
+</ParamField>
+
+---
+
+## runs inputs
+
+Show the resolved input payload for one node in a run.
+
+```bash
+mentalmodel runs inputs --node-id collect_data
+```
+
+<ParamField query="--node-id" type="string" required>
+  The node ID whose input payload you want to inspect.
+</ParamField>
+
+<ParamField query="--graph-id" type="string">
+  Filter by graph ID.
+</ParamField>
+
+<ParamField query="--run-id" type="string">
+  Specific run ID. When omitted, the newest matching run is used.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON object with `graph_id`, `run_id`, `node_id`, and `inputs`.
+</ParamField>
+
+---
+
+## runs outputs
+
+Show the output payload for one node in a run.
+
+```bash
+mentalmodel runs outputs --node-id process_results
+```
+
+<ParamField query="--node-id" type="string" required>
+  The node ID whose output payload you want to inspect.
+</ParamField>
+
+<ParamField query="--graph-id" type="string">
+  Filter by graph ID.
+</ParamField>
+
+<ParamField query="--run-id" type="string">
+  Specific run ID. When omitted, the newest matching run is used.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON object with `graph_id`, `run_id`, `node_id`, and `output`.
+</ParamField>
+
+---
+
+## runs trace
+
+Show the semantic trace records and OTel spans for one node.
+
+```bash
+mentalmodel runs trace --node-id collect_data
+```
+
+<ParamField query="--node-id" type="string" required>
+  The node ID to trace.
+</ParamField>
+
+<ParamField query="--event-type" type="string">
+  Filter records by event type (e.g. `node_started`, `node_completed`).
+</ParamField>
+
+<ParamField query="--graph-id" type="string">
+  Filter by graph ID.
+</ParamField>
+
+<ParamField query="--run-id" type="string">
+  Specific run ID. When omitted, the newest matching run is used.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON object with `records` and `spans` arrays.
+</ParamField>
+
+The table output shows two sections: a **records table** (Seq, Event, Timestamp, Payload) and a **Matching Spans table** (Name, Duration (ns), Error).
+
+---
+
+## runs records
+
+Show raw semantic execution records for a run, with optional filtering.
+
+```bash
+mentalmodel runs records --graph-id my-graph
+```
+
+<ParamField query="--graph-id" type="string">
+  Filter by graph ID.
+</ParamField>
+
+<ParamField query="--run-id" type="string">
+  Specific run ID. When omitted, the newest matching run is used.
+</ParamField>
+
+<ParamField query="--node-id" type="string">
+  Filter records to a specific node.
+</ParamField>
+
+<ParamField query="--event-type" type="string">
+  Filter records by event type.
+</ParamField>
+
+<ParamField query="--limit" type="integer" default="50">
+  Maximum number of records to show (taken from the end of the log).
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON array of record objects.
+</ParamField>
+
+---
+
+## runs diff
+
+Compare two run bundles from the same graph side by side.
+
+```bash
+mentalmodel runs diff \
+  --graph-id my-graph \
+  --run-a run-abc123 \
+  --run-b run-def456
+```
+
+<ParamField query="--graph-id" type="string" required>
+  The graph ID both runs belong to.
+</ParamField>
+
+<ParamField query="--run-a" type="string" required>
+  The first run ID to compare.
+</ParamField>
+
+<ParamField query="--run-b" type="string" required>
+  The second run ID to compare.
+</ParamField>
+
+<ParamField query="--node-id" type="string">
+  Limit the diff to a specific node.
+</ParamField>
+
+<ParamField query="--invariant" type="string">
+  Limit the invariant diff to a specific invariant node ID.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON diff object.
+</ParamField>
+
+The output includes a **summary table** (differs, state equal, verification outcomes for each run), a **Node Diffs table** (per-node event/input/output equality), an **Invariant Diffs table** (when invariant outcomes differ), and a **State Diff panel** (when state is not equal).
+
+---
+
+## runs repair
+
+Backfill missing or incomplete `summary.json` fields in legacy run bundles.
+
+```bash
+mentalmodel runs repair --dry-run
+```
+
+<ParamField query="--dry-run" type="flag">
+  Plan what would be repaired without writing any changes. Recommended for previewing upgrades.
+</ParamField>
+
+<ParamField query="--graph-id" type="string">
+  Limit repair to a specific graph.
+</ParamField>
+
+<ParamField query="--run-id" type="string">
+  Limit repair to a specific run.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a JSON object describing the repair plan and applied actions.
+</ParamField>
+
+**Example — preview repairs without writing:**
+
+```bash
+mentalmodel runs repair --dry-run --json
+```
+
+```json
+{
+  "root_dir": ".runs",
+  "dry_run": true,
+  "action_count": 2,
+  "actions": [
+    {
+      "graph_id": "my-graph",
+      "run_id": "run-abc123",
+      "run_dir": ".runs/my-graph/run-abc123",
+      "from_schema_version": 1,
+      "to_schema_version": 2,
+      "updates": {"trace_mode": "disk"}
+    }
+  ]
+}
+```

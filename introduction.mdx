@@ -1,0 +1,58 @@
+---
+title: "Introduction"
+description: "mentalmodel is a Python SDK for authoring programs whose topology, causality, state transitions, effects, and invariants are mechanically recoverable by humans and AI coding agents."
+---
+
+## What is mentalmodel?
+
+`mentalmodel` gives you a small set of semantic primitives for building programs that stay legible over time. When you author a workflow with `mentalmodel`, the structure you write down is not just documentation—it becomes the source of truth for static analysis, generated diagrams, generated docs, and runtime observability.
+
+The core idea: instead of building ad hoc orchestrators where causality and side effects are implicit, you declare your program's topology, data dependencies, runtime boundaries, and correctness properties using explicit primitives. Everything downstream—diagrams, docs, traces, verification—derives from that declaration.
+
+## Key value propositions
+
+**Semantic primitives over ad hoc orchestration**
+
+You write programs using a small, composable vocabulary: `Workflow`, `Actor`, `Effect`, `Invariant`, `Parallel`, `Join`, `Ref`, and `RuntimeContext`. Each primitive has a well-defined role. There is no ambiguity about what is stateful, what has side effects, or what the data flow is.
+
+**Automatic observability**
+
+The async runtime instruments every node execution with OpenTelemetry spans automatically. Span attributes include semantic metadata (`mentalmodel.node.kind`, `mentalmodel.node.id`, `mentalmodel.workflow.id`, etc.) so traces carry meaning without you writing any instrumentation code.
+
+**Static analysis**
+
+`mentalmodel check` lowers your authoring model into a canonical intermediate representation (IR) and runs structural and semantic analyzers over it. It catches unresolved refs, orphaned nodes, illegal cycles, undeclared effects, and missing invariants before you run anything.
+
+**Generated docs and diagrams**
+
+`mentalmodel docs` and `mentalmodel graph` generate markdown documentation and Mermaid diagrams directly from the IR. The outputs are always in sync with your code because they are derived from it, not written by hand.
+
+**Agent-ready**
+
+`mentalmodel` ships with installable coding-agent skills (`mentalmodel install-skills`) that teach agents to prefer semantic primitives, route side effects through `Effect`, attach invariants to joins and state transitions, and run `mentalmodel check` after meaningful changes.
+
+## Core primitives
+
+| Primitive | Role |
+|---|---|
+| `Workflow` | Top-level container that names and groups a program |
+| `Actor` | Stateful node with a typed handler; owns a state store |
+| `Effect` | Impure node that models a side effect with explicit inputs and outputs |
+| `Invariant` | Correctness property attached to a node; checked at runtime and by `mentalmodel verify` |
+| `Parallel` | Groups concurrent children for fanout; always pairs with a `Join` |
+| `Join` | Waits for all named inputs and reduces them into a single output |
+| `Ref` | Cross-tree dependency reference; makes non-sequential data flow explicit |
+| `RuntimeContext` | Plugin primitive that annotates a subtree with a runtime boundary (e.g., `sandbox`, `local`) |
+
+All primitives lower into a canonical IR graph. Mermaid diagrams, markdown docs, static analysis, and the async executor all operate on that IR—nothing bypasses it.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quick start" icon="bolt" href="/quickstart">
+    Install mentalmodel, write your first workflow, and run the CLI tools in five minutes.
+  </Card>
+  <Card title="Installation" icon="package" href="/installation">
+    Detailed install instructions for pip and uv, Python version requirements, and pre-commit setup.
+  </Card>
+</CardGroup>

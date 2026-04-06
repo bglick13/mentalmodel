@@ -1,0 +1,229 @@
+---
+title: "Metrics"
+description: "Understand built-in operational metrics, attach domain metrics to Actor and Effect nodes, and configure OTel export."
+---
+
+mentalmodel emits two categories of metrics: **operational metrics** that the runtime produces automatically for every run, and **domain metrics** that you define on individual `Actor` and `Effect` nodes. Both categories flow through the same OpenTelemetry-backed pipeline.
+
+## Built-in operational metrics
+
+The runtime emits these metrics on every execution without any configuration on your part:
+
+| Metric name | Kind | Description |
+|---|---|---|
+| `mentalmodel.run.started` | counter | Incremented once when a run begins |
+| `mentalmodel.run.completed` | counter | Incremented once when a run finishes; tagged with `success=true/false` |
+| `mentalmodel.node.executions` | counter | Incremented once per node execution; tagged with `node_kind` and `runtime_context` |
+| `mentalmodel.node.duration_ms` | histogram | Execution duration in milliseconds per node; tagged with `node_kind`, `runtime_context`, and `success` |
+| `mentalmodel.invariant.failures` | counter | Incremented each time an invariant check returns `passed=false`; tagged with `severity` |
+
+These definitions live in `mentalmodel.observability.metrics` as module-level constants (`RUN_STARTED`, `RUN_COMPLETED`, `NODE_EXECUTIONS`, `NODE_DURATION_MS`, `INVARIANT_FAILURES`).
+
+## Domain metrics
+
+Attach domain metrics to any `Actor` or `Effect` via the `metrics` parameter. Each entry is an `OutputMetricSpec` produced by one of two helpers.
+
+### infer_output_metrics — automatic extraction
+
+`infer_output_metrics` scans the node's output after each execution and emits one histogram per numeric field. It only accepts flat `Mapping` outputs with at most 8 keys whose names match `^[A-Za-z][A-Za-z0-9_]{0,63}$` and whose values are `int | float`. High-cardinality mappings or nested structures are silently skipped.
+
+```python
+from mentalmodel import infer_output_metrics
+
+Actor[LearnerInputs, LearnerOutput, LearnerState](
+    "learner_update",
+    handler=LearnerUpdate(),
+    inputs=[Ref("rollout_join")],
+    metrics=[infer_output_metrics(prefix="mentalmodel.demo.learner_update")],
+)
+```
+
+With `prefix="mentalmodel.demo.learner_update"` and a `LearnerOutput` of `{"updated_policy_version": 4, "sample_count": 8}`, the runtime emits:
+
+- `mentalmodel.demo.learner_update.sample_count` (histogram, value 8)
+- `mentalmodel.demo.learner_update.updated_policy_version` (histogram, value 4)
+
+<Warning>
+`infer_output_metrics` rejects outputs with more than 8 fields or any non-numeric value. Use `extract_output_metrics` with a custom extractor when you need richer control.
+</Warning>
+
+### extract_output_metrics — custom extractor
+
+`extract_output_metrics` delegates to a `MetricExtractor` you implement. This is the right approach for derived values (mean, max, count), computed attributes, or outputs that do not fit the flat-numeric constraint.
+
+```python
+from mentalmodel import extract_output_metrics, MetricDefinition, MetricKind
+
+Effect[RewardInputs, RewardScores](
+    "pangram_reward",
+    handler=PangramScorer(),
+    inputs=[Ref("sample_policy")],
+    metrics=[
+        extract_output_metrics(
+            RewardSummaryMetrics(metric_prefix="mentalmodel.demo.reward.pangram")
+        )
+    ],
+)
+```
+
+## MetricDefinition, MetricKind, MetricContext, MetricObservation
+
+These four types form the observable layer:
+
+```python
+from mentalmodel import (
+    MetricDefinition,
+    MetricKind,
+    MetricContext,
+    MetricObservation,
+)
+```
+
+**`MetricKind`** — `StrEnum` with two values:
+
+```python
+class MetricKind(StrEnum):
+    COUNTER = "counter"
+    HISTOGRAM = "histogram"
+```
+
+**`MetricDefinition`** — declares the shape of one metric instrument:
+
+```python
+@dataclass(slots=True, frozen=True)
+class MetricDefinition:
+    name: str
+    kind: MetricKind
+    description: str = ""
+    unit: str | None = None
+    attribute_keys: tuple[str, ...] = field(default_factory=tuple)
+```
+
+**`MetricContext`** — stable context injected by the runtime into every `extract` call:
+
+```python
+@dataclass(slots=True, frozen=True)
+class MetricContext:
+    graph_id: str
+    run_id: str
+    node_id: str | None
+    node_kind: str | None
+    runtime_context: str | None
+    service_name: str
+
+    def default_attributes(self) -> dict[str, MetricAttributeValue]: ...
+```
+
+Call `context.default_attributes()` in your extractor to get a pre-populated attribute dict that includes `graph_id`, `service_name`, `node_kind`, and `runtime_context`.
+
+**`MetricObservation`** — one recorded data point:
+
+```python
+@dataclass(slots=True, frozen=True)
+class MetricObservation:
+    definition: MetricDefinition
+    value: int | float
+    attributes: dict[str, MetricAttributeValue] = field(default_factory=dict)
+```
+
+## MetricExtractor protocol and OutputMetricSpec
+
+```python
+from mentalmodel import MetricExtractor, OutputMetricSpec
+
+class MetricExtractor(Protocol[OutputT_contra]):
+    def extract(
+        self,
+        output: OutputT_contra,
+        context: MetricContext,
+    ) -> Sequence[MetricObservation]: ...
+```
+
+`OutputMetricSpec` is the internal wrapper produced by `infer_output_metrics` and `extract_output_metrics`. You do not construct it directly.
+
+### Full extractor example
+
+```python
+from dataclasses import dataclass
+from mentalmodel import MetricContext, MetricExtractor, MetricObservation, MetricDefinition, MetricKind
+
+RewardScores = dict[str, float]
+
+
+@dataclass(slots=True, frozen=True)
+class RewardSummaryMetrics(MetricExtractor[RewardScores]):
+    metric_prefix: str
+
+    def extract(
+        self,
+        output: RewardScores,
+        context: MetricContext,
+    ) -> tuple[MetricObservation, ...]:
+        if not output:
+            return tuple()
+        values = list(output.values())
+        mean_value = sum(values) / len(values)
+        base_attributes = context.default_attributes()
+        return (
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.mean",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Mean reward across sampled rollouts.",
+                ),
+                value=mean_value,
+                attributes=dict(base_attributes),
+            ),
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.max",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Maximum reward across sampled rollouts.",
+                ),
+                value=max(values),
+                attributes=dict(base_attributes),
+            ),
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.count",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Number of scored rollouts in one reward pass.",
+                ),
+                value=len(values),
+                attributes=dict(base_attributes),
+            ),
+        )
+```
+
+## Configuring OTel export
+
+Metrics export is **only active when an external OTel sink is configured**. Without one, the runtime uses `NoOpMetricEmitter` and all observations are silently discarded.
+
+<Tabs>
+  <Tab title="OTLP gRPC">
+    ```bash
+    MENTALMODEL_TRACING_MODE=otlp_grpc \
+    MENTALMODEL_OTLP_ENDPOINT=http://localhost:4317 \
+    python my_program.py
+    ```
+  </Tab>
+  <Tab title="OTLP HTTP">
+    ```bash
+    MENTALMODEL_TRACING_MODE=otlp_http \
+    MENTALMODEL_OTLP_ENDPOINT=http://localhost:4318 \
+    python my_program.py
+    ```
+  </Tab>
+  <Tab title="Console (debugging)">
+    ```bash
+    MENTALMODEL_TRACING_MODE=console python my_program.py
+    ```
+    Console mode writes observations to `stderr` — useful for local debugging. It does **not** push to an OTel collector.
+  </Tab>
+</Tabs>
+
+When the mode is `disk` or `disabled` (the default with no environment variables set), no metrics are exported. Built-in operational metrics are still computed internally but are discarded.
+
+<Note>
+During objective evaluation (`evaluate_objective`, `search_objective`) the runtime always uses `RecordingMetricEmitter` regardless of the OTel configuration. This ensures that metric signals used to score candidates are captured deterministically without requiring an external collector.
+</Note>

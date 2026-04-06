@@ -1,0 +1,296 @@
+---
+title: "Effects & Actors"
+description: "Use Actor for stateful nodes and Effect for explicit side-effect boundaries. Both accept typed handlers and optional domain metrics."
+---
+
+mentalmodel gives you two primitives for nodes that do real work: `Actor` for stateful processing and `Effect` for explicit side-effect boundaries. Choosing the right one keeps your program's state model legible and makes the executor's scheduling assumptions explicit.
+
+## Actor
+
+An `Actor` is a stateful node. It holds an optional `StateT` value across runs and exposes it to its handler on every execution.
+
+```python
+from mentalmodel import Actor, Ref
+
+Actor[LearnerInputs, LearnerOutput, LearnerState](
+    "learner_update",
+    handler=LearnerUpdate(),
+    inputs=[Ref("rollout_join")],
+    metrics=[infer_output_metrics(prefix="mentalmodel.demo.learner_update")],
+)
+```
+
+### ActorHandler protocol
+
+Your handler must implement the `ActorHandler` protocol:
+
+```python
+from mentalmodel.core.interfaces import ActorHandler
+from mentalmodel.core.models import ActorResult
+from mentalmodel.runtime.context import ExecutionContext
+
+
+class ActorHandler(Protocol[InputT_contra, StateT, ActorOutputT]):
+    async def handle(
+        self,
+        inputs: InputT_contra,
+        state: StateT | None,        # None on the first execution
+        ctx: ExecutionContext,
+    ) -> ActorResult[ActorOutputT, StateT]: ...
+```
+
+`state` is `None` on the very first call. Your handler initializes state inline and returns it as `next_state` in the `ActorResult`. The executor persists `next_state` and passes it back on the next call.
+
+### ActorResult
+
+`ActorResult` carries three fields:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `output` | `OutputT` | Value forwarded to downstream nodes via `Ref` |
+| `next_state` | `StateT \| None` | State persisted for the next execution |
+| `observations` | `Mapping[str, JsonValue]` | Ad-hoc key/value pairs emitted to the run trace |
+
+```python
+from mentalmodel.core.models import ActorResult
+
+return ActorResult(
+    output={
+        "updated_policy_version": next_version,
+        "sample_count": len(rollout["samples"]),
+    },
+    next_state={"policy_version": next_version},
+    observations={"previous_policy_version": previous_version},
+)
+```
+
+### Full Actor example
+
+```python
+from dataclasses import dataclass
+from typing import TypedDict
+
+from mentalmodel.core.interfaces import ActorHandler
+from mentalmodel.core.models import ActorResult
+from mentalmodel.runtime.context import ExecutionContext
+
+
+class LearnerState(TypedDict):
+    policy_version: int
+
+
+class LearnerInputs(TypedDict):
+    rollout_join: RolloutJoinOutput
+
+
+class LearnerOutput(TypedDict):
+    updated_policy_version: int
+    sample_count: int
+
+
+@dataclass(slots=True)
+class LearnerUpdate(ActorHandler[LearnerInputs, LearnerState, LearnerOutput]):
+    async def handle(
+        self,
+        inputs: LearnerInputs,
+        state: LearnerState | None,
+        ctx: ExecutionContext,
+    ) -> ActorResult[LearnerOutput, LearnerState]:
+        del ctx
+        rollout = inputs["rollout_join"]
+        previous_version = (
+            rollout["current_policy_version"] if state is None else state["policy_version"]
+        )
+        next_version = previous_version + 1
+        return ActorResult(
+            output={
+                "updated_policy_version": next_version,
+                "sample_count": len(rollout["samples"]),
+            },
+            next_state={"policy_version": next_version},
+            observations={"previous_policy_version": previous_version},
+        )
+```
+
+---
+
+## Effect
+
+An `Effect` is a stateless side-effect boundary. Use it for any operation that touches the outside world — model inference, network calls, data fetches, or random sampling — without retaining state between calls.
+
+```python
+from mentalmodel import Effect, Ref
+
+Effect[SamplePolicyInputs, SamplePolicyOutput](
+    "sample_policy",
+    handler=PolicySampler(group_size=4, sampler_lag=0),
+    inputs=[Ref("batch_source"), Ref("policy_snapshot")],
+)
+```
+
+### EffectHandler protocol
+
+Your handler must implement the `EffectHandler` protocol:
+
+```python
+from mentalmodel.core.interfaces import EffectHandler
+from mentalmodel.runtime.context import ExecutionContext
+
+
+class EffectHandler(Protocol[InputT_contra, ReturnedOutputT_co]):
+    async def invoke(
+        self,
+        inputs: InputT_contra,
+        ctx: ExecutionContext,
+    ) -> ReturnedOutputT_co: ...
+```
+
+`invoke` receives the resolved inputs and returns the output directly. There is no state parameter.
+
+### Full Effect example
+
+```python
+import asyncio
+from dataclasses import dataclass
+from typing import TypedDict
+
+from mentalmodel.core.interfaces import EffectHandler
+from mentalmodel.runtime.context import ExecutionContext
+
+
+class SamplePolicyInputs(TypedDict):
+    batch_source: list[PromptRecord]
+    policy_snapshot: PolicySnapshotOutput
+
+
+class SamplePolicyOutput(TypedDict):
+    sampled_policy_version: int
+    samples: list[SampleRecord]
+
+
+@dataclass(slots=True)
+class PolicySampler(EffectHandler[SamplePolicyInputs, SamplePolicyOutput]):
+    group_size: int
+    sampler_lag: int
+
+    async def invoke(
+        self,
+        inputs: SamplePolicyInputs,
+        ctx: ExecutionContext,
+    ) -> SamplePolicyOutput:
+        del ctx
+        await asyncio.sleep(0.01)   # simulate network latency
+        current_version = inputs["policy_snapshot"]["current_policy_version"]
+        samples = [
+            {
+                "prompt_id": prompt["prompt_id"],
+                "sample_index": i,
+                "completion_text": f"sample {i} for {prompt['prompt_text']}",
+            }
+            for prompt in inputs["batch_source"]
+            for i in range(self.group_size)
+        ]
+        return {
+            "sampled_policy_version": max(0, current_version - self.sampler_lag),
+            "samples": samples,
+        }
+```
+
+---
+
+## Domain metrics on Actor and Effect
+
+Both `Actor` and `Effect` accept a `metrics` list. Each entry is an `OutputMetricSpec` that tells the runtime how to extract metric observations from the node's output after every execution.
+
+Use `infer_output_metrics` for flat numeric dicts (at most 8 keys, all `int | float` values):
+
+```python
+from mentalmodel import infer_output_metrics
+
+Actor[LearnerInputs, LearnerOutput, LearnerState](
+    "learner_update",
+    handler=LearnerUpdate(),
+    inputs=[Ref("rollout_join")],
+    metrics=[infer_output_metrics(prefix="mentalmodel.demo.learner_update")],
+)
+```
+
+Use `extract_output_metrics` with a custom `MetricExtractor` when you need richer or derived observations:
+
+```python
+from dataclasses import dataclass
+from mentalmodel import (
+    MetricContext, MetricExtractor, MetricObservation,
+    extract_output_metrics,
+)
+from mentalmodel import MetricDefinition, MetricKind
+
+
+@dataclass(slots=True, frozen=True)
+class RewardSummaryMetrics(MetricExtractor[RewardScores]):
+    metric_prefix: str
+
+    def extract(
+        self,
+        output: RewardScores,
+        context: MetricContext,
+    ) -> tuple[MetricObservation, ...]:
+        if not output:
+            return tuple()
+        values = list(output.values())
+        mean_value = sum(values) / len(values)
+        base_attributes = context.default_attributes()
+        return (
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.mean",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Mean reward across sampled rollouts.",
+                ),
+                value=mean_value,
+                attributes=dict(base_attributes),
+            ),
+            MetricObservation(
+                definition=MetricDefinition(
+                    name=f"{self.metric_prefix}.max",
+                    kind=MetricKind.HISTOGRAM,
+                    description="Maximum reward across sampled rollouts.",
+                ),
+                value=max(values),
+                attributes=dict(base_attributes),
+            ),
+        )
+
+
+Effect[RewardInputs, RewardScores](
+    "pangram_reward",
+    handler=PangramScorer(),
+    inputs=[Ref("sample_policy")],
+    metrics=[
+        extract_output_metrics(
+            RewardSummaryMetrics(metric_prefix="mentalmodel.demo.reward.pangram")
+        )
+    ],
+)
+```
+
+---
+
+## When to use Actor vs Effect
+
+<Tabs>
+  <Tab title="Use Actor when...">
+    - The node must accumulate state across repeated executions (e.g., policy version counter, cursor, moving average).
+    - You need to initialize state lazily on the first call (handler receives `state=None`).
+    - You want to emit structured `observations` into the run trace alongside the output.
+  </Tab>
+  <Tab title="Use Effect when...">
+    - The operation is stateless: same inputs always produce the same kind of output (modulo real-world side effects).
+    - The node calls an external service, samples from a model, reads from a data store, or performs I/O.
+    - You want the IR to explicitly label this node as effectful so analysis and visualization tools can surface it.
+  </Tab>
+</Tabs>
+
+<Note>
+The executor tags `Actor` nodes with `stateful=true` and `Effect` nodes with `effectful=true` in the IR metadata. These tags drive analysis checks and can be used by custom scheduling backends to make placement decisions.
+</Note>

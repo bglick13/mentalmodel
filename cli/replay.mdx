@@ -1,0 +1,91 @@
+---
+title: "replay"
+description: "Reconstruct the full semantic event timeline for one persisted run."
+---
+
+The `replay` command reads a persisted run bundle from disk and reconstructs a chronological semantic event timeline. It shows each event in sequence order along with a per-node summary of invariant outcomes.
+
+## Usage
+
+```bash
+mentalmodel replay --graph-id <graph_id>
+```
+
+## Flags
+
+<ParamField query="--graph-id" type="string" required>
+  The graph ID to replay. Must match a directory under the runs root (e.g. `.runs/<graph_id>/`).
+</ParamField>
+
+<ParamField query="--run-id" type="string">
+  The specific run ID to replay. When omitted, the newest run for the graph is used.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for persisted run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a single JSON object to stdout instead of rendering Rich tables.
+</ParamField>
+
+## Output
+
+When you run without `--json`, the command renders three tables.
+
+**Summary table:**
+
+| Field | Value |
+|---|---|
+| Graph | my-graph |
+| Run | run-abc123 |
+| Schema | 2 |
+| Success | yes |
+| Verification | yes |
+| Events | 14 |
+| Nodes | 4 |
+| Runtime Error | |
+
+**Replay Events table** — one row per semantic event in sequence order:
+
+| Seq | Node | Event | Timestamp | Payload |
+|---|---|---|---|---|
+| 1 | collect_data | node_started | 1712345678000 | `{}` |
+| 2 | collect_data | node_completed | 1712345678042 | `{"output": 42}` |
+| 3 | process_results | node_started | 1712345678043 | `{}` |
+
+**Replay Node Summary table** — one row per node:
+
+| Node | Events | First Seq | Last Seq | Last Event | Invariant |
+|---|---|---|---|---|---|
+| collect_data | 2 | 1 | 2 | node_completed | pass |
+| process_results | 2 | 3 | 4 | node_completed | |
+
+## Examples
+
+<CodeGroup>
+```bash Replay latest run
+mentalmodel replay --graph-id my-graph
+```
+
+```bash Replay a specific run
+mentalmodel replay --graph-id my-graph --run-id run-abc123
+```
+
+```bash JSON output
+mentalmodel replay --graph-id my-graph --json
+```
+
+```bash Custom runs directory
+mentalmodel replay \
+  --graph-id my-graph \
+  --runs-dir /tmp/my-runs
+```
+</CodeGroup>
+
+## Replay vs. runs show
+
+`replay` and [`runs show`](/cli/runs) serve different purposes:
+
+- **`replay`** reconstructs the full ordered event timeline. It reads `records.jsonl` and renders events in sequence order with timestamps and payloads. Use it when you want to understand _what happened_ and _in what order_ during a run.
+- **`runs show`** shows the static metadata and file index for a bundle — graph ID, schema version, record counts, trace configuration, and paths to each file. Use it when you want a quick summary of a run or need to locate the raw bundle files.

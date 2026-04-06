@@ -1,0 +1,58 @@
+---
+title: "graph"
+description: "Render a Mermaid topology diagram from a mentalmodel program's IR."
+---
+
+The `graph` command lowers your program to the IR and renders a [Mermaid](https://mermaid.js.org/) flowchart. You can print the diagram to the terminal or write it to a file for use in documentation or visualization tools.
+
+## Usage
+
+```bash
+mentalmodel graph --entrypoint module:function
+```
+
+## Flags
+
+<ParamField query="--entrypoint" type="string" default="mentalmodel.examples.async_rl.demo:build_program">
+  Program entrypoint in `module.submodule:function_name` format. The CLI imports the module, calls the function, and expects a `Workflow` instance in return.
+</ParamField>
+
+<ParamField query="--output" type="path">
+  Optional file path to write the Mermaid diagram. When omitted, the diagram is printed to the terminal inside a Rich panel. When provided, the diagram is written to the file and the CLI prints a confirmation.
+</ParamField>
+
+## Output
+
+The command produces a Mermaid `flowchart LR` diagram. Each node is rendered as a labelled box using its label and kind. Edges are labelled with their edge kind (e.g. `data`, `contains`).
+
+### Example Mermaid output
+
+```
+flowchart LR
+    collect_data["Collect Data<br/>actor"]
+    process_results["Process Results<br/>actor"]
+    reward_signal["Reward Signal<br/>effect"]
+    workflow_root["My Workflow<br/>workflow"]
+    workflow_root -->|"contains"| collect_data
+    workflow_root -->|"contains"| process_results
+    collect_data -->|"data"| process_results
+    process_results -->|"data"| reward_signal
+```
+
+## Examples
+
+<CodeGroup>
+```bash Print to terminal
+mentalmodel graph --entrypoint mypackage.workflows:build_program
+```
+
+```bash Write to file
+mentalmodel graph \
+  --entrypoint mypackage.workflows:build_program \
+  --output docs/topology.mmd
+```
+</CodeGroup>
+
+<Tip>
+  Paste the Mermaid output directly into a Markdown file using a fenced code block with the `mermaid` language tag, or render it with any Mermaid-compatible viewer.
+</Tip>

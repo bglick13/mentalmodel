@@ -1,0 +1,273 @@
+---
+title: "Parallel & Join"
+description: "Fan work out concurrently with Parallel and collect results into a single value with Join and an optional reducer."
+---
+
+`Parallel` and `Join` are the two structural primitives for concurrent fanout in mentalmodel. `Parallel` groups children that the executor runs concurrently. `Join` collects the outputs of multiple upstream nodes, optionally reducing them into a single typed value.
+
+## Parallel
+
+`Parallel` is a container node. Every direct child runs concurrently with every other direct child. The executor does not guarantee ordering among siblings — use `Ref` dependencies if ordering matters.
+
+```python
+from mentalmodel import Parallel, Effect, Ref
+
+Parallel[Effect[RewardInputs, RewardScores] | Effect[RewardInputs, KLPrefetchOutput]](
+    name="reward_fanout",
+    children=[
+        Effect[RewardInputs, RewardScores](
+            "pangram_reward",
+            handler=PangramScorer(),
+            inputs=[Ref("sample_policy")],
+        ),
+        Effect[RewardInputs, RewardScores](
+            "quality_reward",
+            handler=QualityScorer(),
+            inputs=[Ref("sample_policy")],
+        ),
+        Effect[RewardInputs, KLPrefetchOutput](
+            "kl_prefetch",
+            handler=KLPrefetch(),
+            inputs=[Ref("sample_policy")],
+        ),
+    ],
+)
+```
+
+The type parameter on `Parallel` is the union of all child node types. This ensures your static type-checker can verify that every child in the `children` list is a valid member of the declared union.
+
+<Note>
+`Parallel` encodes the intent that its children are independent. If two children depend on each other via `Ref`, the executor will still respect that dependency regardless of the `Parallel` grouping.
+</Note>
+
+## Join
+
+`Join` is a leaf node that collects outputs from multiple upstream nodes and merges them. You pass `Ref` objects in its `inputs` list; the executor resolves each one and assembles them into a single typed dict keyed by the referenced node names.
+
+```python
+from mentalmodel import Join, Ref
+
+Join[RolloutJoinInputs, RolloutJoinOutput](
+    "rollout_join",
+    inputs=[
+        Ref("policy_snapshot"),
+        Ref("sample_policy"),
+        Ref("pangram_reward"),
+        Ref("quality_reward"),
+        Ref("kl_prefetch"),
+    ],
+    reducer=RolloutJoinReducer(),
+)
+```
+
+### JoinReducer protocol
+
+If you supply a `reducer`, the executor calls it after resolving all inputs. The reducer receives the full assembled dict and returns the merged output:
+
+```python
+from mentalmodel.core.interfaces import JoinReducer
+from mentalmodel.runtime.context import ExecutionContext
+
+
+class JoinReducer(Protocol[InputT_contra, ReturnedOutputT_co]):
+    async def reduce(
+        self,
+        inputs: InputT_contra,
+        ctx: ExecutionContext,
+    ) -> ReturnedOutputT_co: ...
+```
+
+Here is the reducer from the `async_rl` demo that merges reward scores, KL prefetch data, and policy version metadata into a single rollout record:
+
+```python
+from dataclasses import dataclass
+from mentalmodel.core.interfaces import JoinReducer
+from mentalmodel.runtime.context import ExecutionContext
+
+
+@dataclass(slots=True)
+class RolloutJoinReducer(JoinReducer[RolloutJoinInputs, RolloutJoinOutput]):
+    async def reduce(
+        self,
+        inputs: RolloutJoinInputs,
+        ctx: ExecutionContext,
+    ) -> RolloutJoinOutput:
+        del ctx
+        sample_payload = inputs["sample_policy"]
+        return {
+            "sampled_policy_version": sample_payload["sampled_policy_version"],
+            "current_policy_version": inputs["policy_snapshot"]["current_policy_version"],
+            "samples": sample_payload["samples"],
+            "pangram_scores": inputs["pangram_reward"],
+            "quality_scores": inputs["quality_reward"],
+            "kl_prefetch": inputs["kl_prefetch"],
+        }
+```
+
+If you omit `reducer`, `Join` passes the raw resolved dict (keyed by node name) directly as its output.
+
+## The Parallel → Join pattern
+
+The standard pattern is to place a `Parallel` group before a `Join` that collects its children's outputs:
+
+<Steps>
+  <Step title="Define the fanout">
+    Group the concurrent nodes inside a `Parallel`. Each child declares its own `inputs` via `Ref`.
+  </Step>
+  <Step title="Collect with Join">
+    Place a `Join` after the `Parallel` in the same `children` list. List `Ref` entries for every node whose output you want to merge, including nodes outside the `Parallel` if needed.
+  </Step>
+  <Step title="Reduce (optional)">
+    Attach a `JoinReducer` to reshape the collected dict into the typed output your downstream nodes expect.
+  </Step>
+</Steps>
+
+```python
+children=[
+    # ...upstream nodes...
+    Parallel[...](
+        name="reward_fanout",
+        children=[
+            Effect("pangram_reward", handler=..., inputs=[Ref("sample_policy")]),
+            Effect("quality_reward", handler=..., inputs=[Ref("sample_policy")]),
+            Effect("kl_prefetch",    handler=..., inputs=[Ref("sample_policy")]),
+        ],
+    ),
+    Join[RolloutJoinInputs, RolloutJoinOutput](
+        "rollout_join",
+        inputs=[
+            Ref("policy_snapshot"),
+            Ref("sample_policy"),
+            Ref("pangram_reward"),
+            Ref("quality_reward"),
+            Ref("kl_prefetch"),
+        ],
+        reducer=RolloutJoinReducer(),
+    ),
+    # ...downstream nodes consume Ref("rollout_join")...
+]
+```
+
+## Attaching an Invariant after Join
+
+Place an `Invariant` immediately after the `Join` to validate the merged data before it flows further downstream. This is how the `async_rl` demo enforces policy staleness:
+
+```python
+Invariant[InvariantInputs, int](
+    "staleness_invariant",
+    checker=PolicyStalenessChecker(max_off_policy_steps=max_off_policy_steps),
+    inputs=[Ref("rollout_join")],
+)
+```
+
+The checker receives the `Join` output and returns an `InvariantResult`. If it fails, the executor raises `InvariantViolationError` and halts the run. See the [Effects & Actors](/guides/effects-and-actors) guide for the `InvariantChecker` protocol signature.
+
+## Verifying key alignment with assert_aligned_key_sets
+
+After a fanout, all reward maps should have exactly the same keys (one per sampled rollout). Use `assert_aligned_key_sets` from `mentalmodel.testing` to verify this in property tests:
+
+```python
+from mentalmodel.testing import assert_aligned_key_sets
+
+aligned = assert_aligned_key_sets(
+    pangram_scores,
+    quality_scores,
+    kl_prefetch,
+    expected_keys=sample_keys,
+    labels=("pangram_scores", "quality_scores", "kl_prefetch"),
+)
+assert len(aligned) == expected_count
+```
+
+`assert_aligned_key_sets` raises `AssertionError` if:
+- Any two mappings have different key sets.
+- The shared key set does not match `expected_keys` (when provided).
+
+On success it returns the shared `frozenset[str]` so you can assert its size.
+
+## Full example: reward_fanout → rollout_join
+
+```python
+from mentalmodel import (
+    Effect, Invariant, Join, Parallel, Ref,
+    extract_output_metrics,
+)
+from mentalmodel.testing import assert_aligned_key_sets
+
+
+# --- workflow fragment (inside build_program children list) ---
+
+Parallel[Effect[RewardInputs, RewardScores] | Effect[RewardInputs, KLPrefetchOutput]](
+    name="reward_fanout",
+    children=[
+        Effect[RewardInputs, RewardScores](
+            "pangram_reward",
+            handler=PangramScorer(),
+            inputs=[Ref("sample_policy")],
+            metrics=[
+                extract_output_metrics(
+                    RewardSummaryMetrics(metric_prefix="mentalmodel.demo.reward.pangram")
+                )
+            ],
+        ),
+        Effect[RewardInputs, RewardScores](
+            "quality_reward",
+            handler=QualityScorer(),
+            inputs=[Ref("sample_policy")],
+            metrics=[
+                extract_output_metrics(
+                    RewardSummaryMetrics(metric_prefix="mentalmodel.demo.reward.quality")
+                )
+            ],
+        ),
+        Effect[RewardInputs, KLPrefetchOutput](
+            "kl_prefetch",
+            handler=KLPrefetch(),
+            inputs=[Ref("sample_policy")],
+        ),
+    ],
+),
+Join[RolloutJoinInputs, RolloutJoinOutput](
+    "rollout_join",
+    inputs=[
+        Ref("policy_snapshot"),
+        Ref("sample_policy"),
+        Ref("pangram_reward"),
+        Ref("quality_reward"),
+        Ref("kl_prefetch"),
+    ],
+    reducer=RolloutJoinReducer(),
+),
+Invariant[InvariantInputs, int](
+    "staleness_invariant",
+    checker=PolicyStalenessChecker(max_off_policy_steps=0),
+    inputs=[Ref("rollout_join")],
+),
+
+
+# --- property test ---
+
+from mentalmodel.testing import execute_program, hypothesis_property_check
+from hypothesis import strategies as st
+
+@hypothesis_property_check(
+    "score maps align with sampled rollouts",
+    group_size=st.integers(min_value=1, max_value=5),
+)
+def property_rollout_scores_align(program, group_size: int) -> None:
+    result = execute_program(build_program(group_size=group_size))
+    sample_policy = result.outputs["sample_policy"]
+    samples = sample_policy["samples"]
+    sample_keys = {
+        f"{s['prompt_id']}:{s['sample_index']}" for s in samples
+    }
+    rollout_join = result.outputs["rollout_join"]
+    aligned = assert_aligned_key_sets(
+        rollout_join["pangram_scores"],
+        rollout_join["quality_scores"],
+        rollout_join["kl_prefetch"],
+        expected_keys=sample_keys,
+        labels=("pangram_scores", "quality_scores", "kl_prefetch"),
+    )
+    assert len(aligned) == len(sample_keys)
+```

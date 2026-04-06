@@ -1,0 +1,116 @@
+---
+title: "doctor"
+description: "Run preflight checks for agent and debugging setup."
+---
+
+The `doctor` command runs a series of lightweight checks to verify that your `mentalmodel` installation, agent skills, entrypoint, and tracing configuration are all set up correctly. It is the first command to run when something is not working as expected.
+
+## Usage
+
+```bash
+mentalmodel doctor
+```
+
+## Flags
+
+<ParamField query="--agent" type="string" default="codex">
+  The coding agent to check skill installation for. Accepted values: `codex`, `claude`.
+</ParamField>
+
+<ParamField query="--target-dir" type="path">
+  Override the default skill directory to check. When omitted, the agent's default skill directory is used.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for persisted run artifacts. Defaults to `./.runs`. Used to check `.runs` availability.
+</ParamField>
+
+<ParamField query="--entrypoint" type="string">
+  Program entrypoint in `module.submodule:function_name` format. When provided, the doctor checks that the entrypoint can be imported and resolved to a `Workflow`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a single JSON object to stdout instead of rendering Rich tables. Useful for scripted or agent-facing automation.
+</ParamField>
+
+## Checks performed
+
+| Check | Description |
+|---|---|
+| Packaged skill installation | Verifies that the expected skill files exist in the agent's skill directory |
+| Entrypoint resolution | Imports the entrypoint module and resolves it to a `Workflow` (only when `--entrypoint` is provided) |
+| `.runs` availability | Checks that the runs directory exists and is readable |
+| Tracing config resolution | Loads and validates the resolved OTel tracing configuration |
+| Packaged template files | Verifies that bundled template files are accessible within the installed package |
+
+## Status levels
+
+Each check is reported with one of four status levels:
+
+| Status | Color | Meaning |
+|---|---|---|
+| `pass` | Green | The check completed successfully |
+| `warn` | Yellow | The check found a potential issue that does not block operation |
+| `fail` | Red | The check found a problem that should be resolved |
+| `skip` | Cyan | The check was not applicable (e.g. entrypoint check skipped when no `--entrypoint` is provided) |
+
+The overall exit code is `1` if any check has status `fail`.
+
+## Output
+
+Without `--json`, the command renders two tables.
+
+**Summary table:**
+
+| Check | Status | Message |
+|---|---|---|
+| packaged-skills | pass | All skill files found |
+| entrypoint | skip | No entrypoint provided |
+| runs-dir | pass | .runs directory is accessible |
+| tracing-config | pass | Tracing config resolved successfully |
+| template-files | pass | All bundled templates accessible |
+
+**Details table** — shown only when one or more checks include additional details:
+
+| Check | Details |
+|---|---|
+| packaged-skills | `{"missing": [], "found": ["mentalmodel-base.md", "mentalmodel-debugging.md"]}` |
+
+## Examples
+
+<CodeGroup>
+```bash Basic preflight check
+mentalmodel doctor
+```
+
+```bash Check with entrypoint validation
+mentalmodel doctor --entrypoint mypackage.workflows:build_program
+```
+
+```bash Check Claude agent skills
+mentalmodel doctor --agent claude
+```
+
+```bash JSON output for automation
+mentalmodel doctor --json
+```
+
+```bash Full check with all options
+mentalmodel doctor \
+  --agent codex \
+  --entrypoint mypackage.workflows:build_program \
+  --runs-dir /tmp/my-runs \
+  --json
+```
+</CodeGroup>
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | All checks passed (warn and skip are allowed) |
+| `1` | One or more checks failed |
+
+<Tip>
+  Run `mentalmodel doctor --json` from a coding agent to get a machine-readable preflight report before starting a debugging or authoring session.
+</Tip>

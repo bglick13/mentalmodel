@@ -1,0 +1,253 @@
+---
+title: "Plugins"
+description: "How to extend mentalmodel with new primitives using the PrimitivePlugin protocol and the PluginRegistry."
+---
+
+The plugin system lets you introduce new primitive types that lower into the IR, participate in static analysis, and execute in the async runtime — without modifying core mentalmodel code. Everything that `RuntimeContext` does is implemented as a plugin; your own primitive can do the same.
+
+---
+
+## The PrimitivePlugin protocol
+
+A plugin is any object that satisfies the `PrimitivePlugin` protocol:
+
+```python
+class PrimitivePlugin(Protocol):
+    """Plugin contract for non-core primitives."""
+
+    kind: str       # unique kind string, e.g. "runtime_context"
+    origin: str     # module path, e.g. "mypackage.plugins.my_plugin"
+    version: str | None
+
+    def supports(self, primitive: object) -> bool:
+        """Return whether the plugin can lower the given primitive."""
+
+    def lower(self, primitive: object, ctx: LoweringContext) -> IRFragment:
+        """Lower the primitive into a canonical IR fragment."""
+```
+
+If your primitive also executes at runtime, implement the extended `ExecutablePrimitivePlugin` protocol:
+
+```python
+class ExecutablePrimitivePlugin(PrimitivePlugin, Protocol):
+    """Plugin contract for primitives that also own runtime execution."""
+
+    def compile(
+        self,
+        *,
+        primitive: object,
+        metadata: ExecutionNodeMetadata,
+        input_adapter: MappingInputAdapter[object],
+    ) -> CompiledExecutionNode:
+        """Compile the primitive into an executable runtime node."""
+```
+
+`compile` receives the `ExecutionNodeMetadata` derived from the IR node and a `MappingInputAdapter` that resolves upstream outputs by node id. Return any object that satisfies `CompiledExecutionNode` — i.e., has a `metadata` field and an async `execute(outputs, context)` method.
+
+---
+
+## Plugin provenance
+
+Every IR node lowered by a plugin is stamped with provenance metadata automatically by `LoweringContext._apply_metadata`. The keys written are:
+
+| Key | Value source |
+| --- | --- |
+| `plugin_kind` | `plugin.kind` |
+| `plugin_origin` | `plugin.origin` |
+| `plugin_version` | `plugin.version` (omitted when `None`) |
+
+Core primitives receive `plugin_kind="core"` and `plugin_origin="mentalmodel.core"`. Plugin-produced nodes receive the plugin's own values. Static analysis checks (`run_semantic_checks`) raise a `missing-plugin-provenance` error for any node missing these keys.
+
+---
+
+## PluginRegistry
+
+The `PluginRegistry` is a list of registered plugins. The lowering context and execution plan both accept a registry:
+
+```python
+@dataclass(slots=True)
+class PluginRegistry:
+    plugins: list[PrimitivePlugin] = field(default_factory=list)
+
+    def register(self, plugin: PrimitivePlugin) -> None:
+        """Register a plugin. Raises ValueError on duplicate kind."""
+
+    def find_plugin(self, primitive: object) -> PrimitivePlugin | None:
+        """Find the first plugin whose supports() returns True."""
+
+    def find_executable_plugin(self, primitive: object) -> ExecutablePrimitivePlugin | None:
+        """Find an executable plugin for the primitive, or None."""
+```
+
+`default_registry()` creates a fresh registry pre-loaded with `RuntimeContextPlugin` and `AutoResearchPlugin`. Pass a custom registry to `lower_program` or `compile_program` to add your own plugins without affecting the global default.
+
+### Registering a plugin for all runs
+
+Use `register_default_plugin` to add a plugin to every registry created by `default_registry()`:
+
+```python
+from mentalmodel.plugins.registry import register_default_plugin
+
+register_default_plugin(MyPlugin())
+```
+
+This is process-scoped and thread-safe. Attempting to register two different plugin types under the same `kind` raises `ValueError`.
+
+---
+
+## RuntimeContext: the reference plugin
+
+`RuntimeContext` is the canonical example of a non-core primitive implemented as a plugin. Study it when building your own.
+
+**The primitive (data class):**
+
+```python
+@dataclass(slots=True)
+class RuntimeContext:
+    name: str
+    runtime: str
+    children: Sequence[NamedPrimitive] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
+```
+
+It holds no `lower()` method — it is a plain data class. The plugin owns all lowering logic.
+
+**The plugin:**
+
+```python
+class RuntimeContextPlugin:
+    kind: str = "runtime_context"
+    origin: str = "mentalmodel.plugins.runtime_context"
+    version: str | None = "0.1.0"
+
+    def supports(self, primitive: object) -> bool:
+        return isinstance(primitive, RuntimeContext)
+
+    def lower(self, primitive: object, ctx: LoweringContext) -> IRFragment:
+        runtime_context = cast(RuntimeContext, primitive)
+        metadata = dict(runtime_context.metadata)
+        metadata["runtime_context"] = runtime_context.runtime
+        node = IRNode(
+            node_id=runtime_context.name,
+            kind="runtime_context",
+            label=runtime_context.name,
+            metadata=metadata,
+        )
+        # Propagate runtime_context into all descendants
+        child_ctx = ctx.child_context({"runtime_context": runtime_context.runtime})
+        fragment = IRFragment()
+        lowered_node = child_ctx._apply_metadata(node)
+        child_ctx._register_node(lowered_node)
+        fragment.nodes.append(lowered_node)
+        for child in runtime_context.children:
+            child_fragment = child_ctx.lower(child)
+            fragment.extend(child_fragment)
+            for child_root in child_ctx.fragment_roots(child_fragment):
+                fragment.edges.append(
+                    child_ctx.make_edge(
+                        source_node_id=lowered_node.node_id,
+                        source_port="contains",
+                        target_node_id=child_root,
+                        target_port="contained",
+                        kind="contains",
+                    )
+                )
+        return fragment
+```
+
+Key patterns from this implementation:
+
+- `ctx.child_context({"runtime_context": ...})` propagates metadata to all descendants.
+- `child_ctx._apply_metadata(node)` merges inherited metadata and stamps provenance.
+- `child_ctx._register_node(node)` enforces the duplicate-id constraint.
+- `child_ctx.fragment_roots(fragment)` finds the top-level nodes in a child fragment to wire `contains` edges.
+
+---
+
+## Building a custom plugin
+
+<Steps>
+  <Step title="Define your primitive">
+    Create a plain data class with a `name: str` field and whatever other fields your primitive needs. Do not add a `lower()` method — the plugin owns that.
+
+    ```python
+    from dataclasses import dataclass, field
+
+    @dataclass(slots=True)
+    class BatchStep:
+        name: str
+        batch_size: int
+        handler: object
+        inputs: list = field(default_factory=list)
+        metadata: dict = field(default_factory=dict)
+    ```
+  </Step>
+
+  <Step title="Implement PrimitivePlugin">
+    ```python
+    from mentalmodel.plugins.base import PrimitivePlugin
+    from mentalmodel.ir.graph import IRFragment, IRNode
+
+    class BatchStepPlugin:
+        kind = "batch_step"
+        origin = "mypackage.plugins.batch_step"
+        version = "1.0.0"
+
+        def supports(self, primitive):
+            return isinstance(primitive, BatchStep)
+
+        def lower(self, primitive, ctx):
+            step = primitive
+            metadata = dict(step.metadata)
+            metadata["batch_size"] = str(step.batch_size)
+            node = IRNode(
+                node_id=step.name,
+                kind="batch_step",
+                label=step.name,
+                metadata=metadata,
+            )
+            return ctx.lower_leaf(node=node, inputs=step.inputs)
+    ```
+  </Step>
+
+  <Step title="Add runtime execution (optional)">
+    To make the node executable, also implement `compile`:
+
+    ```python
+    from mentalmodel.runtime.execution import CompiledPluginNode, ExecutionNodeMetadata, MappingInputAdapter
+
+    class BatchStepPlugin:
+        # ... kind, origin, version, supports, lower ...
+
+        def compile(self, *, primitive, metadata, input_adapter):
+            return CompiledPluginNode(
+                metadata=metadata,
+                handler=BatchStepHandler(primitive.handler, primitive.batch_size),
+                input_adapter=input_adapter,
+            )
+    ```
+  </Step>
+
+  <Step title="Register the plugin">
+    ```python
+    from mentalmodel.plugins.registry import register_default_plugin
+
+    register_default_plugin(BatchStepPlugin())
+    ```
+
+    Or pass a custom registry directly:
+
+    ```python
+    from mentalmodel.plugins.registry import PluginRegistry
+    from mentalmodel.ir.lowering import lower_program
+
+    registry = PluginRegistry()
+    registry.register(BatchStepPlugin())
+    graph = lower_program(workflow, registry=registry)
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Plugin `kind` values must be globally unique within a registry. Registering two plugins with the same `kind` raises `ValueError`. Choose a namespaced kind string (e.g. `"mypackage.batch_step"`) to avoid collisions with third-party plugins.
+</Note>

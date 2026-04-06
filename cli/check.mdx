@@ -1,0 +1,104 @@
+---
+title: "check"
+description: "Run structural and semantic analysis on a mentalmodel program."
+---
+
+The `check` command loads your program, lowers it to the IR, and runs a suite of structural and semantic validations. Use it as a lightweight lint step in CI or during development to catch graph errors before running your workflow.
+
+## Usage
+
+```bash
+mentalmodel check --entrypoint module:function
+```
+
+## Flags
+
+<ParamField query="--entrypoint" type="string" default="mentalmodel.examples.async_rl.demo:build_program">
+  Program entrypoint in `module.submodule:function_name` format. The CLI imports the module, calls the function, and expects a `Workflow` instance in return.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a single JSON object to stdout instead of rendering Rich tables. Useful for CI pipelines and scripting.
+</ParamField>
+
+## What it checks
+
+`check` runs two passes against the lowered IR graph.
+
+### Structural checks
+
+| Code | Severity | Description |
+|---|---|---|
+| `duplicate-node-id` | error | Two or more nodes share the same node ID |
+| `unknown-edge-source` | error | An edge references a source node ID that does not exist in the graph |
+| `unknown-edge-target` | error | An edge references a target node ID that does not exist in the graph |
+| `empty-graph` | error | The lowered graph contains no nodes |
+
+### Semantic checks
+
+| Code | Severity | Description |
+|---|---|---|
+| `missing-workflow-root` | warning | No node with kind `workflow` is declared |
+| `missing-runtime-context` | warning | A node of kind `actor`, `effect`, or `invariant` does not inherit or declare a runtime context |
+| `missing-plugin-provenance` | error | A node does not carry the required plugin provenance metadata (`plugin_kind` and `plugin_origin`) |
+
+## Output
+
+When you run without `--json`, the command renders two tables.
+
+**Summary table** — one row per graph:
+
+| Graph | Nodes | Edges | Errors | Warnings |
+|---|---|---|---|---|
+| my-graph | 5 | 4 | 0 | 1 |
+
+**Findings table** — one row per finding (omitted when there are no findings):
+
+| Severity | Code | Node | Message |
+|---|---|---|---|
+| warning | missing-runtime-context | fetch_data | Node does not inherit or declare a runtime context. |
+
+When there are no findings, the CLI prints `No findings.` in green.
+
+## Examples
+
+<CodeGroup>
+```bash Basic check
+mentalmodel check --entrypoint mypackage.workflows:build_program
+```
+
+```bash JSON output
+mentalmodel check --entrypoint mypackage.workflows:build_program --json
+```
+</CodeGroup>
+
+### JSON output format
+
+```json
+{
+  "graph_id": "my-graph",
+  "node_count": 5,
+  "edge_count": 4,
+  "error_count": 0,
+  "warning_count": 1,
+  "findings": [
+    {
+      "code": "missing-runtime-context",
+      "severity": "warning",
+      "message": "Node does not inherit or declare a runtime context.",
+      "node_id": "fetch_data"
+    }
+  ]
+}
+```
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | No errors found (warnings are allowed) |
+| `1` | One or more errors found |
+
+<Note>
+  Warnings do not cause a non-zero exit code. Only findings with severity `error` set the exit code to `1`.
+</Note>

@@ -1,0 +1,148 @@
+---
+title: "demo"
+description: "Run or materialize a packaged mentalmodel reference demo."
+---
+
+The `demo` command runs one of the built-in reference demos end-to-end: it executes the workflow, runs verification, and optionally writes documentation and graph artifacts to disk. Use it to explore `mentalmodel` features with a working example or to validate your installation.
+
+## Usage
+
+```bash
+mentalmodel demo <name>
+```
+
+## Flags
+
+<ParamField path="name" type="string" default="async-rl">
+  The demo to run. Accepted values: `async-rl`, `agent-tool-use`, `autoresearch-sorting`.
+</ParamField>
+
+<ParamField query="--write-artifacts" type="flag">
+  Materialize documentation, graph, and other generated files to the output directory. When omitted, the files are listed but not written.
+</ParamField>
+
+<ParamField query="--output-dir" type="path">
+  Directory to write artifacts when `--write-artifacts` is set. Defaults to a demo-specific subdirectory in the current working directory.
+</ParamField>
+
+<ParamField query="--runs-dir" type="path">
+  Root directory for persisted run artifacts. Defaults to `./.runs`.
+</ParamField>
+
+<ParamField query="--json" type="flag">
+  Emit a single JSON object to stdout instead of rendering Rich tables.
+</ParamField>
+
+---
+
+## Available demos
+
+### async-rl
+
+The `async-rl` demo illustrates the core async runtime primitives:
+
+- Async actor execution
+- Effect nodes wrapping side-effectful operations
+- Parallel fan-out and join
+- Invariant declarations and verification
+
+```bash
+mentalmodel demo async-rl
+```
+
+### agent-tool-use
+
+The `agent-tool-use` demo shows a multi-context agentic workflow:
+
+- Multiple runtime contexts in a single graph
+- Multiple tool effect nodes
+- A join node that combines parallel branches
+- A structured answer invariant
+- Output-derived metrics
+
+```bash
+mentalmodel demo agent-tool-use
+```
+
+### autoresearch-sorting
+
+The `autoresearch-sorting` demo shows the objective/search layer:
+
+- Bounded optimization over a workflow using an objective function
+- Candidate evaluation with per-candidate verification
+- Score tracking and best-candidate selection
+
+```bash
+mentalmodel demo autoresearch-sorting
+```
+
+---
+
+## Examples
+
+<CodeGroup>
+```bash Run the default demo
+mentalmodel demo
+```
+
+```bash Run a specific demo
+mentalmodel demo agent-tool-use
+```
+
+```bash Run and write all artifacts
+mentalmodel demo async-rl --write-artifacts
+```
+
+```bash Write artifacts to a custom directory
+mentalmodel demo async-rl \
+  --write-artifacts \
+  --output-dir ./my-demo-output
+```
+
+```bash JSON output
+mentalmodel demo async-rl --json
+```
+</CodeGroup>
+
+## Output
+
+Without `--json`, the command renders two tables.
+
+**Summary table:**
+
+| Demo | Graph | Nodes | Edges | Runtime | Property Checks | Run Artifacts |
+|---|---|---|---|---|---|---|
+| async-rl | async-rl-graph | 6 | 5 | pass | 2 | .runs/async-rl-graph/run-abc123 |
+
+**Demo Artifacts table** — lists all artifact names and their target directory:
+
+| Artifact | Target Directory |
+|---|---|
+| topology.md | ./mentalmodel-demo-async-rl |
+| node-inventory.md | ./mentalmodel-demo-async-rl |
+| graph.mmd | ./mentalmodel-demo-async-rl |
+
+When `--write-artifacts` is not set, the CLI prints a yellow notice explaining how to materialize the files.
+
+### JSON output example (async-rl)
+
+```json
+{
+  "artifact_dir": "./mentalmodel-demo-async-rl",
+  "artifacts": ["topology.md", "node-inventory.md", "invariants.md", "runtime-contexts.md"],
+  "demo": "async-rl",
+  "edge_count": 5,
+  "graph_id": "async-rl-graph",
+  "node_count": 6,
+  "run_artifacts_dir": ".runs/async-rl-graph/run-abc123",
+  "verification": { "success": true },
+  "wrote_artifacts": false
+}
+```
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Verification passed and no static errors were found |
+| `1` | Verification failed or static errors were found |
