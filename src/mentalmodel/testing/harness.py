@@ -13,8 +13,20 @@ from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import write_json
 from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.runtime import AsyncExecutor, ExecutionRecorder, ExecutionResult
+from mentalmodel.runtime.events import INVARIANT_CHECKED
 from mentalmodel.runtime.runs import RunArtifacts, write_run_artifacts
 from mentalmodel.testing.invariants import PropertyCheckResult, run_property_checks
+
+
+@dataclass(slots=True, frozen=True)
+class RuntimeInvariantFailure:
+    """Observed invariant failure from runtime semantic records."""
+
+    node_id: str
+    severity: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"node_id": self.node_id, "severity": self.severity}
 
 
 @dataclass(slots=True, frozen=True)
@@ -28,6 +40,23 @@ class RuntimeVerificationResult:
     run_id: str | None = None
     run_artifacts_dir: str | None = None
     error: str | None = None
+    invariant_failures: tuple[RuntimeInvariantFailure, ...] = ()
+
+    @property
+    def warning_invariant_failures(self) -> tuple[RuntimeInvariantFailure, ...]:
+        return tuple(
+            failure
+            for failure in self.invariant_failures
+            if failure.severity == "warning"
+        )
+
+    @property
+    def error_invariant_failures(self) -> tuple[RuntimeInvariantFailure, ...]:
+        return tuple(
+            failure
+            for failure in self.invariant_failures
+            if failure.severity != "warning"
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -75,6 +104,14 @@ class VerificationReport:
                 "run_id": self.runtime.run_id,
                 "run_artifacts_dir": self.runtime.run_artifacts_dir,
                 "error": self.runtime.error,
+                "warning_invariant_failures": [
+                    failure.as_dict()
+                    for failure in self.runtime.warning_invariant_failures
+                ],
+                "error_invariant_failures": [
+                    failure.as_dict()
+                    for failure in self.runtime.error_invariant_failures
+                ],
             },
             "property_checks": [
                 {
@@ -154,6 +191,7 @@ def run_verification(
         run_id=runtime_capture.result.run_id,
         run_artifacts_dir=str(artifacts.run_dir),
         error=runtime_capture.result.error,
+        invariant_failures=runtime_capture.result.invariant_failures,
     )
     final_report = VerificationReport(
         analysis=analysis,
@@ -172,6 +210,7 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
     try:
         result = asyncio.run(executor.run(program))
     except Exception as exc:
+        invariant_failures = _collect_invariant_failures(tuple(recorder.records))
         return RuntimeExecutionCapture(
             result=RuntimeVerificationResult(
                 success=False,
@@ -180,6 +219,7 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
                 state_count=0,
                 run_id=recorder.last_run_id,
                 error=f"{type(exc).__name__}: {exc}",
+                invariant_failures=invariant_failures,
             ),
             records=tuple(recorder.records),
             outputs={},
@@ -195,6 +235,7 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
             output_count=len(result.outputs),
             state_count=len(result.state),
             run_id=result.run_id,
+            invariant_failures=_collect_invariant_failures(result.records),
         ),
         records=result.records,
         outputs=result.outputs,
@@ -203,3 +244,23 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
         trace_sink_configured=executor.tracing.sink_configured,
         trace_summary=result.trace_summary,
     )
+
+
+def _collect_invariant_failures(
+    records: tuple[ExecutionRecord, ...],
+) -> tuple[RuntimeInvariantFailure, ...]:
+    failures: dict[str, RuntimeInvariantFailure] = {}
+    for record in records:
+        if record.event_type != INVARIANT_CHECKED:
+            continue
+        passed = record.payload.get("passed")
+        if not isinstance(passed, bool) or passed:
+            continue
+        severity = record.payload.get("severity")
+        if not isinstance(severity, str):
+            severity = "error"
+        failures[record.node_id] = RuntimeInvariantFailure(
+            node_id=record.node_id,
+            severity=severity,
+        )
+    return tuple(failures[node_id] for node_id in sorted(failures))

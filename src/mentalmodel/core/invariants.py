@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from mentalmodel.core.interfaces import InvariantChecker, JsonValue
-from mentalmodel.core.refs import Ref
+from mentalmodel.core.refs import InputRef
 from mentalmodel.ir.graph import IRFragment, IRNode
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ class Invariant(Generic[InputT, DetailT]):
 
     name: str
     checker: InvariantChecker[InputT, DetailT]
-    inputs: list[Ref] = field(default_factory=list)
+    inputs: list[InputRef] = field(default_factory=list)
     severity: str = "error"
     metadata: dict[str, str] = field(default_factory=dict)
 
@@ -34,4 +34,4 @@ class Invariant(Generic[InputT, DetailT]):
             label=self.name,
             metadata=metadata,
         )
-        return ctx.lower_leaf(node=node, inputs=self.inputs)
+        return ctx.lower_leaf(primitive=self, node=node, inputs=self.inputs)

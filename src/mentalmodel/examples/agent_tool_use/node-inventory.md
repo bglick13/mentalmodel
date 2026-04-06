@@ -10,8 +10,13 @@
 - Plugin Version: none
 - Data Dependencies: `cost_calculator`, `task_source`, `tool_results_join`
 - Data Dependents: `answer_invariant`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `handler`: `AnswerSynthesizer`
@@ -30,8 +35,13 @@
 - Plugin Version: none
 - Data Dependencies: `task_source`
 - Data Dependents: `tool_results_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `handler`: `Planner`
@@ -50,8 +60,13 @@
 - Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: `answer_invariant`, `answer_synthesizer`, `discount_lookup`, `plan_lookup`, `plan_task`, `support_lookup`, `tool_results_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `handler`: `TaskSource`
@@ -70,8 +85,13 @@
 - Plugin Version: none
 - Data Dependencies: `tool_results_join`
 - Data Dependents: `answer_synthesizer`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `sandbox_tools`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -90,8 +110,13 @@
 - Plugin Version: none
 - Data Dependencies: `task_source`
 - Data Dependents: `tool_results_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `tool_fanout`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -110,8 +135,13 @@
 - Plugin Version: none
 - Data Dependencies: `task_source`
 - Data Dependents: `tool_results_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `tool_fanout`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -130,8 +160,13 @@
 - Plugin Version: none
 - Data Dependencies: `task_source`
 - Data Dependents: `tool_results_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `tool_fanout`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -150,8 +185,13 @@
 - Plugin Version: none
 - Data Dependencies: `answer_synthesizer`, `task_source`
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `checker`: `AnswerInvariant`
@@ -170,8 +210,13 @@
 - Plugin Version: none
 - Data Dependencies: `discount_lookup`, `plan_lookup`, `plan_task`, `support_lookup`, `task_source`
 - Data Dependents: `answer_synthesizer`, `cost_calculator`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `sandbox_tools`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `core`
@@ -189,8 +234,13 @@
 - Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `sandbox_tools`
 - Contained Children: `discount_lookup`, `plan_lookup`, `support_lookup`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `core`
@@ -207,8 +257,13 @@
 - Plugin Version: `0.1.0`
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `agent_tool_use_demo`
 - Contained Children: `answer_invariant`, `answer_synthesizer`, `plan_task`, `sandbox_tools`, `task_source`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `runtime_context`
@@ -226,8 +281,13 @@
 - Plugin Version: `0.1.0`
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: `cost_calculator`, `tool_fanout`, `tool_results_join`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `runtime_context`
@@ -245,8 +305,13 @@
 - Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: none
 - Contained Children: `local_control_plane`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `description`: `Agent tool-use workflow with local planning and sandboxed tools.`

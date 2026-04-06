@@ -229,12 +229,14 @@ def run_verify(
     summary.add_column("Static Errors", justify="right")
     summary.add_column("Warnings", justify="right")
     summary.add_column("Runtime", justify="right")
+    summary.add_column("Warning Invariants", justify="right")
     summary.add_column("Property Checks", justify="right")
     summary.add_row(
         report.analysis.graph.graph_id,
         str(report.analysis.error_count),
         str(report.analysis.warning_count),
         "pass" if report.runtime.success else "fail",
+        str(len(report.runtime.warning_invariant_failures)),
         str(len(report.property_checks)),
     )
     console.print(summary)
@@ -244,6 +246,7 @@ def run_verify(
     runtime_table.add_column("Records", justify="right")
     runtime_table.add_column("Outputs", justify="right")
     runtime_table.add_column("State Entries", justify="right")
+    runtime_table.add_column("Warning Invariants", justify="right")
     runtime_table.add_column("Run Artifacts")
     runtime_table.add_column("Error")
     runtime_table.add_row(
@@ -251,10 +254,24 @@ def run_verify(
         str(report.runtime.record_count),
         str(report.runtime.output_count),
         str(report.runtime.state_count),
+        str(len(report.runtime.warning_invariant_failures)),
         report.runtime.run_artifacts_dir or "",
         report.runtime.error or "",
     )
     console.print(runtime_table)
+
+    if report.runtime.invariant_failures:
+        invariant_table = Table(title="Invariant Outcomes")
+        invariant_table.add_column("Node")
+        invariant_table.add_column("Severity")
+        invariant_table.add_column("Fatal")
+        for failure in report.runtime.invariant_failures:
+            invariant_table.add_row(
+                failure.node_id,
+                failure.severity,
+                "yes" if failure.severity != "warning" else "no",
+            )
+        console.print(invariant_table)
 
     if report.property_checks:
         checks = Table(title="Property Checks")
@@ -342,11 +359,7 @@ def run_replay(
             str(node_summary.first_sequence or ""),
             str(node_summary.last_sequence or ""),
             node_summary.last_event_type or "",
-            (
-                "pass"
-                if node_summary.invariant_passed is True
-                else "fail" if node_summary.invariant_passed is False else ""
-            ),
+            node_summary.invariant_status or "",
         )
     console.print(nodes)
     return 0
@@ -1022,12 +1035,16 @@ def run_runs_diff(
         invariant_table.add_column("Node")
         invariant_table.add_column("Outcome A")
         invariant_table.add_column("Outcome B")
+        invariant_table.add_column("Severity A")
+        invariant_table.add_column("Severity B")
         invariant_table.add_column("Differs")
         for invariant_diff in diff.invariant_diffs:
             invariant_table.add_row(
                 invariant_diff.node_id,
                 _invariant_outcome_label(invariant_diff.outcome_run_a),
                 _invariant_outcome_label(invariant_diff.outcome_run_b),
+                invariant_diff.severity_run_a or "",
+                invariant_diff.severity_run_b or "",
                 "yes" if invariant_diff.differs else "no",
             )
         console.print(invariant_table)

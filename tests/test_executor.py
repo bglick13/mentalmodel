@@ -80,6 +80,19 @@ class AlwaysFailInvariant(InvariantChecker[dict[str, object], JsonValue]):
         )
 
 
+class WarningFailInvariant(InvariantChecker[dict[str, object], JsonValue]):
+    async def check(
+        self,
+        inputs: dict[str, object],
+        ctx: ExecutionContext,
+    ) -> InvariantResult[JsonValue]:
+        del inputs, ctx
+        return InvariantResult(
+            passed=False,
+            details={"reason": "warning failure"},
+        )
+
+
 class FakeTracingAdapter:
     def __init__(self) -> None:
         self.span_names: list[str] = []
@@ -408,6 +421,51 @@ class ExecutorTest(unittest.TestCase):
         self.assertIn("invariant.checked", check_events)
         self.assertIn("node.failed", check_events)
 
+    def test_warning_invariant_failure_is_recorded_without_failing_run(self) -> None:
+        program: Workflow[
+            Actor[dict[str, object], str, object] | Invariant[dict[str, object], JsonValue]
+        ] = Workflow(
+            name="warning_invariant_failure",
+            children=[
+                Actor(name="source", handler=NoOpHandler(), inputs=[]),
+                Invariant(
+                    name="warn_check",
+                    checker=WarningFailInvariant(),
+                    inputs=[Ref("source")],
+                    severity="warning",
+                ),
+            ],
+        )
+        recorder = ExecutionRecorder()
+        metrics = RecordingMetricEmitter()
+        result = asyncio.run(AsyncExecutor(recorder=recorder, metrics=metrics).run(program))
+        self.assertIn("warn_check", result.outputs)
+        invariant_output = cast(InvariantResult[JsonValue], result.outputs["warn_check"])
+        self.assertFalse(invariant_output.passed)
+        warn_events = [
+            record.event_type for record in recorder.records if record.node_id == "warn_check"
+        ]
+        self.assertIn("invariant.checked", warn_events)
+        self.assertIn("node.succeeded", warn_events)
+        self.assertNotIn("node.failed", warn_events)
+        invariant_record = next(
+            record
+            for record in recorder.records
+            if record.node_id == "warn_check" and record.event_type == "invariant.checked"
+        )
+        self.assertEqual(
+            invariant_record.payload,
+            {"passed": False, "severity": "warning"},
+        )
+        metric_names = [observation.definition.name for observation in metrics.observations]
+        self.assertIn("mentalmodel.invariant.failures", metric_names)
+        invariant_metric = next(
+            observation
+            for observation in metrics.observations
+            if observation.definition.name == "mentalmodel.invariant.failures"
+        )
+        self.assertEqual(invariant_metric.attributes["severity"], "warning")
+
     def test_missing_dependency_raises_execution_error(self) -> None:
         program: Workflow[Actor[dict[str, object], str, object]] = Workflow(
             name="missing_dep",
@@ -429,12 +487,13 @@ class ExecutorTest(unittest.TestCase):
             label=metadata.label,
             runtime_context=metadata.runtime_context,
             dependencies=metadata.dependencies,
+            input_bindings=metadata.input_bindings,
         )
         with self.assertRaises(LoweringError):
             compile_execution_node(
                 metadata=bad_metadata,
                 primitive=actor_primitive,
-                input_adapter=MappingInputAdapter[object](bad_metadata.dependencies),
+                input_adapter=MappingInputAdapter[object](bad_metadata.input_bindings),
             )
 
     def test_executor_uses_tracing_adapter_for_node_spans(self) -> None:

@@ -144,7 +144,7 @@ Only check `otel show-config` or inspect `otel-spans.jsonl` after the semantic r
 Common failure classes:
 - Missing upstream dependency or wrong `Ref(...)` — the node will not appear in `records.jsonl` or will show `node.failed`
 - Effect handler exception — look for `node.failed` with an `error` payload
-- Invariant failure — look for `invariant.checked` with `passed: false`
+- Invariant failure — look for `invariant.checked` with `passed: false`; check `severity` to tell advisory warning failures from fatal errors
 - Plugin execution failure — the error type and message appear in the `node.failed` payload
 - Tracing config error — reported by `mentalmodel doctor` and does not affect semantic execution
 
@@ -173,7 +173,7 @@ mentalmodel runs diff --graph-id <graph_id> \
 The diff surfaces:
 - `state_equal` — whether final state maps match
 - Per-node `events_equal`, `inputs_equal`, `outputs_equal`, and the full payloads for both runs
-- Per-invariant `outcome_run_a` / `outcome_run_b` and details
+- Per-invariant `outcome_run_a` / `outcome_run_b`, `severity_run_a` / `severity_run_b`, and details
 
 Once you identify the diverged node with `runs diff`, drop back into `runs inputs`, `runs outputs`, and `runs trace` for that node specifically.
 

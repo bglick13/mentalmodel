@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from mentalmodel.core.interfaces import JoinReducer
-from mentalmodel.core.refs import Ref
+from mentalmodel.core.refs import InputRef
 from mentalmodel.ir.graph import IRFragment, IRNode
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ class Parallel(Generic[ChildT]):
             label=self.name,
             metadata=dict(self.metadata),
         )
-        return ctx.lower_container(node=node, children=self.children)
+        return ctx.lower_container(primitive=self, node=node, children=self.children)
 
 
 @dataclass(slots=True)
@@ -40,7 +40,7 @@ class Join(Generic[InputT, OutputT]):
     """Explicit merge point for prior values."""
 
     name: str
-    inputs: list[Ref] = field(default_factory=list)
+    inputs: list[InputRef] = field(default_factory=list)
     reducer: JoinReducer[InputT, OutputT] | None = None
     metadata: dict[str, str] = field(default_factory=dict)
 
@@ -54,4 +54,4 @@ class Join(Generic[InputT, OutputT]):
             label=self.name,
             metadata=metadata,
         )
-        return ctx.lower_leaf(node=node, inputs=self.inputs)
+        return ctx.lower_leaf(primitive=self, node=node, inputs=self.inputs)

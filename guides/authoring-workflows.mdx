@@ -15,7 +15,7 @@ This guide focuses on that authored shape.
 
 Use containers to express structure and `Ref` to express dataflow.
 
-- `Workflow`, `Parallel`, and `RuntimeContext` provide readable grouping
+- `Workflow`, `Parallel`, `RuntimeContext`, and `Use` provide readable grouping
 - `Ref` provides executable dependency edges
 
 If a reader can understand your workflow by looking at the containers and a few
@@ -148,8 +148,8 @@ If you find yourself writing handler code that knows about prefixed node ids or
 container names, that is usually a sign the authored structure is getting too
 stringly.
 
-Today, this is one of the known ergonomic gaps the package is actively working
-to improve further with reusable blocks.
+For reusable fragments, prefer `Block` plus `Use` so namespacing and block
+input binding stay in the authoring layer instead of leaking into handlers.
 
 ## A practical structure for medium-sized workflows
 
@@ -235,11 +235,9 @@ read too.
 
 ## Current limitation
 
-Today the package does not yet have first-class reusable block instantiation or
-native loop control flow. That means larger real workflows still need some
-extra authoring discipline to stay legible.
-
-Those are active design areas, not hidden limitations.
+The package now has first-class reusable block instantiation via `Block` and
+`Use`, but it does not yet have native loop control flow. Larger iterative
+workflows still need extra authoring discipline until `StepLoop` lands.
 
 ## Next steps
 
@@ -249,6 +247,9 @@ Those are active design areas, not hidden limitations.
   </Card>
   <Card title="Effects and actors" icon="bolt" href="/guides/effects-and-actors">
     Learn how to design good handlers for stateful and effectful nodes.
+  </Card>
+  <Card title="Reusable blocks" icon="boxes-stacked" href="/guides/reusable-blocks">
+    Learn how to reuse semantic fragments without manual prefix plumbing.
   </Card>
   <Card title="Parallel and join" icon="diagram-project" href="/guides/parallel-and-join">
     Go deeper on fanout, synchronization, and join reducers.

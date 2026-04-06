@@ -160,7 +160,7 @@ Invariant[InvariantInputs, int](
 )
 ```
 
-The checker receives the `Join` output and returns an `InvariantResult`. If it fails, the executor raises `InvariantViolationError` and halts the run. See the [Effects & Actors](/guides/effects-and-actors) guide for the `InvariantChecker` protocol signature.
+The checker receives the `Join` output and returns an `InvariantResult`. If it fails with `severity="error"`, the executor raises `InvariantViolationError` and halts the run. If it fails with `severity="warning"`, the failure is recorded and surfaced, but execution continues. See the [Invariants](/concepts/invariants) page for the current severity semantics.
 
 ## Verifying key alignment with assert_aligned_key_sets
 

@@ -1,0 +1,140 @@
+---
+title: "Current Package Model"
+description: "A concise map of what mentalmodel supports well today, what is intentionally constrained, and what is still planned."
+---
+
+This page answers one practical question:
+
+**What package are you actually holding in your hands today?**
+
+That matters because `mentalmodel` is ambitious, and some future-facing ideas
+are already part of the roadmap. This page focuses on the current shipped model.
+
+## What mentalmodel already supports well
+
+Today the package is strong at:
+
+- authored DAG workflows
+- reusable namespaced block composition via `Block` and `Use`
+- explicit stateful nodes via `Actor`
+- explicit side-effect boundaries via `Effect`
+- runtime invariants via `Invariant`
+- readable fanout and merge points via `Parallel` and `Join`
+- explicit data dependencies via `Ref`
+- runtime-boundary annotation via `RuntimeContext`
+- plugin-based lowering and runtime-executable plugin nodes
+- generated Mermaid and markdown from the same IR
+- persisted `.runs` bundles
+- replay, diffing, and node-level run inspection
+- OpenTelemetry traces and metrics
+
+That means the package is already well suited to:
+
+- medium-sized workflow-like programs
+- async fanout/join pipelines
+- verifiable demos and reference workflows
+- debugging where local run artifacts matter
+
+## The current runtime model
+
+The runtime today is:
+
+- DAG-based
+- async
+- dependency-driven
+- deterministic where practical
+- run-scoped
+
+The important qualifier is **run-scoped**.
+
+A single workflow execution today means:
+
+- lower one workflow
+- compile one execution plan
+- run it to completion
+- persist one run bundle
+
+## What is intentionally not native yet
+
+These are active roadmap areas, not hidden behavior:
+
+- native multi-step loops
+- first-class runtime environments and typed shared resources
+- parameterized verification entrypoints
+- interactive step mode
+- bespoke graph/run UI
+
+Those capabilities are being designed explicitly rather than improvised.
+
+## A good way to think about the current package
+
+`mentalmodel` today is best understood as:
+
+- a semantic workflow authoring model
+- plus a real runtime
+- plus a real debugging and observability surface
+
+It is not yet:
+
+- a full multi-step workflow language
+- a full interactive debugger
+- a full visual IDE for workflow inspection
+
+## What makes it different right now
+
+The package’s strongest current differentiators are:
+
+### Semantic records before raw telemetry
+
+You can understand a run locally from `.runs` without needing a hosted backend.
+
+### The same authored model drives everything
+
+The same workflow definition powers:
+
+- analysis
+- execution
+- docs
+- diagrams
+- replay
+- diffing
+
+### Plugins are part of the real model
+
+They are not just metadata extensions. Runtime-executable plugins already exist
+today.
+
+## Best-fit use cases today
+
+Use the current package when you want:
+
+- explicit workflow structure
+- durable local debugging
+- typed semantic nodes
+- invariants as part of the actual program
+- generated documentation from the authored model
+
+Be more cautious if your immediate need is:
+
+- deeply iterative step semantics
+- rich reusable subworkflow templating
+- interactive node-by-node stepping
+
+Those are exactly the areas the next roadmap phases address.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    See the high-level positioning and design intent.
+  </Card>
+  <Card title="Quick start" icon="bolt" href="/quickstart">
+    Build and inspect a tiny workflow first.
+  </Card>
+  <Card title="Primitives" icon="shapes" href="/concepts/primitives">
+    Learn the current core authoring surface.
+  </Card>
+  <Card title="Plan Part 3" icon="road" href="https://github.com/bglick13/mentalmodel/blob/main/PLAN-PT3.md">
+    See the next major improvement round and planned package shape.
+  </Card>
+</CardGroup>

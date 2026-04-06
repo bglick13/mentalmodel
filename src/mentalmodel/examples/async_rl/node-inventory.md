@@ -10,8 +10,13 @@
 - Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: `sample_policy`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `handler`: `BatchSource`
@@ -30,8 +35,13 @@
 - Plugin Version: none
 - Data Dependencies: `rollout_join`
 - Data Dependents: `refresh_sampler`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `handler`: `LearnerUpdate`
@@ -50,8 +60,13 @@
 - Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: `rollout_join`, `sample_policy`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `handler`: `PolicySnapshot`
@@ -70,8 +85,13 @@
 - Plugin Version: none
 - Data Dependencies: `sample_policy`
 - Data Dependents: `rollout_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `reward_fanout`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -90,8 +110,13 @@
 - Plugin Version: none
 - Data Dependencies: `sample_policy`
 - Data Dependents: `rollout_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `reward_fanout`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -110,8 +135,13 @@
 - Plugin Version: none
 - Data Dependencies: `sample_policy`
 - Data Dependents: `rollout_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `reward_fanout`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -130,8 +160,13 @@
 - Plugin Version: none
 - Data Dependencies: `learner_update`
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -150,8 +185,13 @@
 - Plugin Version: none
 - Data Dependencies: `batch_source`, `policy_snapshot`
 - Data Dependents: `kl_prefetch`, `pangram_reward`, `quality_reward`, `rollout_join`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `remote_sampling`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `effectful`: `true`
@@ -170,8 +210,13 @@
 - Plugin Version: none
 - Data Dependencies: `rollout_join`
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `checker`: `PolicyStalenessChecker`
@@ -190,8 +235,13 @@
 - Plugin Version: none
 - Data Dependencies: `kl_prefetch`, `pangram_reward`, `policy_snapshot`, `quality_reward`, `sample_policy`
 - Data Dependents: `learner_update`, `staleness_invariant`
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: none
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `core`
@@ -209,8 +259,13 @@
 - Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: `kl_prefetch`, `pangram_reward`, `quality_reward`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `core`
@@ -227,8 +282,13 @@
 - Plugin Version: `0.1.0`
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `async_rl_demo`
 - Contained Children: `batch_source`, `learner_update`, `policy_snapshot`, `refresh_sampler`, `remote_sampling`, `reward_fanout`, `rollout_join`, `staleness_invariant`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `runtime_context`
@@ -246,8 +306,13 @@
 - Plugin Version: `0.1.0`
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: `local_control_plane`
 - Contained Children: `sample_policy`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `plugin_kind`: `runtime_context`
@@ -265,8 +330,13 @@
 - Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: none
+- Bind Dependencies: none
+- Bind Dependents: none
 - Container Parent: none
 - Contained Children: `local_control_plane`
+- Block Name: none
+- Block Inputs: none
+- Block Outputs: none
 - Metadata:
 
   - `description`: `Milestone 2 async RL demo authored in semantic primitives.`

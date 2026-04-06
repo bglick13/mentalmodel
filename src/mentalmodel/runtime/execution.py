@@ -30,6 +30,7 @@ class ExecutionNodeMetadata:
     label: str
     runtime_context: str | None
     dependencies: tuple[str, ...]
+    input_bindings: tuple[tuple[str, str], ...]
 
 
 class InputAdapter(Protocol[InputBoundT_co]):
@@ -43,10 +44,13 @@ class InputAdapter(Protocol[InputBoundT_co]):
 class MappingInputAdapter(Generic[InputT]):
     """Default adapter that presents upstream outputs as a mapping."""
 
-    dependencies: tuple[str, ...]
+    bindings: tuple[tuple[str, str], ...]
 
     def bind(self, outputs: Mapping[str, RuntimeValue]) -> InputT:
-        bound = {dependency: outputs[dependency] for dependency in self.dependencies}
+        bound = {
+            alias: outputs[source_node_id]
+            for alias, source_node_id in self.bindings
+        }
         return cast(InputT, bound)
 
 
@@ -128,7 +132,7 @@ def record_resolved_inputs(
         event_type=NODE_INPUTS_RESOLVED,
         timestamp_ms=context.clock.now_ms(),
         payload={
-            "input_keys": [dependency for dependency in metadata.dependencies],
+            "input_keys": [alias for alias, _ in metadata.input_bindings],
             "inputs": serialize_runtime_value(inputs),
         },
     )

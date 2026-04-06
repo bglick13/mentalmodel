@@ -32,7 +32,7 @@ mentalmodel emits the following metrics for every run. All metrics carry `graph_
 | `mentalmodel.run.completed` | Counter | Incremented once when a run ends; carries a `success` attribute |
 | `mentalmodel.node.executions` | Counter | Incremented once per node execution |
 | `mentalmodel.node.duration_ms` | Histogram | Node execution duration in milliseconds; carries a `success` attribute |
-| `mentalmodel.invariant.failures` | Counter | Incremented each time an invariant node throws; carries a `severity` attribute |
+| `mentalmodel.invariant.failures` | Counter | Incremented each time an invariant check returns `passed=False`; carries a `severity` attribute |
 
 These metrics are emitted by the runtime around every node call — no configuration required on your part.
 

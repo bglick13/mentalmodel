@@ -106,23 +106,15 @@ mentalmodel demo async-rl --json
 
 ## Output
 
-Without `--json`, the command renders two tables.
+Without `--json`, the command renders a demo summary plus the artifact targets.
 
-**Summary table:**
+The exact node and edge counts differ by demo, but the important things to read
+are:
 
-| Demo | Graph | Nodes | Edges | Runtime | Property Checks | Run Artifacts |
-|---|---|---|---|---|---|---|
-| async-rl | async-rl-graph | 6 | 5 | pass | 2 | .runs/async-rl-graph/run-abc123 |
-
-**Demo Artifacts table** — lists all artifact names and their target directory:
-
-| Artifact | Target Directory |
-|---|---|
-| topology.md | ./mentalmodel-demo-async-rl |
-| node-inventory.md | ./mentalmodel-demo-async-rl |
-| graph.mmd | ./mentalmodel-demo-async-rl |
-
-When `--write-artifacts` is not set, the CLI prints a yellow notice explaining how to materialize the files.
+- which `graph_id` the demo used
+- whether verification passed
+- where the run bundle was written
+- whether artifacts were only listed or actually materialized
 
 ### JSON output example (async-rl)
 
@@ -131,13 +123,27 @@ When `--write-artifacts` is not set, the CLI prints a yellow notice explaining h
   "artifact_dir": "./mentalmodel-demo-async-rl",
   "artifacts": ["topology.md", "node-inventory.md", "invariants.md", "runtime-contexts.md"],
   "demo": "async-rl",
-  "edge_count": 5,
-  "graph_id": "async-rl-graph",
-  "node_count": 6,
-  "run_artifacts_dir": ".runs/async-rl-graph/run-abc123",
+  "graph_id": "async_rl_demo",
+  "run_artifacts_dir": ".runs/async_rl_demo/run-abc123",
   "verification": { "success": true },
   "wrote_artifacts": false
 }
+```
+
+## How to use demo output
+
+Use `demo` for three different goals:
+
+- sanity-check that the package is installed and runnable
+- learn from a real reference workflow
+- materialize a known-good artifact set to compare against your own workflows
+
+After a successful demo run, the next useful commands are usually:
+
+```bash
+mentalmodel runs latest --graph-id <graph_id>
+mentalmodel replay --graph-id <graph_id>
+mentalmodel runs trace --graph-id <graph_id> --node-id <interesting_node>
 ```
 
 ## Exit codes

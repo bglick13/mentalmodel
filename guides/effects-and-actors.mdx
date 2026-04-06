@@ -49,7 +49,7 @@ class ActorHandler(Protocol[InputT_contra, StateT, ActorOutputT]):
 |---|---|---|
 | `output` | `OutputT` | Value forwarded to downstream nodes via `Ref` |
 | `next_state` | `StateT \| None` | State persisted for the next execution |
-| `observations` | `Mapping[str, JsonValue]` | Ad-hoc key/value pairs emitted to the run trace |
+| `observations` | `Mapping[str, JsonValue]` | Reserved structured metadata field on the result model |
 
 ```python
 from mentalmodel.core.models import ActorResult
@@ -63,6 +63,10 @@ return ActorResult(
     observations={"previous_policy_version": previous_version},
 )
 ```
+
+<Note>
+`observations` exists on `ActorResult`, but the current runtime does not yet project it into a first-class `.runs` or CLI surface. Treat it as reserved metadata for now rather than the primary way to expose debugging information.
+</Note>
 
 ### Full Actor example
 

@@ -14,7 +14,6 @@ from mentalmodel.observability.metrics import (
     MetricEmitter,
     create_metric_emitter,
     emit_metric_batch,
-    invariant_failure_observation,
     node_duration_observation,
     node_execution_observation,
     run_completed_observation,
@@ -25,7 +24,6 @@ from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.errors import ExecutionError
 from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
 from mentalmodel.runtime.plan import (
-    CompiledInvariantNode,
     CompiledProgram,
     ExecutionPlan,
     PlanNode,
@@ -205,16 +203,6 @@ class AsyncExecutor:
                     timestamp_ms=node_ctx.clock.now_ms(),
                     payload=error_payload(exc),
                 )
-                if isinstance(node, CompiledInvariantNode):
-                    emit_metric_batch(
-                        self.metrics,
-                        [
-                            invariant_failure_observation(
-                                node_ctx.metric_context(),
-                                severity=node.severity,
-                            )
-                        ],
-                    )
                 raise
             finally:
                 duration_ms = max(0.0, node_ctx.clock.now_ms() - start_time_ms)

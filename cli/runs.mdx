@@ -205,7 +205,7 @@ mentalmodel runs trace --node-id collect_data
 </ParamField>
 
 <ParamField query="--event-type" type="string">
-  Filter records by event type (e.g. `node_started`, `node_completed`).
+  Filter records by event type (e.g. `node.started`, `node.succeeded`).
 </ParamField>
 
 <ParamField query="--graph-id" type="string">
@@ -234,6 +234,7 @@ Typical interpretation flow:
 - `node.inputs_resolved` shows the exact bound input payload
 - semantic events such as `effect.invoked` or `invariant.checked` show the
   node-specific work
+- for invariants, `invariant.checked` carries both `passed` and `severity`, so you can tell warning failures from fatal ones
 - `node.succeeded` or `node.failed` shows the outcome
 
 Use `runs trace` when your question is:
@@ -325,7 +326,7 @@ mentalmodel runs diff \
   Emit a JSON diff object.
 </ParamField>
 
-The output includes a **summary table** (differs, state equal, verification outcomes for each run), a **Node Diffs table** (per-node event/input/output equality), an **Invariant Diffs table** (when invariant outcomes differ), and a **State Diff panel** (when state is not equal).
+The output includes a **summary table** (differs, state equal, verification outcomes for each run), a **Node Diffs table** (per-node event/input/output equality), an **Invariant Diffs table** (invariant outcomes plus severity on each side), and a **State Diff panel** (when state is not equal).
 
 Use `runs diff` when your question is:
 

@@ -22,6 +22,7 @@
             "group": "Get Started",
             "pages": [
               "introduction",
+              "concepts/current-package-model",
               "quickstart",
               "installation"
             ]
@@ -36,14 +37,15 @@
               "concepts/plugins"
             ]
           },
-          {
-            "group": "Guides",
-            "pages": [
-              "guides/authoring-workflows",
-              "guides/effects-and-actors",
-              "guides/parallel-and-join",
-              "guides/runtime-contexts",
-              "guides/metrics",
+        {
+          "group": "Guides",
+          "pages": [
+            "guides/authoring-workflows",
+            "guides/reusable-blocks",
+            "guides/effects-and-actors",
+            "guides/parallel-and-join",
+            "guides/runtime-contexts",
+            "guides/metrics",
               "guides/optimization"
             ]
           },

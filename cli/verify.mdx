@@ -107,6 +107,7 @@ The most important fields are:
 - static errors
 - warnings
 - runtime success/failure
+- warning invariant failures
 - run artifact directory
 - property check success/failure
 
@@ -118,14 +119,15 @@ Graph       Static Errors  Warnings  Runtime  Property Checks
 async_rl_demo 0            0         pass     2
 
 Runtime Verification
-Success  Records  Outputs  State Entries  Run Artifacts
-yes      48       10       3              .runs/async_rl_demo/run-abc123
+Success  Records  Outputs  State Entries  Warning Invariants  Run Artifacts
+yes      48       10       3              1                   .runs/async_rl_demo/run-abc123
 ```
 
 How to use that:
 
 - if `Static Errors` is nonzero, fix the graph before trusting runtime output
 - if `Runtime` failed, go straight to the run bundle and inspect `runs trace`
+- if `Warning Invariants` is nonzero, the run continued but you still have advisory correctness drift to inspect
 - if runtime passed but a property check failed, inspect the property-check name
   first, then compare it to runtime outputs and records
 - always note the `Run Artifacts` path; that is the anchor for deeper debugging

@@ -24,7 +24,7 @@ mentalmodel otel show-config
 | `service_name` | OTel service name |
 | `service_namespace` | OTel service namespace |
 | `service_version` | OTel service version |
-| `mode` | Tracing mode (e.g. `disk`, `otlp`) |
+| `mode` | Tracing mode (e.g. `disk`, `otlp_http`, `otlp_grpc`, `console`) |
 | `otlp_endpoint` | OTLP exporter endpoint URL |
 | `otlp_headers` | OTLP exporter headers (dict) |
 | `otlp_insecure` | Whether OTLP uses an insecure connection |
@@ -48,8 +48,8 @@ mentalmodel otel show-config --json
   "otlp_headers": {},
   "otlp_insecure": false,
   "service_name": "mentalmodel",
-  "service_namespace": "default",
-  "service_version": "0.1.0"
+  "service_namespace": null,
+  "service_version": null
 }
 ```
 
@@ -91,8 +91,9 @@ mentalmodel otel write-demo --stack lgtm --output-dir ./otel-demo --json
 ```json
 {
   "files": [
-    "./otel-demo/docker-compose.yml",
-    "./otel-demo/otel-collector-config.yaml"
+    "./otel-demo/docker-compose.otel-lgtm.yml",
+    "./otel-demo/mentalmodel.otel.env",
+    "./otel-demo/OTEL-DEMO.md"
   ],
   "output_dir": "./otel-demo",
   "stack": "lgtm"
@@ -107,12 +108,25 @@ You can configure the OTLP exporter without code changes by setting environment 
 
 | Variable | Description |
 |---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC or HTTP endpoint (e.g. `http://localhost:4317`) |
+| `MENTALMODEL_OTEL_MODE` | Explicit tracing mode such as `disk`, `otlp_http`, `otlp_grpc`, `console`, `disabled` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint for exporters |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Comma-separated `key=value` header pairs |
 | `OTEL_EXPORTER_OTLP_INSECURE` | Set to `true` to disable TLS verification |
-| `OTEL_SERVICE_NAME` | Override the service name reported in traces |
-| `MENTALMODEL_MIRROR_TO_DISK` | Set to `true` to mirror OTLP spans to `.runs/` as well |
+| `MENTALMODEL_OTEL_SERVICE_NAME` | Override the service name reported in traces |
+| `MENTALMODEL_OTEL_MIRROR_TO_DISK` | Set to `true` to mirror spans to `.runs/` |
 
 <Tip>
-  After writing the demo stack, start it with `docker compose -f ./otel-demo/docker-compose.yml up -d`, then set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` before running `mentalmodel verify` to send traces to the local collector.
+  After writing the demo stack, start it with `docker compose -f ./otel-demo/docker-compose.otel-lgtm.yml up -d`, then source `./otel-demo/mentalmodel.otel.env` before running `mentalmodel verify`.
 </Tip>
+
+## How to use these commands
+
+Use `otel show-config` when your question is:
+
+- what observability mode will this process actually use?
+- are my environment variables being interpreted the way I think?
+
+Use `otel write-demo` when your question is:
+
+- how do I stand up a self-hosted backend quickly for a demo or debugging
+  session?

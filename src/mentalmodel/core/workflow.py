@@ -32,4 +32,4 @@ class Workflow(Generic[ChildT]):
             label=self.name,
             metadata=metadata,
         )
-        return ctx.lower_container(node=node, children=self.children)
+        return ctx.lower_container(primitive=self, node=node, children=self.children)

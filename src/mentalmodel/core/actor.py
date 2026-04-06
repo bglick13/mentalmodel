@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from mentalmodel.core.interfaces import ActorHandler
-from mentalmodel.core.refs import Ref
+from mentalmodel.core.refs import InputRef
 from mentalmodel.ir.graph import IRFragment, IRNode
 from mentalmodel.observability.metrics import OutputMetricSpec
 
@@ -22,7 +22,7 @@ class Actor(Generic[InputT, OutputT, StateT]):
 
     name: str
     handler: ActorHandler[InputT, StateT, OutputT]
-    inputs: list[Ref] = field(default_factory=list)
+    inputs: list[InputRef] = field(default_factory=list)
     metrics: list[OutputMetricSpec[OutputT]] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
 
@@ -36,4 +36,4 @@ class Actor(Generic[InputT, OutputT, StateT]):
             label=self.name,
             metadata=metadata,
         )
-        return ctx.lower_leaf(node=node, inputs=self.inputs)
+        return ctx.lower_leaf(primitive=self, node=node, inputs=self.inputs)

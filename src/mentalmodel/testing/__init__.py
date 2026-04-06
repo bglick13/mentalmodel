@@ -1,6 +1,7 @@
 """Testing and verification exports."""
 
 from mentalmodel.testing.harness import (
+    RuntimeInvariantFailure,
     RuntimeVerificationResult,
     VerificationReport,
     execute_program,
@@ -31,6 +32,7 @@ __all__ = [
     "BoundaryObservation",
     "PropertyCheck",
     "PropertyCheckResult",
+    "RuntimeInvariantFailure",
     "RuntimeVerificationResult",
     "VerificationReport",
     "aligned_key_sets",

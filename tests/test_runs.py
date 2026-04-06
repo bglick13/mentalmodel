@@ -227,6 +227,8 @@ class RunsTest(unittest.TestCase):
                 node_summary.node_id: node_summary for node_summary in report.node_summaries
             }
             self.assertTrue(node_summaries["staleness_invariant"].invariant_passed)
+            self.assertEqual(node_summaries["staleness_invariant"].invariant_status, "pass")
+            self.assertEqual(node_summaries["staleness_invariant"].invariant_severity, "error")
 
     def test_build_run_diff_detects_changed_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -269,6 +271,8 @@ class RunsTest(unittest.TestCase):
             self.assertEqual(invariant_diff.node_id, "staleness_invariant")
             self.assertTrue(invariant_diff.outcome_run_a)
             self.assertFalse(invariant_diff.outcome_run_b)
+            self.assertEqual(invariant_diff.severity_run_a, "error")
+            self.assertEqual(invariant_diff.severity_run_b, "error")
 
     def test_run_summary_persists_resolved_otel_config(self) -> None:
         module = importlib.import_module("mentalmodel.examples.async_rl.demo")

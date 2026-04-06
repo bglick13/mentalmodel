@@ -52,6 +52,14 @@ This repo should be treated as the source of truth for both package code and
 docs. The temporary generated docs repo should not be the long-term editing
 surface.
 
+Local docs development:
+
+```bash
+npx mintlify dev
+```
+
+Run that from the repository root so Mintlify picks up [docs.json](/Users/ben/repos/mentalmodel/docs.json).
+
 ## Tooling
 
 The project uses a single `pyproject.toml` as the source of truth for Python

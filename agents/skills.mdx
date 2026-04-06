@@ -9,7 +9,7 @@ mentalmodel bundles four skill files for AI coding agents. Each skill is a struc
 
 | Skill name | Purpose |
 |---|---|
-| `mentalmodel-base` | Core primitives, IR-first design, authoring rules, CLI reference, working loop |
+| `mentalmodel-base` | Core primitives, IR-first design, authoring rules, CLI reference, core authoring/debugging workflow |
 | `mentalmodel-plugin-authoring` | Plugin contract, lowering patterns, provenance requirements, proof points |
 | `mentalmodel-invariants-testing` | Invariant quality, property checks, verification workflow, helper selection |
 | `mentalmodel-debugging` | Full debugging order, what to inspect, investigation patterns, recipe docs |
@@ -72,7 +72,7 @@ Each skill covers a different layer of the mentalmodel programming model. Here i
     - Use `extract_output_metrics(...)` with a typed extractor for richer output shapes
     - Preserve strong typing — never introduce `Any` to move faster
 
-    The skill also covers the full CLI reference (`check`, `verify`, `graph`, `docs`, `runs`, `replay`, `otel`, `doctor`) and the working loop:
+    The skill also covers the full CLI reference (`check`, `verify`, `graph`, `docs`, `runs`, `replay`, `otel`, `doctor`) and the standard authoring/debugging workflow:
 
     ```python
     from mentalmodel import Actor, Effect, Invariant, Ref, Workflow

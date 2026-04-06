@@ -5,14 +5,52 @@ import importlib
 import io
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 from mentalmodel.cli import build_parser, main
+from mentalmodel.core import (
+    Actor,
+    ActorHandler,
+    ActorResult,
+    Invariant,
+    InvariantChecker,
+    InvariantResult,
+    Ref,
+    Workflow,
+)
+from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.skills import install_skills
 from mentalmodel.testing import run_verification
+
+
+class CliNoOpHandler(ActorHandler[dict[str, object], object, str]):
+    async def handle(
+        self,
+        inputs: dict[str, object],
+        state: object | None,
+        ctx: ExecutionContext,
+    ) -> ActorResult[str, object]:
+        del inputs, state, ctx
+        return ActorResult(output="ok")
+
+
+class CliWarningInvariant(InvariantChecker[dict[str, object], JsonValue]):
+    async def check(
+        self,
+        inputs: dict[str, object],
+        ctx: ExecutionContext,
+    ) -> InvariantResult[JsonValue]:
+        del inputs, ctx
+        return InvariantResult(
+            passed=False,
+            details={"reason": "warning failure"},
+        )
 
 
 class CliTest(unittest.TestCase):
@@ -340,6 +378,42 @@ class CliTest(unittest.TestCase):
             run_dir = Path(payload["runtime"]["run_artifacts_dir"])
             self.assertTrue((run_dir / "verification.json").exists())
 
+    def test_verify_command_json_reports_warning_invariant_failures(self) -> None:
+        program: Workflow[
+            Actor[dict[str, object], str, object] | Invariant[dict[str, object], JsonValue]
+        ] = Workflow(
+            name="warning_cli",
+            children=[
+                Actor(name="source", handler=CliNoOpHandler(), inputs=[]),
+                Invariant(
+                    name="warn_check",
+                    checker=CliWarningInvariant(),
+                    inputs=[Ref("source")],
+                    severity="warning",
+                ),
+            ],
+        )
+        stdout = io.StringIO()
+        module = types.ModuleType("warning_cli_module")
+        with patch("mentalmodel.cli.load_entrypoint_subject", return_value=(module, program)):
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verify",
+                        "--entrypoint",
+                        "warning.module:build_program",
+                        "--json",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        runtime = payload["runtime"]
+        self.assertEqual(
+            runtime["warning_invariant_failures"],
+            [{"node_id": "warn_check", "severity": "warning"}],
+        )
+        self.assertEqual(runtime["error_invariant_failures"], [])
+
     def test_install_skills_dry_run_outputs_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             stdout = io.StringIO()
@@ -439,6 +513,13 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["run_id"], run_id)
             self.assertGreaterEqual(len(payload["events"]), 1)
             self.assertGreaterEqual(len(payload["node_summaries"]), 1)
+            staleness = next(
+                summary
+                for summary in payload["node_summaries"]
+                if summary["node_id"] == "staleness_invariant"
+            )
+            self.assertEqual(staleness["invariant_status"], "pass")
+            self.assertEqual(staleness["invariant_severity"], "error")
 
     def test_runs_outputs_command_json_returns_node_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -540,6 +621,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["invariant_diffs"][0]["node_id"], "staleness_invariant")
             self.assertTrue(payload["invariant_diffs"][0]["outcome_run_a"])
             self.assertFalse(payload["invariant_diffs"][0]["outcome_run_b"])
+            self.assertEqual(payload["invariant_diffs"][0]["severity_run_a"], "error")
+            self.assertEqual(payload["invariant_diffs"][0]["severity_run_b"], "error")
 
     def test_runs_records_command_filters_node(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

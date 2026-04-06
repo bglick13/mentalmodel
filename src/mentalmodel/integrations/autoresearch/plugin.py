@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypedDict, TypeVar, cast
 
 from mentalmodel.core.interfaces import RuntimeValue
-from mentalmodel.core.refs import Ref
+from mentalmodel.core.refs import InputRef
 from mentalmodel.ir.graph import IRFragment, IRNode
 from mentalmodel.observability.metrics import (
     OutputMetricSpec,
@@ -59,7 +59,7 @@ class AutoResearch(Generic[CandidateT]):
     name: str
     objective: VerifiableObjective[CandidateT]
     candidates: Sequence[CandidateT]
-    inputs: list[Ref] = field(default_factory=list)
+    inputs: list[InputRef] = field(default_factory=list)
     metrics: list[OutputMetricSpec[AutoResearchOutput]] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
 
@@ -105,7 +105,7 @@ class AutoResearchPlugin:
             label=autoresearch.name,
             metadata=metadata,
         )
-        return ctx.lower_leaf(node=node, inputs=autoresearch.inputs)
+        return ctx.lower_leaf(primitive=autoresearch, node=node, inputs=autoresearch.inputs)
 
     def compile(
         self,

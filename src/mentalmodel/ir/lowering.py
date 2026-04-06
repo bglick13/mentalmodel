@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 from mentalmodel.core.interfaces import NamedPrimitive
-from mentalmodel.core.refs import Ref
+from mentalmodel.core.refs import BlockRef, InputRef, Ref
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IREdge, IRFragment, IRGraph, IRNode
 from mentalmodel.ir.provenance import NodeProvenance
@@ -22,7 +22,10 @@ class LoweringContext:
     registry: PluginRegistry = field(default_factory=default_registry)
     inherited_metadata: dict[str, str] = field(default_factory=dict)
     provenance: NodeProvenance = field(default_factory=NodeProvenance.core)
+    namespace_path: tuple[str, ...] = field(default_factory=tuple)
+    input_bindings: dict[str, Ref] = field(default_factory=dict)
     _registered_ids: set[str] = field(default_factory=set)
+    _lowered_primitives: dict[str, NamedPrimitive] = field(default_factory=dict)
 
     def lower(self, primitive: NamedPrimitive) -> IRFragment:
         lower = getattr(primitive, "lower", None)
@@ -35,15 +38,30 @@ class LoweringContext:
             )
         return plugin.lower(primitive, self.with_provenance(NodeProvenance.from_plugin(plugin)))
 
-    def child_context(self, metadata: dict[str, str] | None = None) -> LoweringContext:
+    def child_context(
+        self,
+        metadata: dict[str, str] | None = None,
+        *,
+        namespace_suffix: str | None = None,
+        input_bindings: dict[str, Ref] | None = None,
+    ) -> LoweringContext:
         merged = dict(self.inherited_metadata)
         if metadata:
             merged.update(metadata)
+        bindings = dict(self.input_bindings)
+        if input_bindings is not None:
+            bindings.update(input_bindings)
+        namespace_path = self.namespace_path
+        if namespace_suffix is not None:
+            namespace_path = (*namespace_path, namespace_suffix)
         return LoweringContext(
             registry=self.registry,
             inherited_metadata=merged,
             provenance=self.provenance,
+            namespace_path=namespace_path,
+            input_bindings=bindings,
             _registered_ids=self._registered_ids,
+            _lowered_primitives=self._lowered_primitives,
         )
 
     def with_provenance(self, provenance: NodeProvenance) -> LoweringContext:
@@ -53,13 +71,21 @@ class LoweringContext:
             registry=self.registry,
             inherited_metadata=dict(self.inherited_metadata),
             provenance=provenance,
+            namespace_path=self.namespace_path,
+            input_bindings=dict(self.input_bindings),
             _registered_ids=self._registered_ids,
+            _lowered_primitives=self._lowered_primitives,
         )
 
-    def lower_container(self, *, node: IRNode, children: Sequence[NamedPrimitive]) -> IRFragment:
+    def lower_container(
+        self,
+        *,
+        primitive: NamedPrimitive,
+        node: IRNode,
+        children: Sequence[NamedPrimitive],
+    ) -> IRFragment:
         fragment = IRFragment()
-        container_node = self._apply_metadata(node)
-        self._register_node(container_node)
+        container_node = self.register_container_node(node=node, primitive=primitive)
         fragment.nodes.append(container_node)
         child_ctx = self.child_context()
         for child in children:
@@ -78,18 +104,24 @@ class LoweringContext:
                 )
         return fragment
 
-    def lower_leaf(self, *, node: IRNode, inputs: list[Ref]) -> IRFragment:
+    def lower_leaf(
+        self,
+        *,
+        primitive: NamedPrimitive,
+        node: IRNode,
+        inputs: Sequence[InputRef],
+    ) -> IRFragment:
         fragment = IRFragment()
-        lowered_node = self._apply_metadata(node)
-        self._register_node(lowered_node)
+        lowered_node = self.register_container_node(node=node, primitive=primitive)
         fragment.nodes.append(lowered_node)
         for ref in inputs:
+            resolved_ref = self.resolve_input_ref(ref)
             fragment.edges.append(
                 self.make_edge(
-                    source_node_id=ref.target,
-                    source_port=ref.port,
+                    source_node_id=resolved_ref.target,
+                    source_port=resolved_ref.port,
                     target_node_id=lowered_node.node_id,
-                    target_port="input",
+                    target_port=_input_port_for_ref(ref),
                 )
             )
         return fragment
@@ -127,16 +159,46 @@ class LoweringContext:
             raise LoweringError(f"Duplicate node id during lowering: {node.node_id!r}")
         self._registered_ids.add(node.node_id)
 
+    def register_container_node(self, *, node: IRNode, primitive: NamedPrimitive) -> IRNode:
+        lowered_node = self._apply_metadata(node)
+        self._register_node(lowered_node)
+        self._lowered_primitives[lowered_node.node_id] = primitive
+        return lowered_node
+
     def _apply_metadata(self, node: IRNode) -> IRNode:
         metadata = dict(self.inherited_metadata)
         metadata.update(node.metadata)
         metadata.update(self.provenance.as_metadata())
+        node_id = self.namespaced_name(node.node_id)
+        if self.namespace_path:
+            metadata.setdefault("logical_node_id", node.node_id)
         return IRNode(
-            node_id=node.node_id,
+            node_id=node_id,
             kind=node.kind,
             label=node.label,
             metadata=metadata,
         )
+
+    def namespaced_name(self, raw: str) -> str:
+        if not self.namespace_path:
+            return raw
+        return ".".join((*self.namespace_path, raw))
+
+    def resolve_external_ref(self, ref: Ref) -> Ref:
+        return Ref(target=self.namespaced_name(ref.target), port=ref.port)
+
+    def resolve_input_ref(self, ref: InputRef) -> Ref:
+        if isinstance(ref, BlockRef):
+            resolved = self.input_bindings.get(ref.logical_name)
+            if resolved is None:
+                raise LoweringError(
+                    f"Missing bound block input {ref.logical_name!r} in namespace "
+                    f"{'.'.join(self.namespace_path) or '<root>'}."
+                )
+            if resolved.port != ref.port:
+                return Ref(target=resolved.target, port=ref.port)
+            return resolved
+        return self.resolve_external_ref(ref)
 
 
 def lower_program(
@@ -146,10 +208,27 @@ def lower_program(
 ) -> IRGraph:
     """Lower an authoring object into the canonical IR graph."""
 
+    graph, _ = lower_program_with_bindings(program, registry=registry)
+    return graph
+
+
+def lower_program_with_bindings(
+    program: Workflow[NamedPrimitive],
+    *,
+    registry: PluginRegistry | None = None,
+) -> tuple[IRGraph, dict[str, NamedPrimitive]]:
+    """Lower a program and return the lowered primitive binding map."""
+
     ctx = LoweringContext(registry=registry or default_registry())
     fragment = ctx.lower(program)
     return IRGraph(
         graph_id=program.name,
         nodes=tuple(fragment.nodes),
         edges=tuple(fragment.edges),
-    )
+    ), dict(ctx._lowered_primitives)
+
+
+def _input_port_for_ref(ref: InputRef) -> str:
+    if isinstance(ref, BlockRef):
+        return ref.logical_name
+    return ref.target

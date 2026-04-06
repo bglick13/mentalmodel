@@ -65,16 +65,35 @@ Without `--json`, the command renders two tables.
 | Check | Status | Message |
 |---|---|---|
 | packaged-skills | pass | All skill files found |
-| entrypoint | skip | No entrypoint provided |
-| runs-dir | pass | .runs directory is accessible |
-| tracing-config | pass | Tracing config resolved successfully |
-| template-files | pass | All bundled templates accessible |
+| entrypoint | skip | No entrypoint requested |
+| runs | pass | Runs directory is readable |
+| tracing | pass | Tracing configuration resolved successfully |
+| package-data | pass | All bundled package data is accessible |
 
 **Details table** — shown only when one or more checks include additional details:
 
 | Check | Details |
 |---|---|
-| packaged-skills | `{"missing": [], "found": ["mentalmodel-base.md", "mentalmodel-debugging.md"]}` |
+| skills | `{"installed_skills": ["mentalmodel-base", "mentalmodel-debugging"]}` |
+
+## How to use doctor output
+
+Use `doctor` as a preflight command.
+
+Interpret the status levels like this:
+
+- `pass`: that surface is ready
+- `warn`: something is missing but not yet broken, for example an empty `.runs`
+  directory
+- `fail`: fix this before trusting the environment
+- `skip`: not requested or not applicable
+
+Typical usage:
+
+1. run `doctor`
+2. fix any `fail` checks
+3. ignore or note `warn` checks depending on the task
+4. then run `check` or `verify`
 
 ## Examples
 

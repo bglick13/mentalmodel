@@ -48,6 +48,8 @@ class ReplayNodeSummary:
     succeeded: bool
     failed: bool
     invariant_passed: bool | None
+    invariant_severity: str | None
+    invariant_status: str | None
 
     def as_dict(self) -> dict[str, JsonValue]:
         return {
@@ -59,6 +61,8 @@ class ReplayNodeSummary:
             "succeeded": self.succeeded,
             "failed": self.failed,
             "invariant_passed": self.invariant_passed,
+            "invariant_severity": self.invariant_severity,
+            "invariant_status": self.invariant_status,
         }
 
 
@@ -145,6 +149,8 @@ class InvariantDiff:
     node_id: str
     outcome_run_a: bool | None
     outcome_run_b: bool | None
+    severity_run_a: str | None
+    severity_run_b: str | None
     details_run_a: JsonValue | None
     details_run_b: JsonValue | None
 
@@ -152,6 +158,7 @@ class InvariantDiff:
     def differs(self) -> bool:
         return (
             self.outcome_run_a != self.outcome_run_b
+            or self.severity_run_a != self.severity_run_b
             or self.details_run_a != self.details_run_b
         )
 
@@ -160,6 +167,8 @@ class InvariantDiff:
             "node_id": self.node_id,
             "outcome_run_a": self.outcome_run_a,
             "outcome_run_b": self.outcome_run_b,
+            "severity_run_a": self.severity_run_a,
+            "severity_run_b": self.severity_run_b,
             "details_run_a": self.details_run_a,
             "details_run_b": self.details_run_b,
         }
@@ -365,6 +374,7 @@ def summarize_replay_events(
     for node_id in sorted(grouped):
         node_events = sorted(grouped[node_id], key=lambda event: event.sequence)
         invariant_passed = _invariant_outcome_from_events(node_events)
+        invariant_severity = _invariant_severity_from_events(node_events)
         summaries.append(
             ReplayNodeSummary(
                 node_id=node_id,
@@ -375,6 +385,11 @@ def summarize_replay_events(
                 succeeded=any(event.event_type == "node.succeeded" for event in node_events),
                 failed=any(event.event_type == "node.failed" for event in node_events),
                 invariant_passed=invariant_passed,
+                invariant_severity=invariant_severity,
+                invariant_status=_invariant_status_label(
+                    invariant_passed,
+                    invariant_severity,
+                ),
             )
         )
     return tuple(summaries)
@@ -454,6 +469,8 @@ def diff_invariants(
 ) -> tuple[InvariantDiff, ...]:
     outcomes_run_a = _invariant_outcomes(records_run_a)
     outcomes_run_b = _invariant_outcomes(records_run_b)
+    severities_run_a = _invariant_severities(records_run_a)
+    severities_run_b = _invariant_severities(records_run_b)
     detail_nodes = {
         node_id
         for node_id, value in outputs_run_a.items()
@@ -473,6 +490,8 @@ def diff_invariants(
             node_id=current_node_id,
             outcome_run_a=outcomes_run_a.get(current_node_id),
             outcome_run_b=outcomes_run_b.get(current_node_id),
+            severity_run_a=severities_run_a.get(current_node_id),
+            severity_run_b=severities_run_b.get(current_node_id),
             details_run_a=_invariant_details(outputs_run_a.get(current_node_id)),
             details_run_b=_invariant_details(outputs_run_b.get(current_node_id)),
         )
@@ -559,6 +578,25 @@ def _invariant_outcomes(
     return {node_id: passed for node_id, (_, passed) in outcomes.items()}
 
 
+def _invariant_severities(
+    records: tuple[dict[str, JsonValue], ...],
+) -> dict[str, str]:
+    severities: dict[str, tuple[int, str]] = {}
+    for record in records:
+        if record.get("event_type") != INVARIANT_CHECKED:
+            continue
+        payload = _require_payload(record)
+        severity = payload.get("severity")
+        if not isinstance(severity, str):
+            continue
+        node_id = _require_str(record, "node_id")
+        sequence = _require_int(record, "sequence")
+        current = severities.get(node_id)
+        if current is None or sequence > current[0]:
+            severities[node_id] = (sequence, severity)
+    return {node_id: severity for node_id, (_, severity) in severities.items()}
+
+
 def _invariant_outcome_from_events(events: list[ReplayEvent]) -> bool | None:
     for event in reversed(events):
         if event.event_type != INVARIANT_CHECKED:
@@ -567,6 +605,29 @@ def _invariant_outcome_from_events(events: list[ReplayEvent]) -> bool | None:
         if isinstance(passed, bool):
             return passed
     return None
+
+
+def _invariant_severity_from_events(events: list[ReplayEvent]) -> str | None:
+    for event in reversed(events):
+        if event.event_type != INVARIANT_CHECKED:
+            continue
+        severity = event.payload.get("severity")
+        if isinstance(severity, str):
+            return severity
+    return None
+
+
+def _invariant_status_label(
+    passed: bool | None,
+    severity: str | None,
+) -> str | None:
+    if passed is None:
+        return None
+    if passed:
+        return "pass"
+    if severity == "warning":
+        return "warning_fail"
+    return "error_fail"
 
 
 def _invariant_details(value: JsonValue | None) -> JsonValue | None:

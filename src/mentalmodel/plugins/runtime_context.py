@@ -43,8 +43,7 @@ class RuntimeContextPlugin:
         )
         child_ctx = ctx.child_context({"runtime_context": runtime_context.runtime})
         fragment = IRFragment()
-        lowered_node = child_ctx._apply_metadata(node)
-        child_ctx._register_node(lowered_node)
+        lowered_node = child_ctx.register_container_node(node=node, primitive=runtime_context)
         fragment.nodes.append(lowered_node)
         for child in runtime_context.children:
             child_fragment = child_ctx.lower(child)

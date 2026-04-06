@@ -3,7 +3,7 @@ title: "Runtime Contexts"
 description: "Use RuntimeContext to annotate groups of nodes with named runtime boundaries and catch accidental boundary crossings at analysis time."
 ---
 
-`RuntimeContext` is a plugin primitive that wraps a group of children under a named runtime boundary. The executor and analysis layer use this annotation to enforce isolation, surface boundary crossings, and pass scheduling hints to the underlying compute backend.
+`RuntimeContext` is a plugin primitive that wraps a group of children under a named runtime boundary. Today, `mentalmodel` uses this annotation for IR/docs visibility, metrics and tracing attributes, and boundary-crossing checks. It is not yet a built-in multi-runtime scheduler by itself.
 
 ## Declaring a RuntimeContext
 
@@ -101,9 +101,20 @@ assert_runtime_boundary_crossings(
 
 `assert_runtime_boundary_crossings` raises `AssertionError` listing every crossing that is not in your `allowed` set. This prevents accidental leaks where a node in a sensitive boundary reads from a node in an untrusted one.
 
-## Scheduling hints to the executor
+## What runtime_context does today
 
-The `runtime_context` metadata field is a scheduling hint. When you configure a multi-runtime executor backend, it reads this field from each node's IR metadata and dispatches the node to the appropriate compute resource. Nodes with no `runtime_context` annotation run in the default local environment.
+The `runtime_context` metadata field currently affects these surfaces directly:
+
+- generated docs and node inventory
+- span and metric attributes
+- runtime-boundary verification helpers
+- replay and run-bundle inspection
+
+It does **not** currently cause the built-in executor to dispatch nodes to different processes or machines on its own.
+
+## Multi-runtime backends
+
+If you build a custom backend on top of `mentalmodel`, `runtime_context` is the right annotation to read when routing nodes to different environments. But that routing policy lives in your backend, not in the default executor today.
 
 <Tip>
 You do not need a multi-runtime executor to use `RuntimeContext`. Even in single-process mode the annotations appear in the IR and are surfaced by `assert_runtime_boundary_crossings` — giving you the same structural checks without deployment overhead.

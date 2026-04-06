@@ -5,8 +5,44 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mentalmodel.core import (
+    Actor,
+    ActorHandler,
+    ActorResult,
+    Invariant,
+    InvariantChecker,
+    InvariantResult,
+    Ref,
+    Workflow,
+)
+from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.testing import discover_property_checks, execute_program, run_verification
+
+
+class VerificationNoOpHandler(ActorHandler[dict[str, object], object, str]):
+    async def handle(
+        self,
+        inputs: dict[str, object],
+        state: object | None,
+        ctx: ExecutionContext,
+    ) -> ActorResult[str, object]:
+        del inputs, state, ctx
+        return ActorResult(output="ok")
+
+
+class VerificationWarningInvariant(InvariantChecker[dict[str, object], JsonValue]):
+    async def check(
+        self,
+        inputs: dict[str, object],
+        ctx: ExecutionContext,
+    ) -> InvariantResult[JsonValue]:
+        del inputs, ctx
+        return InvariantResult(
+            passed=False,
+            details={"reason": "warning failure"},
+        )
 
 
 class VerificationTest(unittest.TestCase):
@@ -55,3 +91,27 @@ class VerificationTest(unittest.TestCase):
             run_dir = Path(report.runtime.run_artifacts_dir or "")
             self.assertTrue((run_dir / "verification.json").exists())
             self.assertTrue((run_dir / "records.jsonl").exists())
+
+    def test_run_verification_surfaces_warning_invariant_failures_without_failing(self) -> None:
+        program: Workflow[
+            Actor[dict[str, object], str, object] | Invariant[dict[str, object], JsonValue]
+        ] = Workflow(
+            name="warning_verification",
+            children=[
+                Actor(name="source", handler=VerificationNoOpHandler(), inputs=[]),
+                Invariant(
+                    name="warn_check",
+                    checker=VerificationWarningInvariant(),
+                    inputs=[Ref("source")],
+                    severity="warning",
+                ),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = run_verification(program, runs_dir=Path(tmpdir))
+            self.assertTrue(report.success)
+            self.assertTrue(report.runtime.success)
+            self.assertEqual(len(report.runtime.warning_invariant_failures), 1)
+            self.assertEqual(report.runtime.warning_invariant_failures[0].node_id, "warn_check")
+            self.assertEqual(report.runtime.warning_invariant_failures[0].severity, "warning")
+            self.assertEqual(report.runtime.error_invariant_failures, ())

@@ -73,9 +73,9 @@ The command produces four files:
 - Kind: `actor`
 - Label: `Collect Data`
 - Runtime Context: `async`
-- Plugin Kind: `builtin`
+- Plugin Kind: `core`
 - Plugin Origin: `mentalmodel.core`
-- Plugin Version: `1.0.0`
+- Plugin Version: none
 - Data Dependencies: none
 - Data Dependents: `process_results`
 - Container Parent: `workflow_root`
@@ -125,3 +125,19 @@ mentalmodel docs \
   --stdout
 ```
 </CodeGroup>
+
+## How to use the generated docs
+
+The generated artifacts answer different questions:
+
+- `topology.md`: how large is the graph and what kinds of nodes/edges exist?
+- `node-inventory.md`: what does each node claim to be and depend on?
+- `invariants.md`: what correctness checks exist and what do they inspect?
+- `runtime-contexts.md`: where does the program think nodes run?
+
+This means a practical review flow is:
+
+1. open `topology.md` to get oriented
+2. inspect `node-inventory.md` for the node or block you care about
+3. inspect `invariants.md` when debugging correctness assumptions
+4. inspect `runtime-contexts.md` when debugging boundary placement

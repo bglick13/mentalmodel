@@ -5,6 +5,8 @@ description: "AutoResearch embeds a bounded candidate search inside a mentalmode
 
 `AutoResearch` is a plugin-authored primitive that runs a bounded search over a set of candidate workflows at runtime. You give it an objective — a named metric signal with a direction and an optional success threshold — and a list of candidates. At execution time it evaluates every candidate, scores them, and returns the best successful result as a structured `AutoResearchOutput`.
 
+This is not a general autonomous research agent. In the current package, `AutoResearch` means a deterministic, finite search over an explicit candidate set.
+
 ## How it works
 
 `AutoResearch` lowers to a single IR node of kind `autoresearch`. At runtime, its executor calls `search_objective_async`, which:
@@ -141,6 +143,23 @@ mentalmodel demo autoresearch-sorting --json
 # Run and write the artifact bundle to disk
 mentalmodel demo autoresearch-sorting --write-artifacts --output-dir /tmp/demo
 ```
+
+## How to read the demo output
+
+The most important fields in the JSON output are:
+
+- `results`: one row per candidate evaluation
+- `metric_name`: the signal being optimized
+- `best_candidate`: the winning candidate label
+- `best_score`: the winning aggregated score
+- `verification`: whether the outer workflow executed successfully
+
+Use it in this order:
+
+1. check `best_candidate` and `best_score`
+2. scan `results` to see whether the winner was clear or marginal
+3. confirm `verification.success` so you know the wrapper workflow itself ran cleanly
+4. use `run_artifacts_dir` with `mentalmodel runs ...` commands if you need to inspect the outer workflow execution in detail
 
 ## Artifact bundle
 

@@ -1,0 +1,174 @@
+---
+title: "Reusable Blocks"
+description: "Define reusable workflow fragments with Block and instantiate them safely with Use."
+---
+
+`Block` and `Use` are the first-class composition tools for reusable workflow fragments.
+
+Use them when you want:
+
+- a reusable semantic subgraph
+- automatic namespacing for repeated instantiation
+- logical block inputs instead of hard-coded upstream node ids
+- logical block outputs without spelling internal prefixed node ids manually
+
+## The mental model
+
+A `Block` is a reusable definition.
+
+A `Use` is one concrete instantiation of that definition inside a workflow.
+
+The block stays prefix-agnostic internally. The `Use` node applies the namespace.
+
+## Define a block
+
+```python
+from mentalmodel import Block, BlockInput, BlockOutput, BlockRef
+from mentalmodel import Effect, Invariant, Ref
+
+number_block = Block(
+    name="number_processing",
+    inputs={"upstream": BlockInput[object]()},
+    outputs={
+        "result": BlockOutput[object]("double"),
+        "check": BlockOutput[object]("positive"),
+    },
+    children=(
+        Effect(
+            "double",
+            handler=DoubleNumber(),
+            inputs=[BlockRef("upstream")],
+        ),
+        Invariant(
+            "positive",
+            checker=PositiveNumber(),
+            inputs=[Ref("double")],
+            severity="warning",
+        ),
+    ),
+)
+```
+
+Key points:
+
+- `BlockInput` declares the logical input interface.
+- `BlockRef("upstream")` means “bind whatever this block instance supplies for `upstream`.”
+- `BlockOutput("double")` means the logical output `result` is produced by the inner node `double`.
+
+## Instantiate a block
+
+```python
+from mentalmodel import Ref, Use
+
+first = Use("first", block=number_block, bind={"upstream": Ref("source")})
+second = Use("second", block=number_block, bind={"upstream": first.output_ref("result")})
+```
+
+This gives you:
+
+- `first.double`
+- `first.positive`
+- `second.double`
+- `second.positive`
+
+without manually renaming anything inside the block definition.
+
+## Consume logical outputs
+
+Use `Use.output_ref(...)` to consume a block's declared outputs:
+
+```python
+Join(
+    "pair_join",
+    inputs=[
+        first.output_ref("result"),
+        second.output_ref("result"),
+    ],
+)
+```
+
+That is preferred over manually writing `Ref("first.double")` in application code.
+
+## Full example
+
+```python
+from mentalmodel import Join, Use, Workflow
+from mentalmodel.examples.reusable_blocks.demo import number_block
+
+def build_program() -> Workflow:
+    first = Use("first", block=number_block, bind={"upstream": Ref("source")})
+    second = Use("second", block=number_block, bind={"upstream": first.output_ref("result")})
+    return Workflow(
+        name="reusable_blocks_demo",
+        children=(
+            Effect("source", handler=EmitNumber(value=3)),
+            first,
+            second,
+            Join(
+                "pair_join",
+                inputs=[first.output_ref("result"), second.output_ref("result")],
+            ),
+        ),
+    )
+```
+
+## What lowering does
+
+For each `Use`:
+
+- lowers a structural `use` node
+- rewrites internal node ids under the `Use.name` namespace
+- rewrites internal `Ref(...)` edges automatically
+- records `bind` edges from outer sources into the `use` node for docs and graph readability
+
+So a block that internally says:
+
+- `BlockRef("upstream")`
+- `Ref("double")`
+
+becomes, for `Use("first", ...)`:
+
+- `source -> first.double`
+- `first.double -> first.positive`
+
+## How to read the generated graph
+
+After:
+
+```bash
+mentalmodel graph --entrypoint mentalmodel.examples.reusable_blocks.demo:build_program
+mentalmodel docs --entrypoint mentalmodel.examples.reusable_blocks.demo:build_program
+```
+
+look for:
+
+- `use` nodes like `first` and `second`
+- `bind` edges showing what each instantiation is connected to from outside
+- prefixed inner nodes like `first.double`
+- node inventory entries showing:
+  - block name
+  - declared block inputs
+  - declared block outputs
+
+## Validation rules
+
+`mentalmodel` rejects:
+
+- missing required block bindings
+- unknown block bindings
+- `BlockOutput` declarations that point at unknown logical nodes
+- unresolved `BlockRef(...)` usage
+
+These are lowering errors, so you catch them with `mentalmodel check` or `mentalmodel verify`.
+
+## Current scope
+
+`Block` and `Use` solve reusable namespaced composition.
+
+They do not yet solve:
+
+- native loop bodies with iteration-local refs
+- typed shared runtime resources
+- parameterized block templates beyond explicit authored definitions
+
+Those are follow-on phases in the roadmap.

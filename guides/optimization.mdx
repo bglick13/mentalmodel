@@ -3,7 +3,7 @@ title: "Optimization"
 description: "Define search objectives over workflows with VerifiableObjective, score candidates with evaluate_objective, and run bounded searches with search_objective or the AutoResearch plugin."
 ---
 
-mentalmodel's optimization layer lets you define a verifiable objective over any workflow, run it against one or more candidate configurations, and select the best result. The `AutoResearch` plugin embeds this bounded search as a first-class node inside a larger workflow.
+mentalmodel's optimization layer lets you define a verifiable objective over any workflow, run it against one or more candidate configurations, and select the best result. The current model is intentionally narrow: bounded, deterministic candidate evaluation over workflows that emit a stable metric signal. The `AutoResearch` plugin embeds that search as a first-class node inside a larger workflow.
 
 ## Core types
 

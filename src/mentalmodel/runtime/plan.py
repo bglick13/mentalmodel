@@ -16,12 +16,13 @@ from mentalmodel.core.interfaces import (
 )
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IRGraph
-from mentalmodel.ir.lowering import lower_program
+from mentalmodel.ir.lowering import lower_program_with_bindings
 from mentalmodel.observability.metrics import (
     OutputMetricSpec,
     cast_metric_specs,
     derive_output_metrics,
     emit_metric_batch,
+    invariant_failure_observation,
 )
 from mentalmodel.plugins.registry import PluginRegistry, default_registry
 from mentalmodel.runtime.context import ExecutionContext
@@ -119,7 +120,9 @@ class CompiledEffectNode(Generic[InputT, OutputT]):
             node_id=self.metadata.node_id,
             event_type=EFFECT_INVOKED,
             timestamp_ms=context.clock.now_ms(),
-            payload={"input_keys": [key for key in self.metadata.dependencies]},
+            payload={
+                "input_keys": [alias for alias, _ in self.metadata.input_bindings]
+            },
         )
         output = await self.handler.handler.invoke(typed_inputs, context)
         context.recorder.record(
@@ -162,7 +165,9 @@ class CompiledJoinNode(Generic[InputT, OutputT]):
             node_id=self.metadata.node_id,
             event_type=JOIN_RESOLVED,
             timestamp_ms=context.clock.now_ms(),
-            payload={"input_keys": [key for key in self.metadata.dependencies]},
+            payload={
+                "input_keys": [alias for alias, _ in self.metadata.input_bindings]
+            },
         )
         return output
 
@@ -190,6 +195,17 @@ class CompiledInvariantNode(Generic[InputT, DetailT]):
             payload={"passed": result.passed, "severity": self.severity},
         )
         if not result.passed:
+            emit_metric_batch(
+                context.metrics,
+                [
+                    invariant_failure_observation(
+                        context.metric_context(),
+                        severity=self.severity,
+                    )
+                ],
+            )
+            if self.severity == "warning":
+                return cast(RuntimeValue, result)
             raise InvariantViolationError(
                 f"Invariant {self.metadata.node_id!r} failed: {dict(result.details)!r}"
             )
@@ -232,8 +248,7 @@ def compile_program(
     """Compile authored primitives into a graph plus a typed execution plan."""
 
     resolved_registry = registry or default_registry()
-    graph = lower_program(program, registry=resolved_registry)
-    primitives = index_primitives(program)
+    graph, primitives = lower_program_with_bindings(program, registry=resolved_registry)
     plan = build_execution_plan(
         graph=graph,
         primitives=primitives,
@@ -251,6 +266,7 @@ def build_execution_plan(
     """Build executable runtime nodes from a lowered graph and primitive index."""
 
     dependencies = build_data_dependencies(graph)
+    input_bindings = build_input_bindings(graph)
     compiled_nodes: dict[str, PlanNode] = {}
 
     for node in graph.nodes:
@@ -268,8 +284,9 @@ def build_execution_plan(
             label=node.label,
             runtime_context=node.metadata.get("runtime_context"),
             dependencies=tuple(sorted(dependencies[node.node_id])),
+            input_bindings=tuple(sorted(input_bindings[node.node_id].items())),
         )
-        adapter = MappingInputAdapter[object](metadata.dependencies)
+        adapter = MappingInputAdapter[object](metadata.input_bindings)
         compiled_nodes[node.node_id] = compile_execution_node(
             metadata=metadata,
             primitive=primitive,
@@ -297,7 +314,7 @@ def compile_execution_node(
                 metadata=metadata,
                 handler=primitive.handler,
                 input_adapter=input_adapter,
-                state_key=primitive.name,
+                state_key=metadata.node_id,
                 metrics=cast_metric_specs(primitive.metrics),
             ),
         )
@@ -345,25 +362,6 @@ def compile_execution_node(
         f"node={metadata.node_id!r} kind={metadata.kind!r} primitive={type(primitive).__name__!r}"
     )
 
-
-def index_primitives(program: Workflow[NamedPrimitive]) -> dict[str, NamedPrimitive]:
-    """Index authored primitives by stable node name."""
-
-    indexed: dict[str, NamedPrimitive] = {}
-
-    def visit(primitive: NamedPrimitive) -> None:
-        if primitive.name in indexed:
-            raise LoweringError(f"Duplicate primitive name during indexing: {primitive.name!r}")
-        indexed[primitive.name] = primitive
-        children = getattr(primitive, "children", None)
-        if isinstance(children, (tuple, list)):
-            for child in children:
-                visit(cast(NamedPrimitive, child))
-
-    visit(program)
-    return indexed
-
-
 def build_data_dependencies(graph: IRGraph) -> dict[str, set[str]]:
     """Build a data-dependency map for executable graph nodes."""
 
@@ -375,6 +373,17 @@ def build_data_dependencies(graph: IRGraph) -> dict[str, set[str]]:
             continue
         dependencies[edge.target_node_id].add(edge.source_node_id)
     return dependencies
+
+
+def build_input_bindings(graph: IRGraph) -> dict[str, dict[str, str]]:
+    """Build an input-alias map from data edges for each node."""
+
+    bindings: dict[str, dict[str, str]] = {node.node_id: {} for node in graph.nodes}
+    for edge in graph.edges:
+        if edge.kind != "data":
+            continue
+        bindings[edge.target_node_id][edge.target_port] = edge.source_node_id
+    return bindings
 
 
 __all__ = [

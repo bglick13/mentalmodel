@@ -1,6 +1,7 @@
 """Core semantic primitives."""
 
 from mentalmodel.core.actor import Actor
+from mentalmodel.core.block import Block, BlockDefaults, BlockInput, BlockOutput
 from mentalmodel.core.composition import Join, Parallel
 from mentalmodel.core.effect import Effect
 from mentalmodel.core.interfaces import (
@@ -15,7 +16,8 @@ from mentalmodel.core.interfaces import (
 )
 from mentalmodel.core.invariants import Invariant
 from mentalmodel.core.models import ActorResult, InvariantResult
-from mentalmodel.core.refs import Ref
+from mentalmodel.core.refs import BlockRef, Ref
+from mentalmodel.core.use import Use
 from mentalmodel.core.workflow import Workflow
 from mentalmodel.observability.metrics import (
     MetricContext,
@@ -32,6 +34,11 @@ __all__ = [
     "Actor",
     "ActorHandler",
     "ActorResult",
+    "Block",
+    "BlockDefaults",
+    "BlockInput",
+    "BlockOutput",
+    "BlockRef",
     "Effect",
     "EffectHandler",
     "Invariant",
@@ -51,6 +58,7 @@ __all__ = [
     "Ref",
     "ResolvedInputs",
     "RuntimeValue",
+    "Use",
     "Workflow",
     "extract_output_metrics",
     "infer_output_metrics",

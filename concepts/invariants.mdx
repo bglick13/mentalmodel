@@ -3,7 +3,7 @@ title: "Invariants"
 description: "Named checkers that verify program constraints at runtime and as Hypothesis-backed property tests."
 ---
 
-An `Invariant` is a named checker attached to explicit program values. It expresses a constraint — a range, an ordering, an alignment — that must hold either during every execution or across a range of generated inputs. When a check fails at runtime the executor raises `InvariantViolationError` immediately and records the failure as a metric observation.
+An `Invariant` is a named checker attached to explicit program values. It expresses a constraint — a range, an ordering, an alignment — that must hold during execution or across a range of generated inputs. When a check fails at runtime, `mentalmodel` always records the failure; whether the run stops depends on the invariant severity.
 
 ---
 
@@ -73,19 +73,29 @@ At runtime the executor:
 1. Resolves `inputs` from completed upstream outputs.
 2. Calls `checker.check(inputs, ctx)`.
 3. Records an `invariant.checked` event with `passed` and `severity`.
-4. If `passed=False`, raises `InvariantViolationError` and emits an `invariant_failure` metric.
+4. If `passed=False` and `severity="error"`, raises `InvariantViolationError`.
+5. If `passed=False` and `severity="warning"`, records the failure and continues execution.
+6. Emits a `mentalmodel.invariant.failures` metric whenever the invariant fails, regardless of severity.
 
 ---
 
 ## Severity
 
-Set `severity` to `"error"` (default) or `"warning"`. Both produce an `INVARIANT_CHECKED` record. Only `"error"` invariants that fail raise `InvariantViolationError` and halt execution. Use `"warning"` for non-fatal advisory checks.
+Set `severity` to `"error"` (default) or `"warning"`.
+
+- `severity="error"` means a failed invariant is fatal. The executor records `node.failed`, raises `InvariantViolationError`, and the run fails.
+- `severity="warning"` means a failed invariant is non-fatal. The executor records `invariant.checked` with `passed: false`, emits the invariant-failure metric, then records `node.succeeded` and keeps going.
+
+This gives you a clean split:
+- use `error` for correctness conditions that must stop the run
+- use `warning` for advisory drift, quality regressions, or soft policy checks you still want to surface prominently in `verify`, `replay`, and dashboards
 
 ---
 
 ## Property checks
 
-Property checks verify structural or semantic constraints against the authored program itself — before any runtime execution. They live in a module and are discovered by `discover_property_checks`.
+Property checks verify structural or semantic constraints around the program.
+They live in a module and are discovered by `discover_property_checks`.
 
 ### Plain property checks
 
@@ -131,6 +141,9 @@ results = run_property_checks(my_checks_module, program=workflow)
 for result in results:
     print(result.name, "passed" if result.success else result.error)
 ```
+
+When you invoke `mentalmodel verify`, the package currently runs property checks
+after the runtime execution phase, not before it.
 
 ---
 

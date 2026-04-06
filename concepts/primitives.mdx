@@ -28,6 +28,8 @@ Think of the primitives in three groups:
 ### Structural
 
 - `Workflow`
+- `Block`
+- `Use`
 - `Parallel`
 - `RuntimeContext`
 
@@ -45,6 +47,7 @@ These become runtime-executable nodes.
 ### Linking
 
 - `Ref`
+- `BlockRef`
 
 This is how data dependencies are declared.
 
@@ -146,8 +149,9 @@ Use it for:
 - monotonicity constraints
 - domain-specific correctness properties
 
-At runtime, invariants are first-class nodes. They execute, emit records, and
-fail the run when `passed=False`.
+At runtime, invariants are first-class nodes. They execute and emit records.
+Failed `severity="error"` invariants fail the run; failed `severity="warning"`
+invariants are surfaced but non-fatal.
 
 ## Parallel
 
@@ -214,6 +218,24 @@ Ref("sample_policy", port="default")
 
 `Ref` targets do not need to appear earlier in the `children` list. They just
 need to resolve to real node ids after lowering.
+
+## Block and Use
+
+`Block` defines a reusable semantic fragment. `Use` instantiates that fragment
+under a namespace.
+
+```python
+from mentalmodel import Block, BlockInput, BlockOutput, BlockRef, Use
+```
+
+Use them when:
+
+- a fragment is reused more than once
+- manual prefix rewriting would otherwise leak into authored source
+- you want logical block inputs and outputs instead of wiring through raw
+  internal node ids
+
+See [Reusable blocks](/guides/reusable-blocks) for the full model.
 
 ## RuntimeContext
 

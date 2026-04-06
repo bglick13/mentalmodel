@@ -50,16 +50,18 @@ When you run without `--json`, the command renders three tables.
 
 | Seq | Node | Event | Timestamp | Payload |
 |---|---|---|---|---|
-| 1 | collect_data | node_started | 1712345678000 | `{}` |
-| 2 | collect_data | node_completed | 1712345678042 | `{"output": 42}` |
-| 3 | process_results | node_started | 1712345678043 | `{}` |
+| 1 | collect_data | node.started | 1712345678000 | `{"input_count": 0, "kind": "actor"}` |
+| 2 | collect_data | node.succeeded | 1712345678042 | `{"kind": "actor", "output_type": "dict"}` |
+| 3 | process_results | node.started | 1712345678043 | `{"input_count": 1, "kind": "effect"}` |
 
 **Replay Node Summary table** — one row per node:
 
 | Node | Events | First Seq | Last Seq | Last Event | Invariant |
 |---|---|---|---|---|---|
-| collect_data | 2 | 1 | 2 | node_completed | pass |
-| process_results | 2 | 3 | 4 | node_completed | |
+| collect_data | 2 | 1 | 2 | node.succeeded | pass |
+| process_results | 2 | 3 | 4 | node.succeeded | |
+
+If an invariant fails with `severity="warning"`, the node summary shows `warning_fail`. Fatal invariant failures show `error_fail`.
 
 ## How to interpret replay
 

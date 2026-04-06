@@ -129,6 +129,14 @@ def render_node_inventory_markdown(
                     + (", ".join(f"`{node_id}`" for node_id in entry.data_dependents) or "none")
                 ),
                 (
+                    "- Bind Dependencies: "
+                    + (", ".join(f"`{node_id}`" for node_id in entry.bind_dependencies) or "none")
+                ),
+                (
+                    "- Bind Dependents: "
+                    + (", ".join(f"`{node_id}`" for node_id in entry.bind_dependents) or "none")
+                ),
+                (
                     f"- Container Parent: `{entry.container_parent}`"
                     if entry.container_parent is not None
                     else "- Container Parent: none"
@@ -136,6 +144,19 @@ def render_node_inventory_markdown(
                 (
                     "- Contained Children: "
                     + (", ".join(f"`{node_id}`" for node_id in entry.contained_children) or "none")
+                ),
+                (
+                    f"- Block Name: `{entry.block_name}`"
+                    if entry.block_name is not None
+                    else "- Block Name: none"
+                ),
+                (
+                    "- Block Inputs: "
+                    + (", ".join(f"`{name}`" for name in entry.block_inputs) or "none")
+                ),
+                (
+                    "- Block Outputs: "
+                    + (", ".join(f"`{name}`" for name in entry.block_outputs) or "none")
                 ),
             ]
         )
