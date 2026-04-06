@@ -835,6 +835,8 @@ interface between:
 
 ## Needs to be scoped into milestones
 - Docs (mintlify) pages. Comprehensive tutorial starting with hello world program and building from there introducing each core primitive
+- Step mode - I should be able to run my program step by step and inspect node states/inputs/outputs without needing any extra manual breakpoints, debugger setup, etc
+- Bespoke UI based on mentalmodel outputs + otel. Most important features: graph representation w/ drill down, output streaming during a run, invariant debugging
 
 ## Cross-Cutting Requirements
 

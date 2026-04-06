@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import cast
 
 from mentalmodel.plugins.base import ExecutablePrimitivePlugin, PrimitivePlugin
+
+_EXTERNAL_DEFAULT_PLUGINS: dict[str, PrimitivePlugin] = {}
+_EXTERNAL_DEFAULT_PLUGINS_LOCK = Lock()
 
 
 @dataclass(slots=True)
@@ -39,4 +43,25 @@ def default_registry() -> PluginRegistry:
     registry = PluginRegistry()
     registry.register(RuntimeContextPlugin())
     registry.register(AutoResearchPlugin())
+    for plugin in _external_default_plugins():
+        registry.register(plugin)
     return registry
+
+
+def register_default_plugin(plugin: PrimitivePlugin) -> None:
+    """Register one external plugin for all future default registries."""
+
+    with _EXTERNAL_DEFAULT_PLUGINS_LOCK:
+        existing = _EXTERNAL_DEFAULT_PLUGINS.get(plugin.kind)
+        if existing is not None:
+            if type(existing) is not type(plugin):
+                raise ValueError(
+                    f"Default plugin kind already registered by a different type: {plugin.kind!r}"
+                )
+            return
+        _EXTERNAL_DEFAULT_PLUGINS[plugin.kind] = plugin
+
+
+def _external_default_plugins() -> tuple[PrimitivePlugin, ...]:
+    with _EXTERNAL_DEFAULT_PLUGINS_LOCK:
+        return tuple(_EXTERNAL_DEFAULT_PLUGINS.values())
