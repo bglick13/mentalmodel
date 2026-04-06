@@ -199,6 +199,8 @@ Reference demos:
 - `agent-tool-use` is the second serious reference example and shows:
   multiple runtime contexts, multiple tool effects, a join, a structured
   answer invariant, and output-derived answer metrics
+- `review_workflow` is the current serious reference path for reusable blocks,
+  `StepLoop`, runtime environments, and spec-driven verification
 - `autoresearch-sorting` demonstrates the objective/search layer on a bounded,
   deterministic workflow, authors search through a real executable
   `AutoResearch` plugin node, and can also materialize an `autoresearch`-style

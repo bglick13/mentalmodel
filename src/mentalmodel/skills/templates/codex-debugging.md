@@ -27,6 +27,12 @@ generated artifact.
 12. If bundle metadata looks stale, run `mentalmodel runs repair --dry-run`
 13. Inspect authored workflow and handler implementations
 
+When loops are involved, add:
+
+- `--loop-node-id <loop_node_id>`
+- `--iteration-index <n>`
+- `--frame-id <loop_node_id>[<n>]`
+
 ## What to inspect
 
 - topology bugs: `graph` and `topology.md`
@@ -72,6 +78,11 @@ When a generated doc “looks wrong”:
 ## Recipe docs
 
 - `docs/recipes/structure-debugging.md`
+- `docs/recipes/block-reuse.md`
 - `docs/recipes/invariant-debugging.md`
+- `docs/recipes/loop-debugging.md`
+- `docs/recipes/runtime-profile-selection.md`
+- `docs/recipes/resource-injection.md`
+- `docs/recipes/parameterized-verification.md`
 - `docs/recipes/runtime-failure-debugging.md`
 - `docs/recipes/run-comparison.md`

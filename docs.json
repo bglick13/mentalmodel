@@ -63,8 +63,13 @@
           {
             "group": "Recipes",
             "pages": [
+              "docs/recipes/block-reuse",
               "docs/recipes/structure-debugging",
               "docs/recipes/invariant-debugging",
+              "docs/recipes/loop-debugging",
+              "docs/recipes/runtime-profile-selection",
+              "docs/recipes/resource-injection",
+              "docs/recipes/parameterized-verification",
               "docs/recipes/runtime-failure-debugging",
               "docs/recipes/run-comparison"
             ]

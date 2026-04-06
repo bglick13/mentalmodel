@@ -1,0 +1,12 @@
+[program]
+entrypoint = "mentalmodel.examples.review_workflow.program:build_program"
+
+[program.params]
+review_runtime = "strict_review"
+
+[environment]
+entrypoint = "mentalmodel.examples.review_workflow.program:build_environment"
+
+[runtime]
+invocation_name = "review_workflow_strict"
+runs_dir = "../../../../.runs"

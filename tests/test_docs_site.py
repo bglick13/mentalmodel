@@ -58,3 +58,20 @@ class DocsSiteTest(unittest.TestCase):
         self.assertIn("--environment-entrypoint", content)
         self.assertIn("--spec", content)
         self.assertIn("invocation_name", content)
+
+    def test_phase_23_docs_cover_new_recipes_and_reference_example(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        recipes = (repo_root / "docs.json").read_text(encoding="utf-8")
+        reusable_blocks = (repo_root / "guides" / "reusable-blocks.mdx").read_text(
+            encoding="utf-8"
+        )
+        step_loops = (repo_root / "guides" / "step-loops.mdx").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("docs/recipes/block-reuse", recipes)
+        self.assertIn("docs/recipes/loop-debugging", recipes)
+        self.assertIn("docs/recipes/runtime-profile-selection", recipes)
+        self.assertIn("docs/recipes/resource-injection", recipes)
+        self.assertIn("docs/recipes/parameterized-verification", recipes)
+        self.assertIn("review_workflow", reusable_blocks)
+        self.assertIn("review_workflow", step_loops)

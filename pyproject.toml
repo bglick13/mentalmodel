@@ -50,6 +50,8 @@ mentalmodel = [
   "examples/agent_tool_use/*.txt",
   "examples/async_rl/*.md",
   "examples/async_rl/*.txt",
+  "examples/review_workflow/*.md",
+  "examples/review_workflow/*.toml",
   "observability/templates/*.md",
   "observability/templates/*.yml",
   "observability/templates/*.env",

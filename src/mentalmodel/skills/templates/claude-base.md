@@ -17,6 +17,10 @@ authoring model.
 - `Parallel`
 - `Join`
 - `Ref`
+- `Block` / `Use`
+- `StepLoop`
+- `RuntimeEnvironment` / `RuntimeProfile`
+- `ResourceKey`
 - `RuntimeContext`
 
 ## Rules
@@ -59,6 +63,7 @@ uv run mentalmodel runs repair --dry-run
 uv run mentalmodel doctor --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel demo agent-tool-use
 uv run mentalmodel demo autoresearch-sorting
+uv run mentalmodel verify --spec src/mentalmodel/examples/review_workflow/review_workflow_fixture.toml
 ```
 
 `mentalmodel verify` writes a run bundle to `.runs` by default. The most useful
@@ -77,6 +82,9 @@ materialize a self-hosted tracing demo quickly.
 Metrics are derived from runtime semantics and stable node outputs, not a
 separate handwritten instrumentation path.
 `agent-tool-use` is the second serious reference example, and
+`review_workflow` is the serious reference path for `Block`, `StepLoop`,
+runtime environments, and spec-driven verification.
+`review_workflow` can be verified directly with its packaged TOML specs.
 `autoresearch-sorting` shows the bounded objective/search layer with an
 autoresearch-style bundle output.
 `summary.json` is versioned with `schema_version`, and `runs repair` can
@@ -84,7 +92,12 @@ normalize older bundles.
 
 Recipe docs live under `docs/recipes/`:
 
+- `block-reuse.md`
 - `structure-debugging.md`
 - `invariant-debugging.md`
+- `loop-debugging.md`
+- `runtime-profile-selection.md`
+- `resource-injection.md`
+- `parameterized-verification.md`
 - `runtime-failure-debugging.md`
 - `run-comparison.md`

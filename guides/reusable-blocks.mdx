@@ -172,3 +172,18 @@ They do not by themselves solve:
 
 `StepLoop` now builds on `Use` directly, so reusable blocks already work as
 native loop bodies with iteration-local refs.
+
+## Serious reference example
+
+See the multi-file review workflow under:
+
+- `mentalmodel.examples.review_workflow.program:build_program`
+- `mentalmodel.examples.review_workflow.program:build_environment`
+
+That reference path is intentionally more realistic than the tiny demo in this
+guide. It uses:
+
+- `Block` + `Use` for a reusable review step
+- `StepLoop` for queue iteration
+- `RuntimeEnvironment` for review-policy selection
+- TOML verify specs for durable CLI invocation

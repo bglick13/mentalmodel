@@ -191,3 +191,29 @@ Phase 19 intentionally keeps `StepLoop` narrow:
 
 Those can be added later on top of the current frame-aware runtime model if
 they prove worth the added complexity.
+
+## Serious reference example
+
+The review workflow reference path is the best current example of `StepLoop` in
+an authored program that is not shaped like a primitive demo:
+
+- workflow factory:
+  `mentalmodel.examples.review_workflow.program:build_program`
+- runtime environment factory:
+  `mentalmodel.examples.review_workflow.program:build_environment`
+- fixture spec:
+  `src/mentalmodel/examples/review_workflow/review_workflow_fixture.toml`
+
+Useful commands:
+
+```bash
+uv run mentalmodel verify \
+  --spec src/mentalmodel/examples/review_workflow/review_workflow_fixture.toml
+
+uv run mentalmodel replay --graph-id review_workflow --loop-node-id ticket_review_loop
+
+uv run mentalmodel runs outputs \
+  --graph-id review_workflow \
+  --node-id ticket_review_loop.review_step.review_audit \
+  --frame-id ticket_review_loop[1]
+```

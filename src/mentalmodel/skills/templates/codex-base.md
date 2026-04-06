@@ -17,6 +17,10 @@ authoring model.
 - `Parallel`: structural fanout container
 - `Join`: explicit merge point
 - `Ref`: non-tree dependency edge
+- `Block` / `Use`: reusable namespaced composition
+- `StepLoop`: sequential multi-step execution over a reusable block body
+- `RuntimeEnvironment` / `RuntimeProfile`: typed runtime binding
+- `ResourceKey`: typed shared resource declaration
 - `RuntimeContext`: reference extension primitive for runtime grouping
 
 ## Source of truth
@@ -67,6 +71,7 @@ uv run mentalmodel doctor --entrypoint mentalmodel.examples.async_rl.demo:build_
 uv run mentalmodel demo async-rl
 uv run mentalmodel demo agent-tool-use
 uv run mentalmodel demo autoresearch-sorting
+uv run mentalmodel verify --spec src/mentalmodel/examples/review_workflow/review_workflow_fixture.toml
 ```
 
 ## Run artifacts
@@ -102,6 +107,8 @@ uv run mentalmodel demo autoresearch-sorting
   normalize older bundles when needed.
 - `agent-tool-use` is the serious second reference workflow for verifying that
   the programming model is not RL-shaped by accident.
+- `review_workflow` is the serious reference path for `Block`, `StepLoop`,
+  runtime environments, and spec-driven verification.
 - `autoresearch-sorting` shows the bounded objective/search layer and writes an
   autoresearch-style `program.md` bundle when run with `--write-artifacts`.
 
@@ -132,6 +139,11 @@ program = Workflow(
 ## Debug recipe docs
 
 - `docs/recipes/structure-debugging.md`
+- `docs/recipes/block-reuse.md`
 - `docs/recipes/invariant-debugging.md`
+- `docs/recipes/loop-debugging.md`
+- `docs/recipes/runtime-profile-selection.md`
+- `docs/recipes/resource-injection.md`
+- `docs/recipes/parameterized-verification.md`
 - `docs/recipes/runtime-failure-debugging.md`
 - `docs/recipes/run-comparison.md`

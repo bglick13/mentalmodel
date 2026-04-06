@@ -18,6 +18,8 @@ description: Use when debugging a mentalmodel workflow or generated artifact. Co
 - use `mentalmodel runs inputs --graph-id <graph_id> --node-id <node_id>` for persisted bound inputs
 - use `mentalmodel runs outputs --graph-id <graph_id> --node-id <node_id>` for persisted outputs
 - use `mentalmodel runs trace --graph-id <graph_id> --node-id <node_id>` for semantic events
+- when loops are involved, add `--loop-node-id`, `--iteration-index`, or
+  `--frame-id` instead of guessing which iteration you mean
 - use `mentalmodel runs diff --graph-id <graph_id> --run-a <run_a> --run-b <run_b>` when debugging a regression between runs
 - use `mentalmodel otel write-demo --stack lgtm --output-dir ...` when you need a fast local OTEL UI to demo traces
 - use `mentalmodel runs repair --dry-run` if legacy bundle metadata looks stale
@@ -27,4 +29,5 @@ description: Use when debugging a mentalmodel workflow or generated artifact. Co
 - read `verification.json`, `records.jsonl`, and `outputs.json` before
   `otel-spans.jsonl`
 - follow the recipe docs under `docs/recipes/` for structure, invariants,
-  runtime failures, and run comparisons
+  block reuse, loops, runtime profiles, resource injection, parameterized
+  verification, runtime failures, and run comparisons
