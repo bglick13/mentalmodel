@@ -45,3 +45,16 @@ class DocsSiteTest(unittest.TestCase):
         self.assertIn("How to read that", quickstart)
         self.assertIn("A practical debugging sequence", runs)
         self.assertIn("How to use that", verify)
+        self.assertIn("--params-json", verify)
+        self.assertIn("--params-file", verify)
+        self.assertIn("--environment-entrypoint", verify)
+        self.assertIn("--spec", verify)
+        self.assertIn("--invocation-name", verify)
+
+    def test_runtime_environment_docs_cover_cli_binding(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        page = repo_root / "guides" / "runtime-environments.mdx"
+        content = page.read_text(encoding="utf-8")
+        self.assertIn("--environment-entrypoint", content)
+        self.assertIn("--spec", content)
+        self.assertIn("invocation_name", content)

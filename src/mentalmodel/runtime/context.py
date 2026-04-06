@@ -49,6 +49,7 @@ class ExecutionContext:
     node_kind: str | None = None
     runtime_context: str | None = None
     runtime_profile: str | None = None
+    invocation_name: str | None = None
     frame: ExecutionFrame = field(default_factory=lambda: ROOT_FRAME)
     loop_item_values: dict[str, RuntimeValue] = field(default_factory=dict)
     loop_state_values: dict[str, RuntimeValue] = field(default_factory=dict)
@@ -66,6 +67,7 @@ class ExecutionContext:
         tracing: TracingAdapter,
         metrics: MetricEmitter,
         environment: RuntimeEnvironment = EMPTY_RUNTIME_ENVIRONMENT,
+        invocation_name: str | None = None,
     ) -> ExecutionContext:
         return cls(
             run_id=f"run-{uuid4().hex}",
@@ -74,6 +76,7 @@ class ExecutionContext:
             tracing=tracing,
             metrics=metrics,
             environment=environment,
+            invocation_name=invocation_name,
             runtime_profile=environment.default_profile_name,
         )
 
@@ -91,6 +94,7 @@ class ExecutionContext:
             node_kind=node.kind,
             runtime_context=runtime_context,
             runtime_profile=self.environment.resolve_profile_name(runtime_context),
+            invocation_name=self.invocation_name,
             frame=self.frame,
             loop_item_values=self.loop_item_values,
             loop_state_values=self.loop_state_values,
@@ -113,6 +117,7 @@ class ExecutionContext:
             node_kind=self.node_kind,
             runtime_context=self.runtime_context,
             runtime_profile=self.runtime_profile,
+            invocation_name=self.invocation_name,
             frame=frame,
             loop_item_values=self.loop_item_values,
             loop_state_values=self.loop_state_values,
@@ -140,6 +145,7 @@ class ExecutionContext:
             node_kind=self.node_kind,
             runtime_context=self.runtime_context,
             runtime_profile=self.runtime_profile,
+            invocation_name=self.invocation_name,
             frame=self.frame,
             loop_item_values=dict(item_values or {}),
             loop_state_values=dict(state_values or {}),
@@ -161,6 +167,8 @@ class ExecutionContext:
             attrs["mentalmodel.runtime.context"] = self.runtime_context
         if self.runtime_profile is not None:
             attrs["mentalmodel.runtime.profile"] = self.runtime_profile
+        if self.invocation_name is not None:
+            attrs["mentalmodel.invocation.name"] = self.invocation_name
         attrs["mentalmodel.frame.id"] = self.frame.frame_id
         if self.frame.loop_node_id is not None:
             attrs["mentalmodel.loop.node_id"] = self.frame.loop_node_id
@@ -181,6 +189,7 @@ class ExecutionContext:
             runtime_context=self.runtime_context,
             runtime_profile=self.runtime_profile,
             service_name=self.tracing.config.service_name,
+            invocation_name=self.invocation_name,
         )
 
     @property

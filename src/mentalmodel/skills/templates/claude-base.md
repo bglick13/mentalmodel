@@ -44,6 +44,7 @@ authoring model.
 uv run mentalmodel demo async-rl
 uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel verify --entrypoint mypkg.workflows:build_program --params-file verification/smoke.json
 uv run mentalmodel replay --graph-id async_rl_demo
 uv run mentalmodel otel show-config
 uv run mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
@@ -64,6 +65,13 @@ uv run mentalmodel demo autoresearch-sorting
 files are `verification.json`, `records.jsonl`, `outputs.json`, and
 `otel-spans.jsonl`. `replay` reconstructs the semantic event timeline for one
 run, and `runs diff` compares two bundles when behavior changes across runs.
+Use `--params-json` or `--params-file` when the verify entrypoint is a workflow
+factory that needs explicit invocation parameters.
+Use `--environment-entrypoint` when runtime binding is intentionally separate
+from workflow construction, and prefer `--spec` when a project has a durable
+TOML invocation spec.
+Use `--invocation-name` to keep smoke, shadow, and production-like runs
+separable in `.runs` and telemetry.
 Use `otel show-config` when OTLP export looks wrong, and `otel write-demo` to
 materialize a self-hosted tracing demo quickly.
 Metrics are derived from runtime semantics and stable node outputs, not a

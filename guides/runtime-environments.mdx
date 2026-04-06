@@ -128,6 +128,68 @@ Runtime profile metadata appears in the same places you already inspect runs:
 That means `mentalmodel runs show --graph-id ...` tells you not just what ran,
 but which profile set the run was bound against.
 
+## CLI verification without Python glue
+
+Runtime environments are now fully usable from the CLI. You do not need a
+custom Python snippet just to bind a separate environment.
+
+Direct flags:
+
+```bash
+mentalmodel verify \
+  --entrypoint mentalmodel.examples.runtime_environment.demo:build_program \
+  --environment-entrypoint mentalmodel.examples.runtime_environment.demo:build_environment \
+  --invocation-name runtime_environment_demo
+```
+
+Spec-driven invocation:
+
+```bash
+mentalmodel verify --spec src/mentalmodel/examples/runtime_environment/runtime_environment_demo.toml
+```
+
+That spec file shows the intended split:
+
+- the workflow factory remains a Python entrypoint
+- the runtime environment factory remains a Python entrypoint
+- TOML selects and parameterizes them without trying to encode Python objects
+
+The top-level `invocation_name` is especially important operationally. It lets
+you separate:
+
+- `fixture_demo`
+- `real_smoke`
+- `shadow_verify1`
+- `training_prod`
+
+even when multiple runs share the same graph id or reuse the same runtime
+profiles.
+
+The spec file’s `runs_dir` is resolved relative to the spec file itself. That
+is deliberate: invocation specs stay portable when moved with the workflow they
+describe.
+
+## Inspecting runtime environment runs
+
+After `verify`, these are the most useful commands:
+
+```bash
+mentalmodel runs latest --graph-id runtime_environment_demo
+mentalmodel runs show --graph-id runtime_environment_demo
+mentalmodel runs outputs --graph-id runtime_environment_demo --node-id comparison
+mentalmodel runs trace --graph-id runtime_environment_demo --node-id fixture_scaling.scale
+mentalmodel runs trace --graph-id runtime_environment_demo --node-id real_scaling.scale
+```
+
+What to look for:
+
+- `runs show` surfaces `invocation_name`, `runtime_default_profile_name`, and
+  `runtime_profile_names`
+- `runs outputs --node-id comparison` confirms the two profiles produced
+  different results from the same authored block
+- `runs trace` shows `runtime_profile` on `node.started`, which proves which
+  profile actually executed each node
+
 ## What this unlocks
 
 The authored workflow no longer needs app-side bundles, closures, or hand-wired

@@ -21,6 +21,10 @@ mentalmodel replay --graph-id <graph_id>
   The specific run ID to replay. When omitted, the newest run for the graph is used.
 </ParamField>
 
+<ParamField query="--invocation-name" type="string">
+  Filter by the top-level invocation label when resolving the run.
+</ParamField>
+
 <ParamField query="--frame-id" type="string">
   Restrict replay to one execution frame, such as `steps[3]`.
 </ParamField>
@@ -52,6 +56,7 @@ When you run without `--json`, the command renders three tables.
 | Graph | my-graph |
 | Run | run-abc123 |
 | Schema | 2 |
+| Invocation | real_smoke |
 | Success | yes |
 | Verification | yes |
 | Frames | 1 |
@@ -94,6 +99,13 @@ The most useful reading pattern is:
    failed invariants
 4. jump from there to `runs trace`, `runs inputs`, or `runs outputs`
 
+If `Invocation` is populated, keep using that same label for follow-up commands:
+
+```bash
+mentalmodel runs list --invocation-name real_smoke
+mentalmodel runs latest --graph-id my-graph --invocation-name real_smoke
+```
+
 `replay` is especially useful for answering:
 
 - what happened first?
@@ -109,6 +121,10 @@ mentalmodel replay --graph-id my-graph
 
 ```bash Replay a specific run
 mentalmodel replay --graph-id my-graph --run-id run-abc123
+```
+
+```bash Replay latest smoke run
+mentalmodel replay --graph-id my-graph --invocation-name real_smoke
 ```
 
 ```bash JSON output

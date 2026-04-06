@@ -5,7 +5,6 @@ import importlib
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from types import ModuleType
 from typing import cast
 
 from rich.console import Console
@@ -41,8 +40,15 @@ from mentalmodel.examples.autoresearch_sorting.demo import (
     build_program as build_autoresearch_sorting_demo,
 )
 from mentalmodel.integrations.autoresearch import write_autoresearch_bundle
+from mentalmodel.invocation import (
+    InvocationFactorySpec,
+    VerifyInvocationSpec,
+    load_json_object,
+    load_runtime_environment_subject,
+    load_workflow_subject,
+    read_verify_invocation_spec,
+)
 from mentalmodel.ir.lowering import lower_program
-from mentalmodel.ir.schemas import EntryPointSpec
 from mentalmodel.observability import load_tracing_config, write_otel_demo
 from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
@@ -59,36 +65,12 @@ from mentalmodel.runtime.runs import (
 from mentalmodel.skills import build_install_plan, install_skills
 from mentalmodel.testing import execute_program, run_verification
 
-
-def parse_entrypoint(raw: str) -> EntryPointSpec:
-    if ":" not in raw:
-        raise EntrypointLoadError(
-            "Entrypoint must be in the format 'module.submodule:function_name'."
-        )
-    module_name, attribute_name = raw.split(":", 1)
-    if not module_name or not attribute_name:
-        raise EntrypointLoadError("Entrypoint must include both a module and an attribute name.")
-    return EntryPointSpec(module_name=module_name, attribute_name=attribute_name)
+DEFAULT_VERIFY_ENTRYPOINT = "mentalmodel.examples.async_rl.demo:build_program"
 
 
-def load_entrypoint_subject(raw: str) -> tuple[ModuleType, Workflow[NamedPrimitive]]:
-    spec = parse_entrypoint(raw)
-    try:
-        module = importlib.import_module(spec.module_name)
-    except Exception as exc:  # pragma: no cover - exercised by CLI path.
-        raise EntrypointLoadError(f"Failed to import module {spec.module_name!r}: {exc}") from exc
-    try:
-        attribute = getattr(module, spec.attribute_name)
-    except AttributeError as exc:
-        raise EntrypointLoadError(
-            f"Module {spec.module_name!r} does not define {spec.attribute_name!r}."
-        ) from exc
-    loaded = attribute() if callable(attribute) else attribute
-    if not isinstance(loaded, Workflow):
-        raise EntrypointLoadError(
-            f"Entrypoint {raw!r} must resolve to a Workflow, got {type(loaded).__name__}."
-        )
-    return module, cast(Workflow[NamedPrimitive], loaded)
+def load_entrypoint_subject(raw: str) -> tuple[object, Workflow[NamedPrimitive]]:
+    module, workflow = load_workflow_subject(InvocationFactorySpec(entrypoint=raw))
+    return module, workflow
 
 
 def load_entrypoint(raw: str) -> Workflow[NamedPrimitive]:
@@ -100,6 +82,75 @@ def load_graph(entrypoint: str) -> Workflow[NamedPrimitive]:
     """Load the workflow entrypoint for CLI commands."""
 
     return load_entrypoint(entrypoint)
+
+
+def resolve_verify_invocation(
+    *,
+    entrypoint: str | None,
+    params_json: str | None,
+    params_file: Path | None,
+    environment_entrypoint: str | None,
+    environment_params_json: str | None,
+    environment_params_file: Path | None,
+    invocation_name: str | None,
+    runs_dir: Path | None,
+    spec_path: Path | None,
+) -> VerifyInvocationSpec:
+    base_spec = (
+        read_verify_invocation_spec(spec_path)
+        if spec_path is not None
+        else VerifyInvocationSpec(program=InvocationFactorySpec(DEFAULT_VERIFY_ENTRYPOINT))
+    )
+    program_entrypoint = entrypoint or base_spec.program.entrypoint
+    program_params = (
+        load_json_object(
+            raw_json=params_json,
+            file_path=params_file,
+            subject="verification parameters",
+        )
+        if params_json is not None or params_file is not None
+        else dict(base_spec.program.params)
+    )
+    environment_base = base_spec.environment
+    environment_resolved_entrypoint = (
+        environment_entrypoint
+        if environment_entrypoint is not None
+        else (None if environment_base is None else environment_base.entrypoint)
+    )
+    environment_params = (
+        load_json_object(
+            raw_json=environment_params_json,
+            file_path=environment_params_file,
+            subject="environment parameters",
+        )
+        if environment_params_json is not None or environment_params_file is not None
+        else (
+            {}
+            if environment_base is None
+            else dict(environment_base.params)
+        )
+    )
+    if environment_resolved_entrypoint is None and environment_params:
+        raise EntrypointLoadError(
+            "Environment parameters require --environment-entrypoint or an [environment] spec."
+        )
+    environment_spec = (
+        None
+        if environment_resolved_entrypoint is None
+        else InvocationFactorySpec(
+            entrypoint=environment_resolved_entrypoint,
+            params=environment_params or {},
+        )
+    )
+    return VerifyInvocationSpec(
+        program=InvocationFactorySpec(
+            entrypoint=program_entrypoint,
+            params=program_params or {},
+        ),
+        environment=environment_spec,
+        invocation_name=invocation_name or base_spec.invocation_name,
+        runs_dir=runs_dir or base_spec.runs_dir,
+    )
 
 
 def run_check(entrypoint: str, *, json_output: bool = False) -> int:
@@ -209,15 +260,42 @@ def run_docs(
 
 
 def run_verify(
-    entrypoint: str,
+    entrypoint: str | None,
     *,
     json_output: bool = False,
     runs_dir: Path | None = None,
+    params_json: str | None = None,
+    params_file: Path | None = None,
+    environment_entrypoint: str | None = None,
+    environment_params_json: str | None = None,
+    environment_params_file: Path | None = None,
+    invocation_name: str | None = None,
+    spec_path: Path | None = None,
 ) -> int:
     """Run analysis, runtime verification, and property checks."""
 
-    module, program = load_entrypoint_subject(entrypoint)
-    report = run_verification(program, module=module, runs_dir=runs_dir)
+    invocation = resolve_verify_invocation(
+        entrypoint=entrypoint,
+        params_json=params_json,
+        params_file=params_file,
+        environment_entrypoint=environment_entrypoint,
+        environment_params_json=environment_params_json,
+        environment_params_file=environment_params_file,
+        invocation_name=invocation_name,
+        runs_dir=runs_dir,
+        spec_path=spec_path,
+    )
+    module, program = load_workflow_subject(invocation.program)
+    environment = None
+    if invocation.environment is not None:
+        _, environment = load_runtime_environment_subject(invocation.environment)
+    report = run_verification(
+        program,
+        module=module,
+        runs_dir=invocation.runs_dir,
+        environment=environment,
+        invocation_name=invocation.invocation_name,
+    )
 
     if json_output:
         print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
@@ -246,6 +324,7 @@ def run_verify(
     runtime_table.add_column("Records", justify="right")
     runtime_table.add_column("Outputs", justify="right")
     runtime_table.add_column("State Entries", justify="right")
+    runtime_table.add_column("Invocation")
     runtime_table.add_column("Warning Invariants", justify="right")
     runtime_table.add_column("Run Artifacts")
     runtime_table.add_column("Error")
@@ -254,6 +333,7 @@ def run_verify(
         str(report.runtime.record_count),
         str(report.runtime.output_count),
         str(report.runtime.state_count),
+        report.runtime.invocation_name or "",
         str(len(report.runtime.warning_invariant_failures)),
         report.runtime.run_artifacts_dir or "",
         report.runtime.error or "",
@@ -298,6 +378,7 @@ def run_replay(
     runs_dir: Path | None = None,
     graph_id: str,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     frame_id: str | None = None,
     loop_node_id: str | None = None,
     iteration_index: int | None = None,
@@ -309,6 +390,7 @@ def run_replay(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
+        invocation_name=invocation_name,
         frame_id=frame_id,
         loop_node_id=loop_node_id,
         iteration_index=iteration_index,
@@ -325,6 +407,7 @@ def run_replay(
         ("Graph", report.summary.graph_id),
         ("Run", report.summary.run_id),
         ("Schema", str(report.summary.schema_version)),
+        ("Invocation", report.summary.invocation_name or ""),
         ("Success", "yes" if report.summary.success else "no"),
         (
             "Verification",
@@ -728,12 +811,17 @@ def run_runs_list(
     *,
     runs_dir: Path | None = None,
     graph_id: str | None = None,
+    invocation_name: str | None = None,
     limit: int = 20,
     json_output: bool = False,
 ) -> int:
     """List persisted run bundles."""
 
-    summaries = list_run_summaries(runs_dir=runs_dir, graph_id=graph_id)[: max(1, limit)]
+    summaries = list_run_summaries(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        invocation_name=invocation_name,
+    )[: max(1, limit)]
     if json_output:
         print(
             json.dumps(
@@ -749,6 +837,7 @@ def run_runs_list(
                         "state_count": summary.state_count,
                         "trace_mode": summary.trace_mode,
                         "trace_mirror_to_disk": summary.trace_mirror_to_disk,
+                        "invocation_name": summary.invocation_name,
                         "runtime_default_profile_name": summary.runtime_default_profile_name,
                         "runtime_profile_names": list(summary.runtime_profile_names),
                         "run_dir": str(summary.run_dir),
@@ -769,6 +858,7 @@ def run_runs_list(
     table.add_column("Outputs", justify="right")
     table.add_column("State", justify="right")
     table.add_column("Trace")
+    table.add_column("Invocation")
     table.add_column("Profiles")
     table.add_column("Path")
     for summary in summaries:
@@ -780,6 +870,7 @@ def run_runs_list(
             str(summary.output_count),
             str(summary.state_count),
             summary.trace_mode,
+            summary.invocation_name or "",
             ", ".join(summary.runtime_profile_names) or "none",
             str(summary.run_dir),
         )
@@ -795,11 +886,17 @@ def run_runs_show(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     json_output: bool = False,
 ) -> int:
     """Show one persisted run bundle and its files."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     verification = _optional_run_payload(summary.run_dir / "verification.json")
     payload = {
         "graph_id": summary.graph_id,
@@ -818,6 +915,7 @@ def run_runs_show(
         "trace_mirror_to_disk": summary.trace_mirror_to_disk,
         "trace_capture_local_spans": summary.trace_capture_local_spans,
         "trace_service_name": summary.trace_service_name,
+        "invocation_name": summary.invocation_name,
         "runtime_default_profile_name": summary.runtime_default_profile_name,
         "runtime_profile_names": list(summary.runtime_profile_names),
         "run_dir": str(summary.run_dir),
@@ -852,6 +950,7 @@ def run_runs_show(
         ("Trace Endpoint", summary.trace_otlp_endpoint or ""),
         ("Trace Sink", "configured" if summary.trace_sink_configured else "disk fallback"),
         ("Mirror To Disk", "yes" if summary.trace_mirror_to_disk else "no"),
+        ("Invocation", summary.invocation_name or ""),
         ("Default Profile", summary.runtime_default_profile_name or ""),
         ("Profiles", ", ".join(summary.runtime_profile_names) or "none"),
         ("Run Dir", str(summary.run_dir)),
@@ -879,11 +978,17 @@ def run_runs_latest(
     *,
     runs_dir: Path | None = None,
     graph_id: str | None = None,
+    invocation_name: str | None = None,
     json_output: bool = False,
 ) -> int:
     """Resolve and show the newest matching run."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=None)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=None,
+        invocation_name=invocation_name,
+    )
     payload = {
         "graph_id": summary.graph_id,
         "schema_version": summary.schema_version,
@@ -896,6 +1001,7 @@ def run_runs_latest(
         "state_count": summary.state_count,
         "trace_mode": summary.trace_mode,
         "trace_mirror_to_disk": summary.trace_mirror_to_disk,
+        "invocation_name": summary.invocation_name,
         "runtime_default_profile_name": summary.runtime_default_profile_name,
         "runtime_profile_names": list(summary.runtime_profile_names),
     }
@@ -912,6 +1018,7 @@ def run_runs_latest(
         ("Success", "yes" if summary.success else "no"),
         ("Created", str(summary.created_at_ms)),
         ("Trace Mode", summary.trace_mode),
+        ("Invocation", summary.invocation_name or ""),
         ("Default Profile", summary.runtime_default_profile_name or ""),
         ("Profiles", ", ".join(summary.runtime_profile_names) or "none"),
         ("Run Dir", str(summary.run_dir)),
@@ -1104,6 +1211,7 @@ def run_runs_inputs(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str,
     frame_id: str | None = None,
     loop_node_id: str | None = None,
@@ -1112,11 +1220,17 @@ def run_runs_inputs(
 ) -> int:
     """Show the resolved input payload for one node."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     payload = load_run_node_inputs(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         node_id=node_id,
         frame_id=frame_id,
         loop_node_id=loop_node_id,
@@ -1125,6 +1239,7 @@ def run_runs_inputs(
     output = {
         "graph_id": summary.graph_id,
         "run_id": summary.run_id,
+        "invocation_name": summary.invocation_name,
         "node_id": node_id,
         "frame_id": frame_id or "root",
         "loop_node_id": loop_node_id,
@@ -1143,6 +1258,7 @@ def run_runs_outputs(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str,
     frame_id: str | None = None,
     loop_node_id: str | None = None,
@@ -1151,11 +1267,17 @@ def run_runs_outputs(
 ) -> int:
     """Show the output payload for one node."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     payload = load_run_node_output(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         node_id=node_id,
         frame_id=frame_id,
         loop_node_id=loop_node_id,
@@ -1164,6 +1286,7 @@ def run_runs_outputs(
     output = {
         "graph_id": summary.graph_id,
         "run_id": summary.run_id,
+        "invocation_name": summary.invocation_name,
         "node_id": node_id,
         "frame_id": frame_id or "root",
         "loop_node_id": loop_node_id,
@@ -1182,6 +1305,7 @@ def run_runs_trace(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str,
     event_type: str | None = None,
     frame_id: str | None = None,
@@ -1195,6 +1319,7 @@ def run_runs_trace(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
+        invocation_name=invocation_name,
         node_id=node_id,
         event_type=event_type,
         frame_id=frame_id,
@@ -1204,6 +1329,7 @@ def run_runs_trace(
     payload = {
         "graph_id": trace.summary.graph_id,
         "run_id": trace.summary.run_id,
+        "invocation_name": trace.summary.invocation_name,
         "node_id": trace.node_id,
         "frame_id": frame_id,
         "loop_node_id": loop_node_id,
@@ -1257,6 +1383,7 @@ def run_runs_records(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str | None = None,
     event_type: str | None = None,
     frame_id: str | None = None,
@@ -1267,11 +1394,17 @@ def run_runs_records(
 ) -> int:
     """Show semantic execution records for one persisted run."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     records = load_run_records(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         node_id=node_id,
         event_type=event_type,
         frame_id=frame_id,
@@ -1339,7 +1472,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify", help="Run invariants and verification helpers.")
     verify.add_argument(
         "--entrypoint",
-        default="mentalmodel.examples.async_rl.demo:build_program",
+        default=None,
         help="Program entrypoint in `module:function` format.",
     )
     verify.add_argument(
@@ -1347,11 +1480,49 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional root directory for persisted run artifacts. Defaults to ./.runs.",
     )
+    verify.add_argument(
+        "--params-json",
+        help="Optional JSON object passed as keyword arguments to a callable entrypoint.",
+    )
+    verify.add_argument(
+        "--params-file",
+        type=Path,
+        help="Path to a JSON file passed as keyword arguments to a callable entrypoint.",
+    )
+    verify.add_argument(
+        "--environment-entrypoint",
+        help="Optional runtime environment entrypoint in `module:function` format.",
+    )
+    verify.add_argument(
+        "--environment-params-json",
+        help=(
+            "Optional JSON object passed as keyword arguments to a callable "
+            "environment entrypoint."
+        ),
+    )
+    verify.add_argument(
+        "--environment-params-file",
+        type=Path,
+        help=(
+            "Path to a JSON file passed as keyword arguments to a callable "
+            "environment entrypoint."
+        ),
+    )
+    verify.add_argument(
+        "--invocation-name",
+        help="Optional run-level label persisted in .runs and emitted telemetry.",
+    )
+    verify.add_argument(
+        "--spec",
+        type=Path,
+        help="Optional TOML verify spec describing program, environment, and runtime invocation.",
+    )
     verify.add_argument("--json", action="store_true", help="Emit JSON output.")
     replay = subparsers.add_parser("replay", help="Replay a recorded execution.")
     replay.add_argument("--runs-dir", type=Path)
     replay.add_argument("--graph-id", required=True)
     replay.add_argument("--run-id")
+    replay.add_argument("--invocation-name")
     replay.add_argument("--frame-id")
     replay.add_argument("--loop-node-id")
     replay.add_argument("--iteration-index", type=int)
@@ -1379,6 +1550,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_list = runs_subparsers.add_parser("list", help="List recent run bundles.")
     runs_list.add_argument("--runs-dir", type=Path)
     runs_list.add_argument("--graph-id")
+    runs_list.add_argument("--invocation-name")
     runs_list.add_argument("--limit", type=int, default=20)
     runs_list.add_argument("--json", action="store_true", help="Emit JSON output.")
 
@@ -1386,17 +1558,20 @@ def build_parser() -> argparse.ArgumentParser:
     runs_show.add_argument("--runs-dir", type=Path)
     runs_show.add_argument("--graph-id")
     runs_show.add_argument("--run-id")
+    runs_show.add_argument("--invocation-name")
     runs_show.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs_latest = runs_subparsers.add_parser("latest", help="Resolve the newest matching run.")
     runs_latest.add_argument("--runs-dir", type=Path)
     runs_latest.add_argument("--graph-id")
+    runs_latest.add_argument("--invocation-name")
     runs_latest.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs_inputs = runs_subparsers.add_parser("inputs", help="Show one node input payload.")
     runs_inputs.add_argument("--runs-dir", type=Path)
     runs_inputs.add_argument("--graph-id")
     runs_inputs.add_argument("--run-id")
+    runs_inputs.add_argument("--invocation-name")
     runs_inputs.add_argument("--node-id", required=True)
     runs_inputs.add_argument("--frame-id")
     runs_inputs.add_argument("--loop-node-id")
@@ -1407,6 +1582,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_outputs.add_argument("--runs-dir", type=Path)
     runs_outputs.add_argument("--graph-id")
     runs_outputs.add_argument("--run-id")
+    runs_outputs.add_argument("--invocation-name")
     runs_outputs.add_argument("--node-id", required=True)
     runs_outputs.add_argument("--frame-id")
     runs_outputs.add_argument("--loop-node-id")
@@ -1417,6 +1593,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_trace.add_argument("--runs-dir", type=Path)
     runs_trace.add_argument("--graph-id")
     runs_trace.add_argument("--run-id")
+    runs_trace.add_argument("--invocation-name")
     runs_trace.add_argument("--node-id", required=True)
     runs_trace.add_argument("--event-type")
     runs_trace.add_argument("--frame-id")
@@ -1428,6 +1605,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs_records.add_argument("--runs-dir", type=Path)
     runs_records.add_argument("--graph-id")
     runs_records.add_argument("--run-id")
+    runs_records.add_argument("--invocation-name")
     runs_records.add_argument("--node-id")
     runs_records.add_argument("--event-type")
     runs_records.add_argument("--frame-id")
@@ -1505,12 +1683,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.entrypoint,
                 json_output=args.json,
                 runs_dir=args.runs_dir,
+                params_json=args.params_json,
+                params_file=args.params_file,
+                environment_entrypoint=args.environment_entrypoint,
+                environment_params_json=args.environment_params_json,
+                environment_params_file=args.environment_params_file,
+                invocation_name=args.invocation_name,
+                spec_path=args.spec,
             )
         if args.command == "replay":
             return run_replay(
                 runs_dir=args.runs_dir,
                 graph_id=args.graph_id,
                 run_id=args.run_id,
+                invocation_name=args.invocation_name,
                 frame_id=args.frame_id,
                 loop_node_id=args.loop_node_id,
                 iteration_index=args.iteration_index,
@@ -1536,6 +1722,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return run_runs_list(
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
+                    invocation_name=args.invocation_name,
                     limit=args.limit,
                     json_output=args.json,
                 )
@@ -1544,12 +1731,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
                     run_id=args.run_id,
+                    invocation_name=args.invocation_name,
                     json_output=args.json,
                 )
             if args.runs_command == "latest":
                 return run_runs_latest(
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
+                    invocation_name=args.invocation_name,
                     json_output=args.json,
                 )
             if args.runs_command == "inputs":
@@ -1557,6 +1746,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
                     run_id=args.run_id,
+                    invocation_name=args.invocation_name,
                     node_id=args.node_id,
                     frame_id=args.frame_id,
                     loop_node_id=args.loop_node_id,
@@ -1568,6 +1758,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
                     run_id=args.run_id,
+                    invocation_name=args.invocation_name,
                     node_id=args.node_id,
                     frame_id=args.frame_id,
                     loop_node_id=args.loop_node_id,
@@ -1579,6 +1770,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
                     run_id=args.run_id,
+                    invocation_name=args.invocation_name,
                     node_id=args.node_id,
                     event_type=args.event_type,
                     frame_id=args.frame_id,
@@ -1591,6 +1783,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
                     run_id=args.run_id,
+                    invocation_name=args.invocation_name,
                     node_id=args.node_id,
                     event_type=args.event_type,
                     frame_id=args.frame_id,

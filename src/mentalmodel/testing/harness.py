@@ -41,6 +41,7 @@ class RuntimeVerificationResult:
     state_count: int
     run_id: str | None = None
     run_artifacts_dir: str | None = None
+    invocation_name: str | None = None
     error: str | None = None
     invariant_failures: tuple[RuntimeInvariantFailure, ...] = ()
 
@@ -105,6 +106,7 @@ class VerificationReport:
                 "state_count": self.runtime.state_count,
                 "run_id": self.runtime.run_id,
                 "run_artifacts_dir": self.runtime.run_artifacts_dir,
+                "invocation_name": self.runtime.invocation_name,
                 "error": self.runtime.error,
                 "warning_invariant_failures": [
                     failure.as_dict()
@@ -141,6 +143,7 @@ class RuntimeExecutionCapture:
     spans: tuple[RecordedSpan, ...]
     trace_sink_configured: bool
     trace_summary: dict[str, str | bool | None]
+    invocation_name: str | None
     runtime_default_profile_name: str | None
     runtime_profile_names: tuple[str, ...]
 
@@ -149,11 +152,15 @@ def execute_program(
     program: Workflow[NamedPrimitive],
     *,
     environment: RuntimeEnvironment | None = None,
+    invocation_name: str | None = None,
 ) -> ExecutionResult:
     """Run one workflow through the deterministic async executor."""
 
     return asyncio.run(
-        AsyncExecutor(environment=environment or EMPTY_RUNTIME_ENVIRONMENT).run(program)
+        AsyncExecutor(
+            environment=environment or EMPTY_RUNTIME_ENVIRONMENT,
+            invocation_name=invocation_name,
+        ).run(program)
     )
 
 
@@ -164,12 +171,17 @@ def run_verification(
     runs_dir: Path | None = None,
     persist_run_artifacts: bool = True,
     environment: RuntimeEnvironment | None = None,
+    invocation_name: str | None = None,
 ) -> VerificationReport:
     """Run static analysis, runtime execution, and property checks."""
 
     graph = lower_program(program)
     analysis = run_analysis(graph)
-    runtime_capture = _capture_runtime(program, environment=environment)
+    runtime_capture = _capture_runtime(
+        program,
+        environment=environment,
+        invocation_name=invocation_name,
+    )
     property_checks = (
         run_property_checks(module, program)
         if module is not None
@@ -197,6 +209,7 @@ def run_verification(
         verification_payload=report.as_dict(),
         trace_sink_configured=runtime_capture.trace_sink_configured,
         trace_summary=runtime_capture.trace_summary,
+        invocation_name=runtime_capture.invocation_name,
         runtime_default_profile_name=runtime_capture.runtime_default_profile_name,
         runtime_profile_names=runtime_capture.runtime_profile_names,
     )
@@ -207,6 +220,7 @@ def run_verification(
         state_count=runtime_capture.result.state_count,
         run_id=runtime_capture.result.run_id,
         run_artifacts_dir=str(artifacts.run_dir),
+        invocation_name=runtime_capture.result.invocation_name,
         error=runtime_capture.result.error,
         invariant_failures=runtime_capture.result.invariant_failures,
     )
@@ -225,11 +239,13 @@ def _capture_runtime(
     program: Workflow[NamedPrimitive],
     *,
     environment: RuntimeEnvironment | None = None,
+    invocation_name: str | None = None,
 ) -> RuntimeExecutionCapture:
     recorder = ExecutionRecorder()
     executor = AsyncExecutor(
         recorder=recorder,
         environment=environment or EMPTY_RUNTIME_ENVIRONMENT,
+        invocation_name=invocation_name,
     )
     try:
         result = asyncio.run(executor.run(program))
@@ -242,6 +258,7 @@ def _capture_runtime(
                 output_count=0,
                 state_count=0,
                 run_id=recorder.last_run_id,
+                invocation_name=invocation_name,
                 error=f"{type(exc).__name__}: {exc}",
                 invariant_failures=invariant_failures,
             ),
@@ -253,6 +270,7 @@ def _capture_runtime(
             spans=executor.tracing.snapshot_spans(),
             trace_sink_configured=executor.tracing.sink_configured,
             trace_summary=executor.tracing.trace_summary(),
+            invocation_name=invocation_name,
             runtime_default_profile_name=executor.environment.default_profile_name,
             runtime_profile_names=executor.environment.profile_names(),
         )
@@ -263,6 +281,7 @@ def _capture_runtime(
             output_count=len(result.outputs),
             state_count=len(result.state),
             run_id=result.run_id,
+            invocation_name=result.invocation_name,
             invariant_failures=_collect_invariant_failures(result.records),
         ),
         records=result.records,
@@ -273,6 +292,7 @@ def _capture_runtime(
         spans=result.spans,
         trace_sink_configured=executor.tracing.sink_configured,
         trace_summary=result.trace_summary,
+        invocation_name=result.invocation_name,
         runtime_default_profile_name=result.runtime_default_profile_name,
         runtime_profile_names=result.runtime_profile_names,
     )

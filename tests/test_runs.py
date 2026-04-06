@@ -234,6 +234,7 @@ class RunsTest(unittest.TestCase):
                 build_runtime_program(),
                 runs_dir=root,
                 environment=build_runtime_environment(),
+                invocation_name="runtime_environment_demo",
             )
             self.assertTrue(report.success)
 
@@ -241,8 +242,32 @@ class RunsTest(unittest.TestCase):
                 runs_dir=root,
                 graph_id="runtime_environment_demo",
             )
+            self.assertEqual(summary.invocation_name, "runtime_environment_demo")
             self.assertIsNone(summary.runtime_default_profile_name)
             self.assertEqual(summary.runtime_profile_names, ("fixture", "real"))
+
+    def test_list_run_summaries_filters_by_invocation_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_verification(
+                build_runtime_program(),
+                runs_dir=root,
+                environment=build_runtime_environment(),
+                invocation_name="runtime_environment_demo",
+            )
+            run_verification(
+                build_program(),
+                module=importlib.import_module("mentalmodel.examples.async_rl.demo"),
+                runs_dir=root,
+                invocation_name="async_rl_demo",
+            )
+            summaries = list_run_summaries(
+                runs_dir=root,
+                invocation_name="runtime_environment_demo",
+            )
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0].graph_id, "runtime_environment_demo")
+            self.assertEqual(summaries[0].invocation_name, "runtime_environment_demo")
 
     def test_load_run_node_inputs_returns_persisted_input_payload(self) -> None:
         module = importlib.import_module("mentalmodel.examples.async_rl.demo")

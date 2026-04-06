@@ -22,8 +22,14 @@ from mentalmodel.core import (
     Ref,
     Workflow,
 )
-from mentalmodel.core.interfaces import JsonValue
+from mentalmodel.core.interfaces import JsonValue, NamedPrimitive
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.examples.runtime_environment.demo import (
+    build_environment as build_runtime_environment,
+)
+from mentalmodel.examples.runtime_environment.demo import (
+    build_program as build_runtime_environment_program,
+)
 from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.skills import install_skills
@@ -52,6 +58,20 @@ class CliWarningInvariant(InvariantChecker[dict[str, object], JsonValue]):
             passed=False,
             details={"reason": "warning failure"},
         )
+
+
+def build_parameterized_program(
+    *,
+    group_size: int,
+    sampler_lag: int = 0,
+) -> Workflow[NamedPrimitive]:
+    del sampler_lag
+    return Workflow(
+        name=f"param_graph_{group_size}",
+        children=[
+            Actor(name="source", handler=CliNoOpHandler(), inputs=[]),
+        ],
+    )
 
 
 class CliTest(unittest.TestCase):
@@ -481,7 +501,7 @@ class CliTest(unittest.TestCase):
         )
         stdout = io.StringIO()
         module = types.ModuleType("warning_cli_module")
-        with patch("mentalmodel.cli.load_entrypoint_subject", return_value=(module, program)):
+        with patch("mentalmodel.cli.load_workflow_subject", return_value=(module, program)):
             with contextlib.redirect_stdout(stdout):
                 exit_code = main(
                     [
@@ -499,6 +519,102 @@ class CliTest(unittest.TestCase):
             [{"node_id": "warn_check", "severity": "warning"}],
         )
         self.assertEqual(runtime["error_invariant_failures"], [])
+
+    def test_verify_command_accepts_params_json_for_callable_entrypoint(self) -> None:
+        stdout = io.StringIO()
+        module = types.SimpleNamespace(build_program=build_parameterized_program)
+        with patch("mentalmodel.invocation.importlib.import_module", return_value=module):
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verify",
+                        "--entrypoint",
+                        "param.module:build_program",
+                        "--params-json",
+                        '{"group_size": 5, "sampler_lag": 1}',
+                        "--json",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["graph_id"], "param_graph_5")
+
+    def test_verify_command_accepts_params_file_for_callable_entrypoint(self) -> None:
+        stdout = io.StringIO()
+        module = types.SimpleNamespace(build_program=build_parameterized_program)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params_file = Path(tmpdir) / "verify-params.json"
+            params_file.write_text('{"group_size": 7}', encoding="utf-8")
+            with patch("mentalmodel.invocation.importlib.import_module", return_value=module):
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = main(
+                        [
+                            "verify",
+                            "--entrypoint",
+                            "param.module:build_program",
+                            "--params-file",
+                            str(params_file),
+                            "--json",
+                        ]
+                    )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["graph_id"], "param_graph_7")
+
+    def test_verify_command_rejects_non_object_params_json(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "verify",
+                    "--entrypoint",
+                    "mentalmodel.examples.async_rl.demo:build_program",
+                    "--params-json",
+                    '["not", "an", "object"]',
+                ]
+            )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("JSON object", stdout.getvalue())
+
+    def test_verify_command_rejects_invalid_params_for_callable(self) -> None:
+        stdout = io.StringIO()
+        module = types.SimpleNamespace(build_program=build_parameterized_program)
+        with patch("mentalmodel.invocation.importlib.import_module", return_value=module):
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verify",
+                        "--entrypoint",
+                        "param.module:build_program",
+                        "--params-json",
+                        '{"unknown": 1}',
+                    ]
+        )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Invalid parameters for entrypoint", stdout.getvalue())
+
+    def test_verify_command_rejects_params_for_non_callable_workflow_entrypoint(self) -> None:
+        stdout = io.StringIO()
+        module = types.SimpleNamespace(
+            build_program=Workflow(
+                name="prebuilt_graph",
+                children=[Actor(name="source", handler=CliNoOpHandler(), inputs=[])],
+            )
+        )
+        with patch("mentalmodel.invocation.importlib.import_module", return_value=module):
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verify",
+                        "--entrypoint",
+                        "param.module:build_program",
+                        "--params-json",
+                        '{"group_size": 5}',
+                    ]
+                )
+        self.assertEqual(exit_code, 1)
+        self.assertIn("non-callable Workflow", stdout.getvalue())
 
     def test_install_skills_dry_run_outputs_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -529,6 +645,68 @@ class CliTest(unittest.TestCase):
             self.assertTrue(run_dir.exists())
             self.assertTrue((run_dir / "records.jsonl").exists())
 
+    def test_verify_command_supports_environment_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "verify",
+                        "--entrypoint",
+                        "mentalmodel.examples.runtime_environment.demo:build_program",
+                        "--environment-entrypoint",
+                        "mentalmodel.examples.runtime_environment.demo:build_environment",
+                        "--invocation-name",
+                        "runtime_environment_demo",
+                        "--runs-dir",
+                        tmpdir,
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["success"])
+            self.assertEqual(
+                payload["runtime"]["invocation_name"],
+                "runtime_environment_demo",
+            )
+            run_dir = Path(cast(str, payload["runtime"]["run_artifacts_dir"]))
+            self.assertTrue((run_dir / "summary.json").exists())
+
+    def test_verify_command_supports_toml_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs_dir = Path(tmpdir) / "artifacts"
+            spec_path = Path(tmpdir) / "runtime-environment.toml"
+            spec_path.write_text(
+                "\n".join(
+                    (
+                        "[program]",
+                        "entrypoint = "
+                        '"mentalmodel.examples.runtime_environment.demo:build_program"',
+                        "",
+                        "[environment]",
+                        "entrypoint = "
+                        '"mentalmodel.examples.runtime_environment.demo:build_environment"',
+                        "",
+                        "[runtime]",
+                        'invocation_name = "spec_runtime_environment"',
+                        f'runs_dir = "{runs_dir.name}"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(["verify", "--spec", str(spec_path), "--json"])
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(
+                payload["runtime"]["invocation_name"],
+                "spec_runtime_environment",
+            )
+            self.assertTrue((runs_dir / ".runs").exists())
+
     def test_runs_list_command_outputs_materialized_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             self._materialize_demo_run(tmpdir)
@@ -540,6 +718,39 @@ class CliTest(unittest.TestCase):
             self.assertEqual(len(payload), 1)
             self.assertEqual(payload[0]["graph_id"], "async_rl_demo")
             self.assertIn("schema_version", payload[0])
+
+    def test_runs_list_command_filters_by_invocation_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_verification(
+                build_runtime_environment_program(),
+                runs_dir=root,
+                environment=build_runtime_environment(),
+                invocation_name="runtime_environment_demo",
+            )
+            run_verification(
+                build_program(),
+                module=importlib.import_module("mentalmodel.examples.async_rl.demo"),
+                runs_dir=root,
+                invocation_name="async_rl_demo",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "list",
+                        "--runs-dir",
+                        tmpdir,
+                        "--invocation-name",
+                        "runtime_environment_demo",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(len(payload), 1)
+            self.assertEqual(payload[0]["invocation_name"], "runtime_environment_demo")
 
     def test_runs_show_command_json_outputs_latest_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

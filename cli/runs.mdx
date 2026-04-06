@@ -43,6 +43,11 @@ mentalmodel runs list
   Root directory for run artifacts. Defaults to `./.runs`.
 </ParamField>
 
+<ParamField query="--invocation-name" type="string">
+  Filter by the top-level run label persisted by `mentalmodel verify`, such as
+  `real_smoke` or `training_prod`.
+</ParamField>
+
 <ParamField query="--json" type="flag">
   Emit a JSON array of run summaries.
 </ParamField>
@@ -57,6 +62,7 @@ Use `runs list` when your question is:
 
 - what runs do I have?
 - which graph ids are active?
+- which smoke, shadow, or production-like invocation category does this run belong to?
 - which run ids should I inspect or diff next?
 
 ---
@@ -75,6 +81,10 @@ mentalmodel runs show --graph-id my-graph --run-id run-abc123
 
 <ParamField query="--run-id" type="string">
   Specific run ID to show. When omitted, the newest run for the graph is used.
+</ParamField>
+
+<ParamField query="--invocation-name" type="string">
+  Filter by the top-level invocation label.
 </ParamField>
 
 <ParamField query="--runs-dir" type="path">
@@ -96,6 +106,7 @@ It answers:
 
 When runtime environments are in use, `runs show` also surfaces:
 
+- `invocation_name`
 - `runtime_default_profile_name`
 - `runtime_profile_names`
 
@@ -117,12 +128,21 @@ mentalmodel runs latest --graph-id my-graph
   Root directory for run artifacts. Defaults to `./.runs`.
 </ParamField>
 
+<ParamField query="--invocation-name" type="string">
+  Filter by the top-level invocation label.
+</ParamField>
+
 <ParamField query="--json" type="flag">
   Emit a JSON object with the resolved run summary.
 </ParamField>
 
 This is the fastest “start with the newest run” command and is often the first
 step after `mentalmodel verify`.
+
+If you use `--invocation-name`, it becomes the fastest way to answer:
+
+- what is the latest `real_smoke` run?
+- what is the latest `training_prod` run?
 
 ---
 

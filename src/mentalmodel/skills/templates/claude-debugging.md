@@ -6,6 +6,11 @@ description: Use when debugging a mentalmodel workflow or generated artifact. Co
 # mentalmodel Debugging
 
 - start with `mentalmodel check`, `docs`, and `verify`
+- use `--params-json` or `--params-file` with `mentalmodel verify` when the
+  entrypoint is a parameterized workflow factory
+- use `--environment-entrypoint` when the runtime environment is built
+  separately, and prefer `--spec` when the project already has a TOML
+  invocation spec
 - run `mentalmodel doctor` when setup, skills, entrypoints, or tracing may be wrong
 - use `mentalmodel otel show-config` when tracing/export configuration looks suspicious
 - use `mentalmodel runs latest --graph-id <graph_id>` to resolve the newest bundle

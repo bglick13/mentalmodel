@@ -84,6 +84,7 @@ uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel verify --spec src/mentalmodel/examples/runtime_environment/runtime_environment_demo.toml
 uv run mentalmodel replay --graph-id async_rl_demo
 uv run mentalmodel replay --graph-id async_rl_demo --frame-id steps[3]
 uv run mentalmodel otel show-config
@@ -107,6 +108,18 @@ uv run mentalmodel demo agent-tool-use --write-artifacts --output-dir /tmp/menta
 uv run mentalmodel demo autoresearch-sorting
 uv run mentalmodel demo autoresearch-sorting --write-artifacts --output-dir /tmp/mentalmodel-autoresearch
 ```
+
+`mentalmodel verify` also accepts:
+
+- `--params-json` / `--params-file` for workflow factory parameters
+- `--environment-entrypoint` plus `--environment-params-json` /
+  `--environment-params-file` for a separate `RuntimeEnvironment` factory
+- `--spec` for a TOML invocation spec that describes the workflow factory,
+  runtime environment factory, invocation name, and runs directory
+- `--invocation-name` for a stable run-level label such as `real_smoke`,
+  `shadow_verify1`, or `training_prod`
+- in TOML specs, `runs_dir` and `params_file` paths are resolved relative to
+  the spec file itself
 
 `mentalmodel verify` writes a per-run debugging bundle under
 `.runs/<graph_id>/<run_id>/` by default. The most useful files are:
@@ -132,6 +145,7 @@ Milestone 8 run-inspection commands:
   `runs inputs`, `runs outputs`, `runs trace`, `runs records`, and `replay`
   target the exact iteration you mean
 - run summaries now also surface runtime environment metadata such as
+  `invocation_name`,
   `runtime_default_profile_name` and `runtime_profile_names`
 
 Run bundle versioning:

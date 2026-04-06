@@ -14,6 +14,9 @@ generated artifact.
 2. `mentalmodel docs`
 3. `mentalmodel doctor`
 4. `mentalmodel verify`
+   Use `--params-json` or `--params-file` when the workflow entrypoint is parameterized.
+   Use `--environment-entrypoint` when the runtime environment is built separately.
+   Prefer `--spec` when the project already has a TOML invocation spec.
 5. `mentalmodel runs latest --graph-id <graph_id>`
 6. `mentalmodel otel show-config` if tracing/export looks suspicious
 7. `mentalmodel replay --graph-id <graph_id>`

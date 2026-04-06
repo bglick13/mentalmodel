@@ -1,0 +1,9 @@
+[program]
+entrypoint = "mentalmodel.examples.runtime_environment.demo:build_program"
+
+[environment]
+entrypoint = "mentalmodel.examples.runtime_environment.demo:build_environment"
+
+[runtime]
+invocation_name = "runtime_environment_demo"
+runs_dir = "../../../../.runs"

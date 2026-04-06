@@ -118,6 +118,7 @@ class WarningFailInvariant(InvariantChecker[dict[str, object], JsonValue]):
 class FakeTracingAdapter:
     def __init__(self) -> None:
         self.span_names: list[str] = []
+        self.spans: list[RecordedSpan] = []
         self.sink_configured = False
         self.config = TracingConfig(
             service_name="mentalmodel-test",
@@ -131,12 +132,29 @@ class FakeTracingAdapter:
         *,
         attributes: dict[str, str] | None = None,
     ) -> Iterator[object]:
-        del attributes
+        attrs = dict(attributes or {})
         self.span_names.append(name)
-        yield object()
+        try:
+            yield object()
+        finally:
+            self.spans.append(
+                RecordedSpan(
+                    name=name,
+                    start_time_ns=0,
+                    end_time_ns=1,
+                    attributes=attrs,
+                    frame_id=attrs.get("mentalmodel.frame.id", "root"),
+                    loop_node_id=attrs.get("mentalmodel.loop.node_id"),
+                    iteration_index=(
+                        int(attrs["mentalmodel.loop.iteration_index"])
+                        if "mentalmodel.loop.iteration_index" in attrs
+                        else None
+                    ),
+                )
+            )
 
     def snapshot_spans(self) -> tuple[RecordedSpan, ...]:
-        return tuple()
+        return tuple(self.spans)
 
     def flush(self) -> None:
         return None
@@ -524,13 +542,31 @@ class ExecutorTest(unittest.TestCase):
 
     def test_executor_uses_tracing_adapter_for_node_spans(self) -> None:
         tracing = FakeTracingAdapter()
-        asyncio.run(AsyncExecutor(tracing=cast(TracingAdapter, tracing)).run(build_program()))
+        asyncio.run(
+            AsyncExecutor(
+                tracing=cast(TracingAdapter, tracing),
+                invocation_name="async_rl_smoke",
+            ).run(build_program())
+        )
         self.assertIn("actor:batch_source", tracing.span_names)
         self.assertIn("effect:sample_policy", tracing.span_names)
+        spans = tracing.snapshot_spans()
+        self.assertGreaterEqual(len(spans), 1)
+        self.assertTrue(
+            any(
+                span.attributes.get("mentalmodel.invocation.name") == "async_rl_smoke"
+                for span in spans
+            )
+        )
 
     def test_executor_emits_built_in_and_output_derived_metrics(self) -> None:
         metrics = RecordingMetricEmitter()
-        asyncio.run(AsyncExecutor(metrics=metrics).run(build_program()))
+        asyncio.run(
+            AsyncExecutor(
+                metrics=metrics,
+                invocation_name="async_rl_smoke",
+            ).run(build_program())
+        )
         metric_names = [observation.definition.name for observation in metrics.observations]
         self.assertIn("mentalmodel.run.started", metric_names)
         self.assertIn("mentalmodel.run.completed", metric_names)
@@ -561,6 +597,12 @@ class ExecutorTest(unittest.TestCase):
             if observation.definition.name == "mentalmodel.demo.learner_update.sample_count"
         )
         self.assertEqual(sample_count.value, 8)
+        run_started = next(
+            observation
+            for observation in metrics.observations
+            if observation.definition.name == "mentalmodel.run.started"
+        )
+        self.assertEqual(run_started.attributes["invocation_name"], "async_rl_smoke")
         self.assertEqual(metrics.flush_calls, 1)
 
     def test_metric_emission_failures_do_not_break_execution(self) -> None:

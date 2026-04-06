@@ -44,6 +44,7 @@ class MetricContext:
     runtime_context: str | None
     service_name: str
     runtime_profile: str | None = None
+    invocation_name: str | None = None
 
     def default_attributes(self) -> dict[str, MetricAttributeValue]:
         attributes: dict[str, MetricAttributeValue] = {
@@ -56,6 +57,8 @@ class MetricContext:
             attributes["runtime_context"] = self.runtime_context
         if self.runtime_profile is not None:
             attributes["runtime_profile"] = self.runtime_profile
+        if self.invocation_name is not None:
+            attributes["invocation_name"] = self.invocation_name
         return attributes
 
 
@@ -465,13 +468,13 @@ RUN_STARTED = MetricDefinition(
     name="mentalmodel.run.started",
     kind=MetricKind.COUNTER,
     description="Number of started mentalmodel runs.",
-    attribute_keys=("graph_id", "service_name", "runtime_profile"),
+    attribute_keys=("graph_id", "service_name", "runtime_profile", "invocation_name"),
 )
 RUN_COMPLETED = MetricDefinition(
     name="mentalmodel.run.completed",
     kind=MetricKind.COUNTER,
     description="Number of completed mentalmodel runs.",
-    attribute_keys=("graph_id", "service_name", "runtime_profile", "success"),
+    attribute_keys=("graph_id", "service_name", "runtime_profile", "invocation_name", "success"),
 )
 NODE_EXECUTIONS = MetricDefinition(
     name="mentalmodel.node.executions",
@@ -483,6 +486,7 @@ NODE_EXECUTIONS = MetricDefinition(
         "node_kind",
         "runtime_context",
         "runtime_profile",
+        "invocation_name",
     ),
 )
 NODE_DURATION_MS = MetricDefinition(
@@ -496,6 +500,7 @@ NODE_DURATION_MS = MetricDefinition(
         "node_kind",
         "runtime_context",
         "runtime_profile",
+        "invocation_name",
         "success",
     ),
 )
@@ -508,6 +513,7 @@ INVARIANT_FAILURES = MetricDefinition(
         "service_name",
         "runtime_context",
         "runtime_profile",
+        "invocation_name",
         "severity",
     ),
 )

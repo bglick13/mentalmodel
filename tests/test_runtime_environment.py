@@ -56,6 +56,7 @@ class RuntimeEnvironmentTest(unittest.TestCase):
                 build_program(),
                 runs_dir=root,
                 environment=build_environment(),
+                invocation_name="runtime_environment_demo",
             )
 
             self.assertTrue(report.success)
@@ -63,6 +64,7 @@ class RuntimeEnvironmentTest(unittest.TestCase):
                 runs_dir=root,
                 graph_id="runtime_environment_demo",
             )
+            self.assertEqual(summary.invocation_name, "runtime_environment_demo")
             self.assertIsNone(summary.runtime_default_profile_name)
             self.assertEqual(summary.runtime_profile_names, ("fixture", "real"))
 
@@ -74,6 +76,20 @@ class RuntimeEnvironmentTest(unittest.TestCase):
             )
             payload = cast(dict[str, JsonValue], records[-1]["payload"])
             self.assertEqual(payload["runtime_profile"], "fixture")
+
+    def test_run_records_include_invocation_name_on_spans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report = run_verification(
+                build_program(),
+                runs_dir=root,
+                environment=build_environment(),
+                invocation_name="runtime_environment_demo",
+            )
+            self.assertTrue(report.success)
+            spans_path = Path(cast(str, report.runtime.run_artifacts_dir)) / "otel-spans.jsonl"
+            raw = spans_path.read_text(encoding="utf-8")
+            self.assertIn('"mentalmodel.invocation.name": "runtime_environment_demo"', raw)
 
     def test_missing_runtime_profile_fails_for_declared_resources(self) -> None:
         environment = RuntimeEnvironment(

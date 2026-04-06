@@ -101,6 +101,7 @@ class ReplayReport:
             "schema_version": self.summary.schema_version,
             "run_id": self.summary.run_id,
             "created_at_ms": self.summary.created_at_ms,
+            "invocation_name": self.summary.invocation_name,
             "success": self.summary.success,
             "verification_success": self.verification_success,
             "runtime_error": self.runtime_error,
@@ -252,17 +253,24 @@ def build_replay_report(
     runs_dir: Path | None = None,
     graph_id: str,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     frame_id: str | None = None,
     loop_node_id: str | None = None,
     iteration_index: int | None = None,
 ) -> ReplayReport:
     """Build a normalized replay report for one persisted run."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     raw_records = load_run_records(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         frame_id=frame_id,
         loop_node_id=loop_node_id,
         iteration_index=iteration_index,
@@ -273,6 +281,7 @@ def build_replay_report(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         filename="outputs.json",
         key="framed_outputs",
         id_key="node_id",
@@ -284,6 +293,7 @@ def build_replay_report(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         filename="state.json",
         key="framed_state",
         frame_id=frame_id,
@@ -294,6 +304,7 @@ def build_replay_report(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         filename="verification.json",
     )
     return ReplayReport(
@@ -330,16 +341,19 @@ def build_run_diff(
         runs_dir=runs_dir,
         graph_id=summary_a.graph_id,
         run_id=summary_a.run_id,
+        invocation_name=summary_a.invocation_name,
     )
     records_b = load_run_records(
         runs_dir=runs_dir,
         graph_id=summary_b.graph_id,
         run_id=summary_b.run_id,
+        invocation_name=summary_b.invocation_name,
     )
     outputs_a = _load_framed_node_mapping(
         runs_dir=runs_dir,
         graph_id=summary_a.graph_id,
         run_id=summary_a.run_id,
+        invocation_name=summary_a.invocation_name,
         filename="outputs.json",
         key="framed_outputs",
         id_key="node_id",
@@ -348,6 +362,7 @@ def build_run_diff(
         runs_dir=runs_dir,
         graph_id=summary_b.graph_id,
         run_id=summary_b.run_id,
+        invocation_name=summary_b.invocation_name,
         filename="outputs.json",
         key="framed_outputs",
         id_key="node_id",
@@ -356,6 +371,7 @@ def build_run_diff(
         runs_dir=runs_dir,
         graph_id=summary_a.graph_id,
         run_id=summary_a.run_id,
+        invocation_name=summary_a.invocation_name,
         filename="state.json",
         key="framed_state",
     )
@@ -363,6 +379,7 @@ def build_run_diff(
         runs_dir=runs_dir,
         graph_id=summary_b.graph_id,
         run_id=summary_b.run_id,
+        invocation_name=summary_b.invocation_name,
         filename="state.json",
         key="framed_state",
     )
@@ -370,12 +387,14 @@ def build_run_diff(
         runs_dir=runs_dir,
         graph_id=summary_a.graph_id,
         run_id=summary_a.run_id,
+        invocation_name=summary_a.invocation_name,
         filename="verification.json",
     )
     verification_b = _load_optional_payload(
         runs_dir=runs_dir,
         graph_id=summary_b.graph_id,
         run_id=summary_b.run_id,
+        invocation_name=summary_b.invocation_name,
         filename="verification.json",
     )
 
@@ -759,6 +778,7 @@ def _load_framed_node_mapping(
     runs_dir: Path | None,
     graph_id: str,
     run_id: str,
+    invocation_name: str | None = None,
     filename: str,
     key: str,
     id_key: str,
@@ -770,6 +790,7 @@ def _load_framed_node_mapping(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
+        invocation_name=invocation_name,
         filename=filename,
     )
     raw = payload.get(key)
@@ -807,6 +828,7 @@ def _load_framed_state_mapping(
     runs_dir: Path | None,
     graph_id: str,
     run_id: str,
+    invocation_name: str | None = None,
     filename: str,
     key: str,
     frame_id: str | None = None,
@@ -817,6 +839,7 @@ def _load_framed_state_mapping(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
+        invocation_name=invocation_name,
         filename=filename,
     )
     raw = payload.get(key)
@@ -881,6 +904,7 @@ def _load_optional_payload(
     runs_dir: Path | None,
     graph_id: str,
     run_id: str,
+    invocation_name: str | None = None,
     filename: str,
 ) -> dict[str, JsonValue] | None:
     try:
@@ -888,6 +912,7 @@ def _load_optional_payload(
             runs_dir=runs_dir,
             graph_id=graph_id,
             run_id=run_id,
+            invocation_name=invocation_name,
             filename=filename,
         )
     except RunInspectionError:

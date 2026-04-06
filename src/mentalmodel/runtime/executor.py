@@ -48,6 +48,7 @@ class ExecutionResult:
     framed_state: tuple[FramedStateValue[RuntimeValue], ...]
     spans: tuple[RecordedSpan, ...]
     trace_summary: dict[str, str | bool | None]
+    invocation_name: str | None
     runtime_default_profile_name: str | None
     runtime_profile_names: tuple[str, ...]
 
@@ -64,6 +65,7 @@ class AsyncExecutor:
         metrics: MetricEmitter | None = None,
         tracing_config: TracingConfig | None = None,
         environment: RuntimeEnvironment = EMPTY_RUNTIME_ENVIRONMENT,
+        invocation_name: str | None = None,
     ) -> None:
         self.max_concurrency = max(1, max_concurrency)
         self.recorder = recorder or ExecutionRecorder()
@@ -71,6 +73,7 @@ class AsyncExecutor:
         metric_config = tracing_config if tracing_config is not None else self.tracing.config
         self.metrics = metrics or create_metric_emitter(config=metric_config)
         self.environment = environment
+        self.invocation_name = invocation_name
 
     async def run(self, program: Workflow[NamedPrimitive]) -> ExecutionResult:
         compiled = compile_program(program)
@@ -80,6 +83,7 @@ class AsyncExecutor:
             tracing=self.tracing,
             metrics=self.metrics,
             environment=self.environment,
+            invocation_name=self.invocation_name,
         )
         emit_metric_batch(self.metrics, [run_started_observation(context.metric_context())])
         outputs: dict[str, RuntimeValue]
@@ -104,6 +108,7 @@ class AsyncExecutor:
             framed_state=tuple(context.framed_state),
             spans=self.tracing.snapshot_spans(),
             trace_summary=self.tracing.trace_summary(),
+            invocation_name=self.invocation_name,
             runtime_default_profile_name=self.environment.default_profile_name,
             runtime_profile_names=self.environment.profile_names(),
         )

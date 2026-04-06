@@ -50,6 +50,7 @@ uv run mentalmodel check --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
+uv run mentalmodel verify --entrypoint mypkg.workflows:build_program --params-file verification/smoke.json
 uv run mentalmodel replay --graph-id async_rl_demo
 uv run mentalmodel otel show-config
 uv run mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
@@ -72,6 +73,14 @@ uv run mentalmodel demo autoresearch-sorting
 
 - `mentalmodel verify` persists a per-run bundle under `.runs/<graph_id>/<run_id>/`
   by default.
+- use `--params-json` or `--params-file` when the entrypoint is a workflow
+  factory that needs explicit invocation parameters
+- use `--environment-entrypoint` plus environment params when runtime binding is
+  intentionally separate from workflow construction
+- use `--spec` when a project has a durable TOML invocation spec for workflow +
+  environment + run metadata
+- use `--invocation-name` to distinguish smoke, shadow, and production-like
+  runs even when graph ids are shared
 - Treat `.runs` as the primary debugging surface for runtime behavior.
 - Useful files include `summary.json`, `verification.json`, `records.jsonl`,
   `outputs.json`, `state.json`, and `otel-spans.jsonl`.

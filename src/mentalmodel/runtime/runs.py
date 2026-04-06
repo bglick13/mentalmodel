@@ -21,7 +21,7 @@ from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 
 RUNS_DIRNAME = ".runs"
-RUN_SCHEMA_VERSION = 5
+RUN_SCHEMA_VERSION = 6
 
 
 @dataclass(slots=True, frozen=True)
@@ -58,6 +58,7 @@ class RunSummary:
     trace_mirror_to_disk: bool
     trace_capture_local_spans: bool
     trace_service_name: str
+    invocation_name: str | None
     runtime_default_profile_name: str | None
     runtime_profile_names: tuple[str, ...]
 
@@ -136,6 +137,7 @@ def write_run_artifacts(
     verification_payload: dict[str, object] | None = None,
     trace_sink_configured: bool,
     trace_summary: dict[str, str | bool | None],
+    invocation_name: str | None,
     runtime_default_profile_name: str | None,
     runtime_profile_names: tuple[str, ...],
 ) -> RunArtifacts:
@@ -174,6 +176,7 @@ def write_run_artifacts(
                 trace_summary, "trace_capture_local_spans"
             ),
             "trace_service_name": _require_summary_str(trace_summary, "trace_service_name"),
+            "invocation_name": invocation_name,
             "runtime_default_profile_name": runtime_default_profile_name,
             "runtime_profile_names": list(runtime_profile_names),
         },
@@ -216,6 +219,7 @@ def list_run_summaries(
     *,
     runs_dir: Path | None = None,
     graph_id: str | None = None,
+    invocation_name: str | None = None,
 ) -> tuple[RunSummary, ...]:
     """Return persisted run summaries sorted newest-first."""
 
@@ -233,7 +237,10 @@ def list_run_summaries(
             summary_path = run_dir / "summary.json"
             if not summary_path.exists():
                 continue
-            summaries.append(load_run_summary(run_dir))
+            summary = load_run_summary(run_dir)
+            if invocation_name is not None and summary.invocation_name != invocation_name:
+                continue
+            summaries.append(summary)
     return tuple(
         sorted(
             summaries,
@@ -248,10 +255,15 @@ def resolve_run_summary(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
 ) -> RunSummary:
     """Resolve one run summary by id or return the newest matching run."""
 
-    summaries = list_run_summaries(runs_dir=runs_dir, graph_id=graph_id)
+    summaries = list_run_summaries(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        invocation_name=invocation_name,
+    )
     if not summaries:
         raise RunInspectionError(
             f"No runs found under {default_runs_dir(root=runs_dir)}."
@@ -291,6 +303,7 @@ def load_run_summary(run_dir: Path) -> RunSummary:
         trace_mirror_to_disk=_require_bool(summary_payload, "trace_mirror_to_disk"),
         trace_capture_local_spans=_require_bool(summary_payload, "trace_capture_local_spans"),
         trace_service_name=_require_str(summary_payload, "trace_service_name"),
+        invocation_name=_optional_str(summary_payload, "invocation_name"),
         runtime_default_profile_name=_optional_str(
             summary_payload, "runtime_default_profile_name"
         ),
@@ -303,11 +316,17 @@ def load_run_payload(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     filename: str,
 ) -> dict[str, JsonValue]:
     """Load one JSON payload from a resolved run bundle."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     return read_json(summary.run_dir / filename)
 
 
@@ -364,6 +383,7 @@ def load_run_records(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str | None = None,
     event_type: str | None = None,
     frame_id: str | None = None,
@@ -372,7 +392,12 @@ def load_run_records(
 ) -> tuple[dict[str, JsonValue], ...]:
     """Load JSONL execution records from a resolved run bundle."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     records_path = summary.run_dir / "records.jsonl"
     if not records_path.exists():
         raise RunInspectionError(f"Run {summary.run_id!r} does not contain records.jsonl.")
@@ -409,6 +434,7 @@ def load_run_spans(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str | None = None,
     frame_id: str | None = None,
     loop_node_id: str | None = None,
@@ -416,7 +442,12 @@ def load_run_spans(
 ) -> tuple[dict[str, JsonValue], ...]:
     """Load JSONL span records from a resolved run bundle."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     spans_path = summary.run_dir / "otel-spans.jsonl"
     if not spans_path.exists():
         return tuple()
@@ -448,6 +479,7 @@ def load_run_node_output(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str,
     frame_id: str | None = None,
     loop_node_id: str | None = None,
@@ -459,6 +491,7 @@ def load_run_node_output(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
+        invocation_name=invocation_name,
         filename="outputs.json",
     )
     scope = RunFrameScope(
@@ -499,6 +532,7 @@ def load_run_node_inputs(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str,
     frame_id: str | None = None,
     loop_node_id: str | None = None,
@@ -510,6 +544,7 @@ def load_run_node_inputs(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
+        invocation_name=invocation_name,
         node_id=node_id,
         event_type="node.inputs_resolved",
         frame_id=frame_id,
@@ -552,6 +587,7 @@ def load_run_node_trace(
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
+    invocation_name: str | None = None,
     node_id: str,
     event_type: str | None = None,
     frame_id: str | None = None,
@@ -560,11 +596,17 @@ def load_run_node_trace(
 ) -> RunNodeTrace:
     """Load the semantic trace for one node in one run."""
 
-    summary = resolve_run_summary(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
     records = load_run_records(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         node_id=node_id,
         event_type=event_type,
         frame_id=frame_id,
@@ -575,6 +617,7 @@ def load_run_node_trace(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
+        invocation_name=summary.invocation_name,
         node_id=node_id,
         frame_id=frame_id,
         loop_node_id=loop_node_id,
@@ -733,6 +776,7 @@ def normalize_summary_payload(
             payload, "trace_capture_local_spans", default=True
         ),
         "trace_service_name": _optional_str(payload, "trace_service_name") or "mentalmodel",
+        "invocation_name": _optional_str(payload, "invocation_name"),
         "runtime_default_profile_name": _optional_str(payload, "runtime_default_profile_name"),
         "runtime_profile_names": cast(
             JsonValue,
