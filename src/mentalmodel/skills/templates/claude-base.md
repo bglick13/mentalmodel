@@ -26,8 +26,11 @@ authoring model.
 - Keep dependencies explicit with `Ref`.
 - Prefer primitive-local `metrics=[...]` over custom instrumentation inside
   handlers when you need output-derived metrics.
-- Use `infer_output_metrics(...)` for flat bounded numeric summaries and
-  `extract_output_metrics(...)` for typed aggregation of richer outputs.
+- Use `infer_output_metrics(...)` for flat bounded numeric summaries.
+- Use `project_metric_map(...)` or `project_flat_metric_map(...)` for stable
+  named fields from richer provider metric maps.
+- Use `extract_output_metrics(...)` for typed aggregation when projection alone
+  is not enough.
 - Preserve strong typing and generics.
 - Run `mentalmodel doctor` when setup, entrypoints, installed skills, or
   tracing look suspicious.

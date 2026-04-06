@@ -9,15 +9,11 @@ from mentalmodel.core import (
     Invariant,
     InvariantChecker,
     InvariantResult,
-    MetricContext,
-    MetricExtractor,
-    MetricObservation,
     Ref,
     Workflow,
-    extract_output_metrics,
+    project_flat_metric_map,
 )
 from mentalmodel.integrations.autoresearch.plugin import AutoResearch, AutoResearchOutput
-from mentalmodel.observability.metrics import MetricDefinition, MetricKind
 from mentalmodel.optimization import (
     ObjectiveAggregation,
     ObjectiveDirection,
@@ -69,38 +65,6 @@ CandidateSortingNode: TypeAlias = (
 )
 
 
-@dataclass(slots=True, frozen=True)
-class AutoResearchMetricsExtractor(MetricExtractor[AutoResearchOutput]):
-    prefix: str
-
-    def extract(
-        self,
-        output: AutoResearchOutput,
-        context: MetricContext,
-    ) -> tuple[MetricObservation, ...]:
-        attributes = context.default_attributes()
-        return (
-            MetricObservation(
-                definition=MetricDefinition(
-                    name=f"{self.prefix}.best_score",
-                    kind=MetricKind.HISTOGRAM,
-                    description="Best objective score returned by the search.",
-                ),
-                value=float(output["best_score"]),
-                attributes=dict(attributes),
-            ),
-            MetricObservation(
-                definition=MetricDefinition(
-                    name=f"{self.prefix}.successful_candidate_count",
-                    kind=MetricKind.HISTOGRAM,
-                    description="Number of successful candidates in the bounded search set.",
-                ),
-                value=float(output["successful_candidate_count"]),
-                attributes=dict(attributes),
-            ),
-        )
-
-
 class SearchResultInvariant(InvariantChecker[SortInvariantInputs, float]):
     async def check(
         self,
@@ -128,10 +92,10 @@ def build_program() -> Workflow[SortingDemoNode]:
                         objective=build_objective(),
                         candidates=SORT_CANDIDATES,
                         metrics=[
-                            extract_output_metrics(
-                                AutoResearchMetricsExtractor(
-                                    prefix="mentalmodel.demo.autoresearch"
-                                )
+                            project_flat_metric_map(
+                                prefix="mentalmodel.demo.autoresearch",
+                                fields=("best_score", "successful_candidate_count"),
+                                accessor=autoresearch_metric_map,
                             )
                         ],
                     ),
@@ -163,37 +127,18 @@ def run_search() -> SearchResult[SortAlgorithm]:
     return search_objective(build_objective(), SORT_CANDIDATES)
 
 
-@dataclass(slots=True, frozen=True)
-class SortingMetricsExtractor(MetricExtractor[SortExecutionOutput]):
-    prefix: str
+def autoresearch_metric_map(output: AutoResearchOutput) -> dict[str, float]:
+    return {
+        "best_score": float(output["best_score"]),
+        "successful_candidate_count": float(output["successful_candidate_count"]),
+    }
 
-    def extract(
-        self,
-        output: SortExecutionOutput,
-        context: MetricContext,
-    ) -> tuple[MetricObservation, ...]:
-        attributes = context.default_attributes()
-        attributes["algorithm"] = output["algorithm"]
-        return (
-            MetricObservation(
-                definition=MetricDefinition(
-                    name=f"{self.prefix}.comparison_count",
-                    kind=MetricKind.HISTOGRAM,
-                    description="Total comparison count across the sorting dataset.",
-                ),
-                value=output["comparison_count"],
-                attributes=dict(attributes),
-            ),
-            MetricObservation(
-                definition=MetricDefinition(
-                    name=f"{self.prefix}.success_score",
-                    kind=MetricKind.HISTOGRAM,
-                    description="Structured success score for the sorting run.",
-                ),
-                value=output["success_score"],
-                attributes=dict(attributes),
-            ),
-        )
+
+def sorting_metric_map(output: SortExecutionOutput) -> dict[str, float]:
+    return {
+        "comparison_count": float(output["comparison_count"]),
+        "success_score": float(output["success_score"]),
+    }
 
 
 @dataclass(slots=True)
@@ -247,8 +192,10 @@ def build_candidate_program(algorithm: SortAlgorithm) -> Workflow[CandidateSorti
                         "sort_arrays",
                         handler=SortArrays(algorithm=algorithm),
                         metrics=[
-                            extract_output_metrics(
-                                SortingMetricsExtractor(prefix="mentalmodel.demo.sorting")
+                            project_flat_metric_map(
+                                prefix="mentalmodel.demo.sorting",
+                                fields=("comparison_count", "success_score"),
+                                accessor=sorting_metric_map,
                             )
                         ],
                     ),

@@ -27,7 +27,12 @@ from mentalmodel.examples.autoresearch_sorting.demo import (
 )
 from mentalmodel.integrations.autoresearch.plugin import AutoResearchOutput
 from mentalmodel.observability.config import TracingConfig, TracingMode
-from mentalmodel.observability.metrics import MetricObservation
+from mentalmodel.observability.metrics import (
+    MetricFieldProjection,
+    MetricMapProjection,
+    MetricObservation,
+    project_metric_map,
+)
 from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter
 from mentalmodel.plugins.runtime_context import RuntimeContext
 from mentalmodel.runtime import compile_program
@@ -65,6 +70,23 @@ class ExplodingEffect(EffectHandler[dict[str, object], str]):
     ) -> str:
         del inputs, ctx
         raise RuntimeError("boom")
+
+
+class ProviderMetricMapEffect(EffectHandler[dict[str, object], dict[str, object]]):
+    async def invoke(
+        self,
+        inputs: dict[str, object],
+        ctx: ExecutionContext,
+    ) -> dict[str, object]:
+        del inputs, ctx
+        return {
+            "optimizer_metrics": {
+                "loss": 1.25,
+                "approx_kl": 0.03,
+                "tokens_per_second": 420.0,
+            },
+            "status": "ok",
+        }
 
 
 class AlwaysFailInvariant(InvariantChecker[dict[str, object], JsonValue]):
@@ -544,6 +566,46 @@ class ExecutorTest(unittest.TestCase):
     def test_metric_emission_failures_do_not_break_execution(self) -> None:
         result = asyncio.run(AsyncExecutor(metrics=RaisingMetricEmitter()).run(build_program()))
         self.assertIn("refresh_sampler", result.outputs)
+
+    def test_executor_preserves_raw_metric_map_and_emits_projected_metrics(self) -> None:
+        metrics = RecordingMetricEmitter()
+        program = Workflow(
+            "metric_map_projection_demo",
+            children=(
+                Effect(
+                    "optimizer_update",
+                    handler=ProviderMetricMapEffect(),
+                    metrics=[
+                        project_metric_map(
+                            MetricMapProjection(
+                                metric_map_key="optimizer_metrics",
+                                metric_name_prefix="mentalmodel.demo.optimizer",
+                                fields=(
+                                    MetricFieldProjection(
+                                        source_key="loss",
+                                        metric_name="loss",
+                                    ),
+                                    MetricFieldProjection(
+                                        source_key="approx_kl",
+                                        metric_name="approx_kl",
+                                    ),
+                                ),
+                            )
+                        )
+                    ],
+                ),
+            ),
+        )
+        result = asyncio.run(AsyncExecutor(metrics=metrics).run(program))
+        optimizer_output = cast(dict[str, object], result.outputs["optimizer_update"])
+        raw_metrics = cast(dict[str, float], optimizer_output["optimizer_metrics"])
+        self.assertEqual(raw_metrics["loss"], 1.25)
+        self.assertEqual(raw_metrics["approx_kl"], 0.03)
+        self.assertEqual(raw_metrics["tokens_per_second"], 420.0)
+        metric_names = [observation.definition.name for observation in metrics.observations]
+        self.assertIn("mentalmodel.demo.optimizer.loss", metric_names)
+        self.assertIn("mentalmodel.demo.optimizer.approx_kl", metric_names)
+        self.assertNotIn("mentalmodel.demo.optimizer.tokens_per_second", metric_names)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ Today this is supported on:
 
 through the `metrics=[...]` parameter.
 
-There are two main ways to do it.
+There are three main ways to do it.
 
 ## `infer_output_metrics(...)`
 
@@ -153,7 +153,71 @@ This path is what you want for:
 - dynamic maps
 - aggregated reward summaries
 - domain-specific counters
-- provider-native metric projections
+- custom projections that need logic beyond named-field selection
+
+## `project_metric_map(...)` and `project_flat_metric_map(...)`
+
+Use these when the node output already contains stable numeric fields and you
+want a small exported subset without writing a custom extractor class.
+
+This is the intended path for provider-native metric maps such as
+`optimizer_metrics`, where you want to preserve the full raw map in the output
+and `.runs`, but only emit a few stable fields as metrics.
+
+```python
+from mentalmodel import (
+    Effect,
+    MetricFieldProjection,
+    MetricMapProjection,
+    Ref,
+    project_metric_map,
+)
+
+
+Effect(
+    "optimizer_update",
+    handler=OptimizerUpdate(),
+    inputs=[Ref("rollout_join")],
+    metrics=[
+        project_metric_map(
+            MetricMapProjection(
+                metric_map_key="optimizer_metrics",
+                metric_name_prefix="mentalmodel.demo.optimizer",
+                fields=(
+                    MetricFieldProjection("loss", "loss"),
+                    MetricFieldProjection("approx_kl", "approx_kl"),
+                ),
+            )
+        )
+    ],
+)
+```
+
+For typed outputs that are not already shaped like a nested metric map, use the
+flat helper with an accessor:
+
+```python
+from mentalmodel import project_flat_metric_map
+
+
+metrics = [
+    project_flat_metric_map(
+        prefix="mentalmodel.demo.answer",
+        fields=("total_monthly_cost", "success_score"),
+        accessor=lambda output: {
+            "total_monthly_cost": output["total_monthly_cost"],
+            "success_score": output["success_score"],
+        },
+    )
+]
+```
+
+Projection helpers are intentionally conservative:
+
+- they only emit explicitly named fields
+- missing fields are skipped
+- non-numeric values are skipped
+- they do not automatically export every key in a provider map
 
 ## Important design rule
 
@@ -169,7 +233,8 @@ For example, this output:
 }
 ```
 
-should usually be aggregated first, not exported directly as metrics.
+should usually be aggregated first with `extract_output_metrics(...)`, not
+exported directly as metrics.
 
 That kind of data belongs better in:
 

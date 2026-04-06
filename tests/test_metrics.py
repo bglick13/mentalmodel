@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Mapping
 from typing import cast
 
 from mentalmodel.observability.metrics import (
     MetricContext,
     MetricDefinition,
+    MetricFieldProjection,
     MetricKind,
+    MetricMapProjection,
     MetricObservation,
     OutputMetricSpec,
     cast_metric_specs,
@@ -14,6 +17,8 @@ from mentalmodel.observability.metrics import (
     extract_output_metrics,
     infer_output_metric_observations,
     infer_output_metrics,
+    project_flat_metric_map,
+    project_metric_map,
 )
 
 
@@ -103,6 +108,135 @@ class MetricsTest(unittest.TestCase):
             "mentalmodel.demo.learner_update.updated_policy_version",
             metric_names,
         )
+
+    def test_project_metric_map_projects_stable_subset_from_nested_map(self) -> None:
+        context = MetricContext(
+            graph_id="graph",
+            run_id="run-1",
+            node_id="optimizer_update",
+            node_kind="effect",
+            runtime_context="trainer",
+            service_name="mentalmodel-test",
+        )
+        raw_output = {
+            "optimizer_metrics": {
+                "loss": 1.25,
+                "approx_kl": 0.03,
+                "tokens_per_second": 420.0,
+            },
+            "status": "ok",
+        }
+        spec: OutputMetricSpec[dict[str, object]] = project_metric_map(
+            MetricMapProjection(
+                metric_map_key="optimizer_metrics",
+                metric_name_prefix="mentalmodel.demo.optimizer",
+                fields=(
+                    MetricFieldProjection(
+                        source_key="loss",
+                        metric_name="loss",
+                        description="Provider loss metric.",
+                    ),
+                    MetricFieldProjection(
+                        source_key="approx_kl",
+                        metric_name="approx_kl",
+                    ),
+                ),
+            )
+        )
+        observations = derive_output_metrics(
+            output=raw_output,
+            context=context,
+            specs=cast_metric_specs((spec,)),
+        )
+        self.assertEqual(
+            [observation.definition.name for observation in observations],
+            [
+                "mentalmodel.demo.optimizer.loss",
+                "mentalmodel.demo.optimizer.approx_kl",
+            ],
+        )
+        self.assertEqual([observation.value for observation in observations], [1.25, 0.03])
+        raw_metrics = cast(dict[str, float], raw_output["optimizer_metrics"])
+        self.assertEqual(raw_metrics["tokens_per_second"], 420.0)
+
+    def test_project_flat_metric_map_uses_accessor_for_typed_output(self) -> None:
+        context = MetricContext(
+            graph_id="graph",
+            run_id="run-1",
+            node_id="answer_synthesizer",
+            node_kind="effect",
+            runtime_context="local",
+            service_name="mentalmodel-test",
+        )
+
+        def answer_metric_map(output: object) -> Mapping[str, object] | None:
+            if not isinstance(output, Mapping):
+                return None
+            return {
+                "total_monthly_cost": output["total_monthly_cost"],
+                "success_score": output["success_score"],
+                "tool_call_count": output["tool_call_count"],
+            }
+
+        spec = project_flat_metric_map(
+            prefix="mentalmodel.demo.answer",
+            fields=("total_monthly_cost", "success_score"),
+            accessor=answer_metric_map,
+        )
+        observations = derive_output_metrics(
+            output={
+                "total_monthly_cost": 51.0,
+                "success_score": 1.0,
+                "tool_call_count": 3,
+            },
+            context=context,
+            specs=cast_metric_specs((spec,)),
+        )
+        self.assertEqual(
+            [observation.definition.name for observation in observations],
+            [
+                "mentalmodel.demo.answer.total_monthly_cost",
+                "mentalmodel.demo.answer.success_score",
+            ],
+        )
+
+    def test_project_metric_map_skips_missing_and_non_numeric_fields(self) -> None:
+        context = MetricContext(
+            graph_id="graph",
+            run_id="run-1",
+            node_id="optimizer_update",
+            node_kind="effect",
+            runtime_context="trainer",
+            service_name="mentalmodel-test",
+        )
+        spec: OutputMetricSpec[dict[str, object]] = project_metric_map(
+            MetricMapProjection(
+                metric_map_key="optimizer_metrics",
+                fields=(
+                    MetricFieldProjection(source_key="loss", metric_name="loss"),
+                    MetricFieldProjection(source_key="status", metric_name="status"),
+                    MetricFieldProjection(source_key="missing", metric_name="missing"),
+                ),
+            )
+        )
+        observations = derive_output_metrics(
+            output={"optimizer_metrics": {"loss": 1.25, "status": "ok"}},
+            context=context,
+            specs=cast_metric_specs((spec,)),
+        )
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].definition.name, "loss")
+        self.assertEqual(observations[0].value, 1.25)
+
+    def test_metric_map_projection_rejects_duplicate_emitted_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate metric name"):
+            MetricMapProjection(
+                metric_name_prefix="mentalmodel.demo.optimizer",
+                fields=(
+                    MetricFieldProjection(source_key="loss", metric_name="shared"),
+                    MetricFieldProjection(source_key="approx_kl", metric_name="shared"),
+                ),
+            )
 
 
 if __name__ == "__main__":

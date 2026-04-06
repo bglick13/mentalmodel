@@ -17,7 +17,9 @@ from mentalmodel.core import (
     MetricContext,
     MetricDefinition,
     MetricExtractor,
+    MetricFieldProjection,
     MetricKind,
+    MetricMapProjection,
     MetricObservation,
     OutputMetricSpec,
     Parallel,
@@ -28,6 +30,8 @@ from mentalmodel.core import (
     Workflow,
     extract_output_metrics,
     infer_output_metrics,
+    project_flat_metric_map,
+    project_metric_map,
 )
 from mentalmodel.environment import ResourceKey, RuntimeEnvironment, RuntimeProfile
 from mentalmodel.integrations.autoresearch import AutoResearch
@@ -58,7 +62,9 @@ __all__ = [
     "MetricContext",
     "MetricDefinition",
     "MetricExtractor",
+    "MetricFieldProjection",
     "MetricKind",
+    "MetricMapProjection",
     "MetricObservation",
     "OutputMetricSpec",
     "Invariant",
@@ -86,5 +92,7 @@ __all__ = [
     "evaluate_objective",
     "extract_output_metrics",
     "infer_output_metrics",
+    "project_flat_metric_map",
+    "project_metric_map",
     "search_objective",
 ]

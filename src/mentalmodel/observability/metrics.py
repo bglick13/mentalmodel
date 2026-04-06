@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Generic, Protocol, TextIO, TypeVar, cast
@@ -79,6 +79,46 @@ class MetricObservation:
     attributes: dict[str, MetricAttributeValue] = field(default_factory=dict)
 
 
+@dataclass(slots=True, frozen=True)
+class MetricFieldProjection:
+    """Stable projection of one numeric field from a provider metric map."""
+
+    source_key: str
+    metric_name: str
+    kind: MetricKind = MetricKind.HISTOGRAM
+    unit: str | None = None
+    description: str = ""
+    attributes: Mapping[str, MetricAttributeValue] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class MetricMapProjection:
+    """Projection policy for a stable subset of one metric map."""
+
+    fields: tuple[MetricFieldProjection, ...]
+    metric_map_key: str | None = None
+    metric_name_prefix: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.fields:
+            raise ValueError("MetricMapProjection requires at least one projected field.")
+        emitted_names: set[str] = set()
+        for projection_field in self.fields:
+            if not projection_field.source_key:
+                raise ValueError("MetricFieldProjection.source_key must not be empty.")
+            metric_name = _projected_metric_name(
+                self.metric_name_prefix,
+                projection_field.metric_name,
+            )
+            if not metric_name:
+                raise ValueError("MetricFieldProjection.metric_name must not be empty.")
+            if metric_name in emitted_names:
+                raise ValueError(
+                    f"MetricMapProjection defines duplicate metric name {metric_name!r}."
+                )
+            emitted_names.add(metric_name)
+
+
 class MetricExtractor(Protocol[OutputT_contra]):
     """Extract metric observations from one typed node output."""
 
@@ -99,6 +139,9 @@ class OutputMetricSpec(Generic[OutputT]):
     prefix: str | None = None
 
 
+MetricMapAccessor = Callable[[OutputT], Mapping[str, object] | None]
+
+
 def infer_output_metrics(*, prefix: str | None = None) -> OutputMetricSpec[OutputT]:
     """Create a spec that safely infers metrics from flat numeric summaries."""
 
@@ -111,6 +154,48 @@ def extract_output_metrics(
     """Create a spec that emits metrics through one explicit extractor."""
 
     return OutputMetricSpec(extractor=extractor, infer_summary_metrics=False, prefix=None)
+
+
+def project_metric_map(
+    projection: MetricMapProjection,
+    *,
+    accessor: MetricMapAccessor[OutputT] | None = None,
+) -> OutputMetricSpec[OutputT]:
+    """Project a stable numeric subset from a typed provider metric map."""
+
+    return extract_output_metrics(
+        _MetricMapProjectionExtractor(
+            projection=projection,
+            accessor=accessor,
+        )
+    )
+
+
+def project_flat_metric_map(
+    *,
+    prefix: str,
+    fields: Sequence[str],
+    metric_map_key: str | None = None,
+    accessor: MetricMapAccessor[OutputT] | None = None,
+    kind: MetricKind = MetricKind.HISTOGRAM,
+) -> OutputMetricSpec[OutputT]:
+    """Project named numeric fields under one stable metric prefix."""
+
+    return project_metric_map(
+        MetricMapProjection(
+            metric_map_key=metric_map_key,
+            metric_name_prefix=prefix,
+            fields=tuple(
+                MetricFieldProjection(
+                    source_key=field_name,
+                    metric_name=field_name,
+                    kind=kind,
+                )
+                for field_name in fields
+            ),
+        ),
+        accessor=accessor,
+    )
 
 
 class MetricEmitter(Protocol):
@@ -213,6 +298,49 @@ class OTelMetricEmitter:
         return instrument
 
 
+@dataclass(slots=True, frozen=True)
+class _MetricMapProjectionExtractor(Generic[OutputT]):
+    projection: MetricMapProjection
+    accessor: MetricMapAccessor[OutputT] | None = None
+
+    def extract(
+        self,
+        output: OutputT,
+        context: MetricContext,
+    ) -> Sequence[MetricObservation]:
+        metric_map = _resolve_metric_map(
+            output=output,
+            metric_map_key=self.projection.metric_map_key,
+            accessor=self.accessor,
+        )
+        if metric_map is None:
+            return tuple()
+        base_attributes = context.default_attributes()
+        observations: list[MetricObservation] = []
+        for projection_field in self.projection.fields:
+            numeric_value = _projectable_numeric(metric_map.get(projection_field.source_key))
+            if numeric_value is None:
+                continue
+            attributes = dict(base_attributes)
+            attributes.update(projection_field.attributes)
+            observations.append(
+                MetricObservation(
+                    definition=MetricDefinition(
+                        name=_projected_metric_name(
+                            self.projection.metric_name_prefix,
+                            projection_field.metric_name,
+                        ),
+                        kind=projection_field.kind,
+                        description=projection_field.description,
+                        unit=projection_field.unit,
+                    ),
+                    value=numeric_value,
+                    attributes=attributes,
+                )
+            )
+        return tuple(observations)
+
+
 def create_metric_emitter(
     *,
     config: TracingConfig | None = None,
@@ -237,6 +365,38 @@ def create_metric_emitter(
         counters={},
         histograms={},
     )
+
+
+def _resolve_metric_map(
+    *,
+    output: OutputT,
+    metric_map_key: str | None,
+    accessor: MetricMapAccessor[OutputT] | None,
+) -> Mapping[str, object] | None:
+    if accessor is not None:
+        return accessor(output)
+    if metric_map_key is None:
+        if not isinstance(output, Mapping):
+            return None
+        return cast(Mapping[str, object], output)
+    if not isinstance(output, Mapping):
+        return None
+    nested_value = output.get(metric_map_key)
+    if not isinstance(nested_value, Mapping):
+        return None
+    return cast(Mapping[str, object], nested_value)
+
+
+def _projectable_numeric(value: object) -> int | float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return value
+
+
+def _projected_metric_name(prefix: str | None, metric_name: str) -> str:
+    if prefix is None:
+        return metric_name
+    return f"{prefix}.{metric_name}"
 
 
 def derive_output_metrics(

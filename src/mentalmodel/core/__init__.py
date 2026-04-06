@@ -30,11 +30,15 @@ from mentalmodel.observability.metrics import (
     MetricContext,
     MetricDefinition,
     MetricExtractor,
+    MetricFieldProjection,
     MetricKind,
+    MetricMapProjection,
     MetricObservation,
     OutputMetricSpec,
     extract_output_metrics,
     infer_output_metrics,
+    project_flat_metric_map,
+    project_metric_map,
 )
 
 __all__ = [
@@ -61,7 +65,9 @@ __all__ = [
     "MetricContext",
     "MetricDefinition",
     "MetricExtractor",
+    "MetricFieldProjection",
     "MetricKind",
+    "MetricMapProjection",
     "MetricObservation",
     "NamedPrimitive",
     "OutputMetricSpec",
@@ -78,4 +84,6 @@ __all__ = [
     "Workflow",
     "extract_output_metrics",
     "infer_output_metrics",
+    "project_flat_metric_map",
+    "project_metric_map",
 ]

@@ -37,8 +37,10 @@ authoring model.
 - Prefer primitive-local `metrics=[...]` over ad hoc observability code inside
   handlers when you need output-derived metrics.
 - Use `infer_output_metrics(...)` only for flat, bounded numeric summaries.
+- Use `project_metric_map(...)` or `project_flat_metric_map(...)` when you need
+  to preserve a rich provider metric map but export a stable named subset.
 - Use `extract_output_metrics(...)` with a typed extractor when the output shape
-  needs aggregation before it is safe to emit as metrics.
+  needs real aggregation before it is safe to emit as metrics.
 - Preserve strong typing and generics. Do not introduce `Any` to move faster.
 
 ## Useful commands

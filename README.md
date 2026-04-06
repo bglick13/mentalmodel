@@ -168,6 +168,9 @@ Metric emission:
   expose domain metrics without bypassing the semantic runtime
 - use `infer_output_metrics(...)` for safe flat numeric summaries such as
   `{"sample_count": 8, "updated_policy_version": 4}`
+- use `project_metric_map(...)` or `project_flat_metric_map(...)` when you want
+  to preserve a rich provider-native metric map in the output but emit only a
+  stable named subset as metrics
 - use `extract_output_metrics(...)` with a typed extractor for richer or
   aggregated output-derived metrics such as reward means/counts from dynamic
   per-sample maps
