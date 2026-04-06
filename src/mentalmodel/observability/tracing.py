@@ -26,6 +26,9 @@ class RecordedSpan:
     start_time_ns: int
     end_time_ns: int
     attributes: dict[str, str]
+    frame_id: str
+    loop_node_id: str | None
+    iteration_index: int | None
     error_type: str | None = None
     error_message: str | None = None
 
@@ -53,9 +56,10 @@ class TracingAdapter:
         start_time_ns = time.time_ns()
         error_type: str | None = None
         error_message: str | None = None
+        attrs = dict(attributes or {})
         with self.tracer.start_as_current_span(
             name=name,
-            attributes=dict(attributes or {}),
+            attributes=attrs,
         ) as span:
             try:
                 yield span
@@ -70,7 +74,10 @@ class TracingAdapter:
                             name=name,
                             start_time_ns=start_time_ns,
                             end_time_ns=time.time_ns(),
-                            attributes=dict(attributes or {}),
+                            attributes=attrs,
+                            frame_id=_span_frame_id(attrs),
+                            loop_node_id=_span_loop_node_id(attrs),
+                            iteration_index=_span_iteration_index(attrs),
                             error_type=error_type,
                             error_message=error_message,
                         )
@@ -153,3 +160,22 @@ def create_tracing_adapter(
 
     resolved = config or load_tracing_config(service_name=service_name)
     return TracingFactory(resolved).create()
+
+
+def _span_frame_id(attributes: Mapping[str, str]) -> str:
+    return attributes.get("mentalmodel.frame.id", "root")
+
+
+def _span_loop_node_id(attributes: Mapping[str, str]) -> str | None:
+    value = attributes.get("mentalmodel.loop.node_id")
+    return value if value is not None else None
+
+
+def _span_iteration_index(attributes: Mapping[str, str]) -> int | None:
+    value = attributes.get("mentalmodel.loop.iteration_index")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None

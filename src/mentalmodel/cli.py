@@ -298,11 +298,21 @@ def run_replay(
     runs_dir: Path | None = None,
     graph_id: str,
     run_id: str | None = None,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
     json_output: bool = False,
 ) -> int:
     """Replay one persisted run as a semantic timeline."""
 
-    report = build_replay_report(runs_dir=runs_dir, graph_id=graph_id, run_id=run_id)
+    report = build_replay_report(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
+    )
     if json_output:
         print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
         return 0
@@ -322,6 +332,7 @@ def run_replay(
             if report.verification_success is True
             else "no" if report.verification_success is False else "unknown",
         ),
+        ("Frames", str(len(report.frame_ids))),
         ("Events", str(len(report.events))),
         ("Nodes", str(len(report.node_summaries))),
         ("Runtime Error", report.runtime_error or ""),
@@ -331,6 +342,7 @@ def run_replay(
 
     events = Table(title="Replay Events")
     events.add_column("Seq", justify="right")
+    events.add_column("Frame")
     events.add_column("Node")
     events.add_column("Event")
     events.add_column("Timestamp", justify="right")
@@ -338,6 +350,7 @@ def run_replay(
     for event in report.events:
         events.add_row(
             str(event.sequence),
+            event.frame_id,
             event.node_id,
             event.event_type,
             str(event.timestamp_ms),
@@ -347,6 +360,8 @@ def run_replay(
 
     nodes = Table(title="Replay Node Summary")
     nodes.add_column("Node")
+    nodes.add_column("Frame")
+    nodes.add_column("Iteration", justify="right")
     nodes.add_column("Events", justify="right")
     nodes.add_column("First Seq", justify="right")
     nodes.add_column("Last Seq", justify="right")
@@ -355,6 +370,8 @@ def run_replay(
     for node_summary in report.node_summaries:
         nodes.add_row(
             node_summary.node_id,
+            node_summary.frame_id,
+            str(node_summary.iteration_index or ""),
             str(node_summary.event_count),
             str(node_summary.first_sequence or ""),
             str(node_summary.last_sequence or ""),
@@ -1009,6 +1026,7 @@ def run_runs_diff(
 
     node_table = Table(title="Node Diffs")
     node_table.add_column("Node")
+    node_table.add_column("Frame")
     node_table.add_column("Differs")
     node_table.add_column("Events")
     node_table.add_column("Inputs")
@@ -1022,6 +1040,7 @@ def run_runs_diff(
             missing.append("B")
         node_table.add_row(
             node_diff.node_id,
+            node_diff.frame_id,
             "yes" if node_diff.differs else "no",
             "same" if node_diff.events_equal else "different",
             _comparison_status(node_diff.inputs_equal),
@@ -1033,6 +1052,7 @@ def run_runs_diff(
     if diff.invariant_diffs:
         invariant_table = Table(title="Invariant Diffs")
         invariant_table.add_column("Node")
+        invariant_table.add_column("Frame")
         invariant_table.add_column("Outcome A")
         invariant_table.add_column("Outcome B")
         invariant_table.add_column("Severity A")
@@ -1041,6 +1061,7 @@ def run_runs_diff(
         for invariant_diff in diff.invariant_diffs:
             invariant_table.add_row(
                 invariant_diff.node_id,
+                invariant_diff.frame_id,
                 _invariant_outcome_label(invariant_diff.outcome_run_a),
                 _invariant_outcome_label(invariant_diff.outcome_run_b),
                 invariant_diff.severity_run_a or "",
@@ -1054,8 +1075,8 @@ def run_runs_diff(
             Panel.fit(
                 json.dumps(
                     {
-                        "state_run_a": diff.state_run_a,
-                        "state_run_b": diff.state_run_b,
+                        "state_run_a": diff.as_dict()["state_run_a"],
+                        "state_run_b": diff.as_dict()["state_run_b"],
                     },
                     indent=2,
                     sort_keys=True,
@@ -1072,6 +1093,9 @@ def run_runs_inputs(
     graph_id: str | None = None,
     run_id: str | None = None,
     node_id: str,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
     json_output: bool = False,
 ) -> int:
     """Show the resolved input payload for one node."""
@@ -1082,11 +1106,17 @@ def run_runs_inputs(
         graph_id=summary.graph_id,
         run_id=summary.run_id,
         node_id=node_id,
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
     )
     output = {
         "graph_id": summary.graph_id,
         "run_id": summary.run_id,
         "node_id": node_id,
+        "frame_id": frame_id or "root",
+        "loop_node_id": loop_node_id,
+        "iteration_index": iteration_index,
         "inputs": payload,
     }
     if json_output:
@@ -1102,6 +1132,9 @@ def run_runs_outputs(
     graph_id: str | None = None,
     run_id: str | None = None,
     node_id: str,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
     json_output: bool = False,
 ) -> int:
     """Show the output payload for one node."""
@@ -1112,11 +1145,17 @@ def run_runs_outputs(
         graph_id=summary.graph_id,
         run_id=summary.run_id,
         node_id=node_id,
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
     )
     output = {
         "graph_id": summary.graph_id,
         "run_id": summary.run_id,
         "node_id": node_id,
+        "frame_id": frame_id or "root",
+        "loop_node_id": loop_node_id,
+        "iteration_index": iteration_index,
         "output": payload,
     }
     if json_output:
@@ -1133,6 +1172,9 @@ def run_runs_trace(
     run_id: str | None = None,
     node_id: str,
     event_type: str | None = None,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
     json_output: bool = False,
 ) -> int:
     """Show semantic trace data for one node."""
@@ -1143,11 +1185,17 @@ def run_runs_trace(
         run_id=run_id,
         node_id=node_id,
         event_type=event_type,
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
     )
     payload = {
         "graph_id": trace.summary.graph_id,
         "run_id": trace.summary.run_id,
         "node_id": trace.node_id,
+        "frame_id": frame_id,
+        "loop_node_id": loop_node_id,
+        "iteration_index": iteration_index,
         "records": list(trace.records),
         "spans": list(trace.spans),
     }
@@ -1158,12 +1206,14 @@ def run_runs_trace(
     console = Console()
     record_table = Table(title=f"mentalmodel trace {trace.summary.run_id} {trace.node_id}")
     record_table.add_column("Seq", justify="right")
+    record_table.add_column("Frame")
     record_table.add_column("Event")
     record_table.add_column("Timestamp", justify="right")
     record_table.add_column("Payload")
     for record in trace.records:
         record_table.add_row(
             str(record.get("sequence", "")),
+            str(record.get("frame_id", "")),
             str(record.get("event_type", "")),
             str(record.get("timestamp_ms", "")),
             json.dumps(record.get("payload", {}), sort_keys=True),
@@ -1176,11 +1226,13 @@ def run_runs_trace(
     if trace.spans:
         span_table = Table(title="Matching Spans")
         span_table.add_column("Name")
+        span_table.add_column("Frame")
         span_table.add_column("Duration (ns)", justify="right")
         span_table.add_column("Error")
         for span in trace.spans:
             span_table.add_row(
                 str(span.get("name", "")),
+                str(span.get("frame_id", "")),
                 str(span.get("duration_ns", "")),
                 str(span.get("error_type", "") or ""),
             )
@@ -1195,6 +1247,9 @@ def run_runs_records(
     run_id: str | None = None,
     node_id: str | None = None,
     event_type: str | None = None,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
     limit: int = 50,
     json_output: bool = False,
 ) -> int:
@@ -1207,6 +1262,9 @@ def run_runs_records(
         run_id=summary.run_id,
         node_id=node_id,
         event_type=event_type,
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
     )
     limited = records[-max(1, limit) :]
     if json_output:
@@ -1216,6 +1274,7 @@ def run_runs_records(
     table = Table(title=f"mentalmodel records {summary.run_id}")
     table.add_column("Seq", justify="right")
     table.add_column("Node")
+    table.add_column("Frame")
     table.add_column("Event")
     table.add_column("Timestamp", justify="right")
     table.add_column("Payload")
@@ -1223,6 +1282,7 @@ def run_runs_records(
         table.add_row(
             str(record.get("sequence", "")),
             str(record.get("node_id", "")),
+            str(record.get("frame_id", "")),
             str(record.get("event_type", "")),
             str(record.get("timestamp_ms", "")),
             json.dumps(record.get("payload", {}), sort_keys=True),
@@ -1280,6 +1340,9 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--runs-dir", type=Path)
     replay.add_argument("--graph-id", required=True)
     replay.add_argument("--run-id")
+    replay.add_argument("--frame-id")
+    replay.add_argument("--loop-node-id")
+    replay.add_argument("--iteration-index", type=int)
     replay.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     otel = subparsers.add_parser("otel", help="Inspect or materialize OTEL configuration.")
@@ -1323,6 +1386,9 @@ def build_parser() -> argparse.ArgumentParser:
     runs_inputs.add_argument("--graph-id")
     runs_inputs.add_argument("--run-id")
     runs_inputs.add_argument("--node-id", required=True)
+    runs_inputs.add_argument("--frame-id")
+    runs_inputs.add_argument("--loop-node-id")
+    runs_inputs.add_argument("--iteration-index", type=int)
     runs_inputs.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs_outputs = runs_subparsers.add_parser("outputs", help="Show one node output payload.")
@@ -1330,6 +1396,9 @@ def build_parser() -> argparse.ArgumentParser:
     runs_outputs.add_argument("--graph-id")
     runs_outputs.add_argument("--run-id")
     runs_outputs.add_argument("--node-id", required=True)
+    runs_outputs.add_argument("--frame-id")
+    runs_outputs.add_argument("--loop-node-id")
+    runs_outputs.add_argument("--iteration-index", type=int)
     runs_outputs.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs_trace = runs_subparsers.add_parser("trace", help="Show semantic trace data for one node.")
@@ -1338,6 +1407,9 @@ def build_parser() -> argparse.ArgumentParser:
     runs_trace.add_argument("--run-id")
     runs_trace.add_argument("--node-id", required=True)
     runs_trace.add_argument("--event-type")
+    runs_trace.add_argument("--frame-id")
+    runs_trace.add_argument("--loop-node-id")
+    runs_trace.add_argument("--iteration-index", type=int)
     runs_trace.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs_records = runs_subparsers.add_parser("records", help="Show run records.")
@@ -1346,6 +1418,9 @@ def build_parser() -> argparse.ArgumentParser:
     runs_records.add_argument("--run-id")
     runs_records.add_argument("--node-id")
     runs_records.add_argument("--event-type")
+    runs_records.add_argument("--frame-id")
+    runs_records.add_argument("--loop-node-id")
+    runs_records.add_argument("--iteration-index", type=int)
     runs_records.add_argument("--limit", type=int, default=50)
     runs_records.add_argument("--json", action="store_true", help="Emit JSON output.")
 
@@ -1424,6 +1499,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runs_dir=args.runs_dir,
                 graph_id=args.graph_id,
                 run_id=args.run_id,
+                frame_id=args.frame_id,
+                loop_node_id=args.loop_node_id,
+                iteration_index=args.iteration_index,
                 json_output=args.json,
             )
         if args.command == "otel":
@@ -1468,6 +1546,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     graph_id=args.graph_id,
                     run_id=args.run_id,
                     node_id=args.node_id,
+                    frame_id=args.frame_id,
+                    loop_node_id=args.loop_node_id,
+                    iteration_index=args.iteration_index,
                     json_output=args.json,
                 )
             if args.runs_command == "outputs":
@@ -1476,6 +1557,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     graph_id=args.graph_id,
                     run_id=args.run_id,
                     node_id=args.node_id,
+                    frame_id=args.frame_id,
+                    loop_node_id=args.loop_node_id,
+                    iteration_index=args.iteration_index,
                     json_output=args.json,
                 )
             if args.runs_command == "trace":
@@ -1485,6 +1569,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     run_id=args.run_id,
                     node_id=args.node_id,
                     event_type=args.event_type,
+                    frame_id=args.frame_id,
+                    loop_node_id=args.loop_node_id,
+                    iteration_index=args.iteration_index,
                     json_output=args.json,
                 )
             if args.runs_command == "records":
@@ -1494,6 +1581,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     run_id=args.run_id,
                     node_id=args.node_id,
                     event_type=args.event_type,
+                    frame_id=args.frame_id,
+                    loop_node_id=args.loop_node_id,
+                    iteration_index=args.iteration_index,
                     limit=args.limit,
                     json_output=args.json,
                 )

@@ -24,6 +24,7 @@ from mentalmodel.core import (
 )
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.skills import install_skills
 from mentalmodel.testing import run_verification
@@ -99,6 +100,91 @@ class CliTest(unittest.TestCase):
         run_id = report.runtime.run_id
         self.assertIsNotNone(run_id)
         assert run_id is not None
+        return run_id
+
+    def _materialize_framed_run(self, runs_dir: str) -> str:
+        root = Path(runs_dir)
+        run_id = "run-framed"
+        run_dir = root / ".runs" / "framed_graph" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        frame_zero = [{"iteration_index": 0, "loop_node_id": "steps"}]
+        frame_one = [{"iteration_index": 1, "loop_node_id": "steps"}]
+        write_json(
+            run_dir / "summary.json",
+            {
+                "schema_version": 4,
+                "graph_id": "framed_graph",
+                "run_id": run_id,
+                "created_at_ms": 1000,
+                "success": True,
+                "node_count": 1,
+                "edge_count": 0,
+                "record_count": 4,
+                "output_count": 2,
+                "state_count": 0,
+                "trace_sink_configured": False,
+                "trace_mode": "disk",
+                "trace_mirror_to_disk": True,
+                "trace_capture_local_spans": True,
+                "trace_service_name": "mentalmodel",
+            },
+        )
+        write_jsonl(
+            run_dir / "records.jsonl",
+            [
+                {
+                    "record_id": f"{run_id}:1",
+                    "run_id": run_id,
+                    "node_id": "step_result",
+                    "frame_id": "steps[0]",
+                    "frame_path": frame_zero,
+                    "loop_node_id": "steps",
+                    "iteration_index": 0,
+                    "event_type": "node.inputs_resolved",
+                    "sequence": 1,
+                    "timestamp_ms": 1000,
+                    "payload": {"inputs": {"item": "a"}},
+                },
+                {
+                    "record_id": f"{run_id}:2",
+                    "run_id": run_id,
+                    "node_id": "step_result",
+                    "frame_id": "steps[1]",
+                    "frame_path": frame_one,
+                    "loop_node_id": "steps",
+                    "iteration_index": 1,
+                    "event_type": "node.inputs_resolved",
+                    "sequence": 2,
+                    "timestamp_ms": 1001,
+                    "payload": {"inputs": {"item": "b"}},
+                },
+            ],
+        )
+        write_json(
+            run_dir / "outputs.json",
+            {
+                "outputs": {},
+                "framed_outputs": [
+                    {
+                        "node_id": "step_result",
+                        "frame_id": "steps[0]",
+                        "frame_path": frame_zero,
+                        "loop_node_id": "steps",
+                        "iteration_index": 0,
+                        "value": {"score": 1},
+                    },
+                    {
+                        "node_id": "step_result",
+                        "frame_id": "steps[1]",
+                        "frame_path": frame_one,
+                        "loop_node_id": "steps",
+                        "iteration_index": 1,
+                        "value": {"score": 2},
+                    },
+                ],
+            },
+        )
+        write_json(run_dir / "state.json", {"state": {}, "framed_state": []})
         return run_id
 
     def test_demo_command_parses(self) -> None:
@@ -566,6 +652,55 @@ class CliTest(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["node_id"], "staleness_invariant")
             self.assertGreaterEqual(len(payload["records"]), 1)
+
+    def test_runs_outputs_command_json_supports_frame_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._materialize_framed_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "runs",
+                        "outputs",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "framed_graph",
+                        "--node-id",
+                        "step_result",
+                        "--frame-id",
+                        "steps[1]",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["frame_id"], "steps[1]")
+            self.assertEqual(payload["output"], {"score": 2})
+
+    def test_replay_command_json_supports_frame_filters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_id = self._materialize_framed_run(tmpdir)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "replay",
+                        "--runs-dir",
+                        tmpdir,
+                        "--graph-id",
+                        "framed_graph",
+                        "--run-id",
+                        run_id,
+                        "--frame-id",
+                        "steps[0]",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["frame_ids"], ["steps[0]"])
+            self.assertEqual(len(payload["events"]), 1)
 
     def test_runs_inputs_command_returns_node_input_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -148,11 +148,26 @@ mentalmodel runs inputs --node-id collect_data
   Emit a JSON object with `graph_id`, `run_id`, `node_id`, and `inputs`.
 </ParamField>
 
+<ParamField query="--frame-id" type="string">
+  Restrict the lookup to one execution frame, such as `steps[3]`.
+</ParamField>
+
+<ParamField query="--loop-node-id" type="string">
+  Restrict the lookup to frames owned by one loop node.
+</ParamField>
+
+<ParamField query="--iteration-index" type="integer">
+  Restrict the lookup to one loop iteration.
+</ParamField>
+
 Use this when you need to answer:
 
 - what exact payload hit this node?
 - did input binding happen the way I expected?
 - what did the invariant or reducer actually receive?
+
+If the same logical node executes in multiple frames, `runs inputs` requires an
+explicit frame filter. It will not guess which iteration you meant.
 
 ---
 
@@ -184,11 +199,27 @@ mentalmodel runs outputs --node-id process_results
   Emit a JSON object with `graph_id`, `run_id`, `node_id`, and `output`.
 </ParamField>
 
+<ParamField query="--frame-id" type="string">
+  Restrict the lookup to one execution frame, such as `steps[3]`.
+</ParamField>
+
+<ParamField query="--loop-node-id" type="string">
+  Restrict the lookup to frames owned by one loop node.
+</ParamField>
+
+<ParamField query="--iteration-index" type="integer">
+  Restrict the lookup to one loop iteration.
+</ParamField>
+
 Use this when you need to answer:
 
 - what did this node actually produce?
 - is the output shape what I expected?
 - did the join or actor emit the right values?
+
+Like `runs inputs`, this command refuses to guess when the same node has
+multiple framed outputs. Pass `--frame-id` or loop filters to make the lookup
+explicit.
 
 ---
 
@@ -224,7 +255,21 @@ mentalmodel runs trace --node-id collect_data
   Emit a JSON object with `records` and `spans` arrays.
 </ParamField>
 
-The table output shows two sections: a **records table** (Seq, Event, Timestamp, Payload) and a **Matching Spans table** (Name, Duration (ns), Error).
+<ParamField query="--frame-id" type="string">
+  Restrict records and spans to one execution frame.
+</ParamField>
+
+<ParamField query="--loop-node-id" type="string">
+  Restrict records and spans to frames owned by one loop node.
+</ParamField>
+
+<ParamField query="--iteration-index" type="integer">
+  Restrict records and spans to one loop iteration.
+</ParamField>
+
+The table output shows two sections: a **records table** (Seq, Frame, Event,
+Timestamp, Payload) and a **Matching Spans table** (Name, Frame, Duration (ns),
+Error).
 
 The records table is the more important one.
 
@@ -265,6 +310,18 @@ mentalmodel runs records --graph-id my-graph
 
 <ParamField query="--event-type" type="string">
   Filter records by event type.
+</ParamField>
+
+<ParamField query="--frame-id" type="string">
+  Restrict records to one execution frame.
+</ParamField>
+
+<ParamField query="--loop-node-id" type="string">
+  Restrict records to frames owned by one loop node.
+</ParamField>
+
+<ParamField query="--iteration-index" type="integer">
+  Restrict records to one loop iteration.
 </ParamField>
 
 <ParamField query="--limit" type="integer" default="50">

@@ -17,9 +17,10 @@ from mentalmodel.observability.export import (
     write_jsonl,
 )
 from mentalmodel.observability.tracing import RecordedSpan
+from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 
 RUNS_DIRNAME = ".runs"
-RUN_SCHEMA_VERSION = 3
+RUN_SCHEMA_VERSION = 4
 
 
 @dataclass(slots=True, frozen=True)
@@ -92,6 +93,22 @@ class RunNodeTrace:
     spans: tuple[dict[str, JsonValue], ...]
 
 
+@dataclass(slots=True, frozen=True)
+class RunFrameScope:
+    """Optional frame filter used when inspecting persisted runs."""
+
+    frame_id: str | None = None
+    loop_node_id: str | None = None
+    iteration_index: int | None = None
+
+    @property
+    def is_explicit(self) -> bool:
+        return any(
+            value is not None
+            for value in (self.frame_id, self.loop_node_id, self.iteration_index)
+        )
+
+
 def default_runs_dir(*, root: Path | None = None) -> Path:
     """Return the default run-artifact root directory."""
 
@@ -108,7 +125,9 @@ def write_run_artifacts(
     success: bool,
     records: tuple[ExecutionRecord, ...],
     outputs: dict[str, RuntimeValue],
+    framed_outputs: tuple[FramedNodeValue[RuntimeValue], ...],
     state: dict[str, RuntimeValue],
+    framed_state: tuple[FramedStateValue[RuntimeValue], ...],
     spans: tuple[RecordedSpan, ...],
     runs_dir: Path | None = None,
     verification_payload: dict[str, object] | None = None,
@@ -157,12 +176,18 @@ def write_run_artifacts(
         outputs_path,
         {
             "outputs": serialize_runtime_value(outputs),
+            "framed_outputs": [
+                _framed_output_to_json(entry) for entry in framed_outputs
+            ],
         },
     )
     write_json(
         state_path,
         {
             "state": serialize_runtime_value(state),
+            "framed_state": [
+                _framed_state_to_json(entry) for entry in framed_state
+            ],
         },
     )
     if spans_path is not None:
@@ -330,6 +355,9 @@ def load_run_records(
     run_id: str | None = None,
     node_id: str | None = None,
     event_type: str | None = None,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> tuple[dict[str, JsonValue], ...]:
     """Load JSONL execution records from a resolved run bundle."""
 
@@ -352,6 +380,15 @@ def load_run_records(
             continue
         if event_type is not None and record.get("event_type") != event_type:
             continue
+        if not _matches_frame_scope(
+            payload=record,
+            scope=RunFrameScope(
+                frame_id=frame_id,
+                loop_node_id=loop_node_id,
+                iteration_index=iteration_index,
+            ),
+        ):
+            continue
         loaded.append(record)
     return tuple(loaded)
 
@@ -362,6 +399,9 @@ def load_run_spans(
     graph_id: str | None = None,
     run_id: str | None = None,
     node_id: str | None = None,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> tuple[dict[str, JsonValue], ...]:
     """Load JSONL span records from a resolved run bundle."""
 
@@ -379,6 +419,15 @@ def load_run_spans(
         span = {str(key): cast_json_value(value) for key, value in payload.items()}
         if node_id is not None and _span_node_id(span) != node_id:
             continue
+        if not _matches_frame_scope(
+            payload=span,
+            scope=RunFrameScope(
+                frame_id=frame_id,
+                loop_node_id=loop_node_id,
+                iteration_index=iteration_index,
+            ),
+        ):
+            continue
         loaded.append(span)
     return tuple(loaded)
 
@@ -389,6 +438,9 @@ def load_run_node_output(
     graph_id: str | None = None,
     run_id: str | None = None,
     node_id: str,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> JsonValue:
     """Load one node output from a resolved run bundle."""
 
@@ -398,7 +450,32 @@ def load_run_node_output(
         run_id=run_id,
         filename="outputs.json",
     )
+    scope = RunFrameScope(
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
+    )
+    framed_outputs = _load_framed_outputs(payload)
+    if framed_outputs:
+        matches = [
+            entry
+            for entry in framed_outputs
+            if entry["node_id"] == node_id and _matches_frame_scope(entry, scope=scope)
+        ]
+        if not matches:
+            raise RunInspectionError(f"Run output for node {node_id!r} was not found.")
+        if len(matches) > 1 and not scope.is_explicit:
+            raise RunInspectionError(
+                f"Run output for node {node_id!r} exists in multiple frames. "
+                "Specify --frame-id or loop/iteration filters."
+            )
+        return matches[-1]["value"]
     outputs = payload.get("outputs")
+    if scope.is_explicit and frame_id != "root":
+        raise RunInspectionError(
+            f"Run output for node {node_id!r} is only available in the "
+            "root frame for this run bundle."
+        )
     if not isinstance(outputs, dict):
         raise RunInspectionError("Run outputs.json does not contain an 'outputs' mapping.")
     if node_id not in outputs:
@@ -412,6 +489,9 @@ def load_run_node_inputs(
     graph_id: str | None = None,
     run_id: str | None = None,
     node_id: str,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> JsonValue:
     """Load one node input payload from a resolved run bundle."""
 
@@ -421,11 +501,28 @@ def load_run_node_inputs(
         run_id=run_id,
         node_id=node_id,
         event_type="node.inputs_resolved",
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
     )
     if not records:
         raise RunInspectionError(
             f"Resolved inputs for node {node_id!r} were not found in the run bundle."
         )
+    scope = RunFrameScope(
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
+    )
+    if len(records) > 1 and not scope.is_explicit:
+        distinct_frames = {record.get("frame_id") for record in records}
+        if len(distinct_frames) > 1:
+            raise RunInspectionError(
+                f"Resolved inputs for node {node_id!r} exist in multiple frames. "
+                "Specify --frame-id or loop/iteration filters."
+            )
+    if len(records) > 1:
+        records = tuple(sorted(records, key=_record_sort_key))
     payload = records[-1].get("payload")
     if not isinstance(payload, dict):
         raise RunInspectionError(
@@ -446,6 +543,9 @@ def load_run_node_trace(
     run_id: str | None = None,
     node_id: str,
     event_type: str | None = None,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> RunNodeTrace:
     """Load the semantic trace for one node in one run."""
 
@@ -456,12 +556,18 @@ def load_run_node_trace(
         run_id=summary.run_id,
         node_id=node_id,
         event_type=event_type,
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
     )
     spans = load_run_spans(
         runs_dir=runs_dir,
         graph_id=summary.graph_id,
         run_id=summary.run_id,
         node_id=node_id,
+        frame_id=frame_id,
+        loop_node_id=loop_node_id,
+        iteration_index=iteration_index,
     )
     if not records and not spans:
         raise RunInspectionError(
@@ -491,6 +597,80 @@ def cast_json_value(value: object) -> JsonValue:
     if isinstance(value, dict):
         return {str(key): cast_json_value(item) for key, item in value.items()}
     raise RunInspectionError(f"Unsupported JSON value type {type(value).__name__}.")
+
+
+def _load_framed_outputs(
+    payload: dict[str, JsonValue],
+) -> tuple[dict[str, JsonValue], ...]:
+    framed_outputs = payload.get("framed_outputs")
+    if framed_outputs is None:
+        return tuple()
+    if not isinstance(framed_outputs, list):
+        raise RunInspectionError("Run outputs.json framed_outputs must be a JSON array.")
+    entries: list[dict[str, JsonValue]] = []
+    for item in framed_outputs:
+        if not isinstance(item, dict):
+            raise RunInspectionError("Run outputs.json framed_outputs rows must be objects.")
+        entries.append(item)
+    return tuple(entries)
+
+
+def _load_framed_state(
+    payload: dict[str, JsonValue],
+) -> tuple[dict[str, JsonValue], ...]:
+    framed_state = payload.get("framed_state")
+    if framed_state is None:
+        return tuple()
+    if not isinstance(framed_state, list):
+        raise RunInspectionError("Run state.json framed_state must be a JSON array.")
+    entries: list[dict[str, JsonValue]] = []
+    for item in framed_state:
+        if not isinstance(item, dict):
+            raise RunInspectionError("Run state.json framed_state rows must be objects.")
+        entries.append(item)
+    return tuple(entries)
+
+
+def _framed_output_to_json(entry: FramedNodeValue[RuntimeValue]) -> dict[str, JsonValue]:
+    return {
+        "node_id": entry.node_id,
+        "frame_id": entry.frame.frame_id,
+        "frame_path": serialize_runtime_value(entry.frame.path),
+        "loop_node_id": entry.frame.loop_node_id,
+        "iteration_index": entry.frame.iteration_index,
+        "value": serialize_runtime_value(entry.value),
+    }
+
+
+def _framed_state_to_json(entry: FramedStateValue[RuntimeValue]) -> dict[str, JsonValue]:
+    return {
+        "state_key": entry.state_key,
+        "frame_id": entry.frame.frame_id,
+        "frame_path": serialize_runtime_value(entry.frame.path),
+        "loop_node_id": entry.frame.loop_node_id,
+        "iteration_index": entry.frame.iteration_index,
+        "value": serialize_runtime_value(entry.value),
+    }
+
+
+def _matches_frame_scope(
+    payload: dict[str, JsonValue],
+    scope: RunFrameScope,
+) -> bool:
+    if scope.frame_id is not None and payload.get("frame_id") != scope.frame_id:
+        return False
+    if scope.loop_node_id is not None and payload.get("loop_node_id") != scope.loop_node_id:
+        return False
+    if (
+        scope.iteration_index is not None
+        and payload.get("iteration_index") != scope.iteration_index
+    ):
+        return False
+    return True
+
+
+def _record_sort_key(record: dict[str, JsonValue]) -> tuple[int, int]:
+    return (_require_int(record, "timestamp_ms"), _require_int(record, "sequence"))
 
 
 def _created_at_ms(*, records: tuple[ExecutionRecord, ...]) -> int:

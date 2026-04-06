@@ -21,6 +21,18 @@ mentalmodel replay --graph-id <graph_id>
   The specific run ID to replay. When omitted, the newest run for the graph is used.
 </ParamField>
 
+<ParamField query="--frame-id" type="string">
+  Restrict replay to one execution frame, such as `steps[3]`.
+</ParamField>
+
+<ParamField query="--loop-node-id" type="string">
+  Restrict replay to frames owned by one loop node.
+</ParamField>
+
+<ParamField query="--iteration-index" type="integer">
+  Restrict replay to one loop iteration.
+</ParamField>
+
 <ParamField query="--runs-dir" type="path">
   Root directory for persisted run artifacts. Defaults to `./.runs`.
 </ParamField>
@@ -42,30 +54,37 @@ When you run without `--json`, the command renders three tables.
 | Schema | 2 |
 | Success | yes |
 | Verification | yes |
+| Frames | 1 |
 | Events | 14 |
 | Nodes | 4 |
 | Runtime Error | |
 
 **Replay Events table** — one row per semantic event in sequence order:
 
-| Seq | Node | Event | Timestamp | Payload |
-|---|---|---|---|---|
-| 1 | collect_data | node.started | 1712345678000 | `{"input_count": 0, "kind": "actor"}` |
-| 2 | collect_data | node.succeeded | 1712345678042 | `{"kind": "actor", "output_type": "dict"}` |
-| 3 | process_results | node.started | 1712345678043 | `{"input_count": 1, "kind": "effect"}` |
+| Seq | Frame | Node | Event | Timestamp | Payload |
+|---|---|---|---|---|---|
+| 1 | root | collect_data | node.started | 1712345678000 | `{"input_count": 0, "kind": "actor"}` |
+| 2 | root | collect_data | node.succeeded | 1712345678042 | `{"kind": "actor", "output_type": "dict"}` |
+| 3 | root | process_results | node.started | 1712345678043 | `{"input_count": 1, "kind": "effect"}` |
 
 **Replay Node Summary table** — one row per node:
 
-| Node | Events | First Seq | Last Seq | Last Event | Invariant |
-|---|---|---|---|---|---|
-| collect_data | 2 | 1 | 2 | node.succeeded | pass |
-| process_results | 2 | 3 | 4 | node.succeeded | |
+| Node | Frame | Iteration | Events | First Seq | Last Seq | Last Event | Invariant |
+|---|---|---|---|---|---|---|---|
+| collect_data | root | | 2 | 1 | 2 | node.succeeded | pass |
+| process_results | root | | 2 | 3 | 4 | node.succeeded | |
 
 If an invariant fails with `severity="warning"`, the node summary shows `warning_fail`. Fatal invariant failures show `error_fail`.
 
 ## How to interpret replay
 
 Use `replay` when you want a whole-run narrative instead of one-node detail.
+
+When loops arrive, `replay` becomes the fastest way to answer two related
+questions:
+
+- what happened in the whole run?
+- what happened inside one specific iteration or frame?
 
 The most useful reading pattern is:
 
@@ -94,6 +113,10 @@ mentalmodel replay --graph-id my-graph --run-id run-abc123
 
 ```bash JSON output
 mentalmodel replay --graph-id my-graph --json
+```
+
+```bash Replay one iteration
+mentalmodel replay --graph-id my-graph --frame-id steps[3]
 ```
 
 ```bash Custom runs directory

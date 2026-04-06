@@ -14,6 +14,7 @@ from mentalmodel.observability.export import write_json
 from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.runtime import AsyncExecutor, ExecutionRecorder, ExecutionResult
 from mentalmodel.runtime.events import INVARIANT_CHECKED
+from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 from mentalmodel.runtime.runs import RunArtifacts, write_run_artifacts
 from mentalmodel.testing.invariants import PropertyCheckResult, run_property_checks
 
@@ -133,7 +134,9 @@ class RuntimeExecutionCapture:
     result: RuntimeVerificationResult
     records: tuple[ExecutionRecord, ...]
     outputs: dict[str, RuntimeValue]
+    framed_outputs: tuple[FramedNodeValue[RuntimeValue], ...]
     state: dict[str, RuntimeValue]
+    framed_state: tuple[FramedStateValue[RuntimeValue], ...]
     spans: tuple[RecordedSpan, ...]
     trace_sink_configured: bool
     trace_summary: dict[str, str | bool | None]
@@ -176,7 +179,9 @@ def run_verification(
         success=report.success,
         records=runtime_capture.records,
         outputs=runtime_capture.outputs,
+        framed_outputs=runtime_capture.framed_outputs,
         state=runtime_capture.state,
+        framed_state=runtime_capture.framed_state,
         spans=runtime_capture.spans,
         runs_dir=runs_dir,
         verification_payload=report.as_dict(),
@@ -223,7 +228,9 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
             ),
             records=tuple(recorder.records),
             outputs={},
+            framed_outputs=tuple(),
             state={},
+            framed_state=tuple(),
             spans=executor.tracing.snapshot_spans(),
             trace_sink_configured=executor.tracing.sink_configured,
             trace_summary=executor.tracing.trace_summary(),
@@ -239,7 +246,9 @@ def _capture_runtime(program: Workflow[NamedPrimitive]) -> RuntimeExecutionCaptu
         ),
         records=result.records,
         outputs=result.outputs,
+        framed_outputs=result.framed_outputs,
         state=result.state,
+        framed_state=result.framed_state,
         spans=result.spans,
         trace_sink_configured=executor.tracing.sink_configured,
         trace_summary=result.trace_summary,

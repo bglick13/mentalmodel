@@ -3,6 +3,7 @@
 from mentalmodel.runtime.errors import ExecutionError, InvariantViolationError
 from mentalmodel.runtime.execution import ExecutionNodeMetadata
 from mentalmodel.runtime.executor import AsyncExecutor, ExecutionResult
+from mentalmodel.runtime.frame import ExecutionFrame, ExecutionFrameSegment
 from mentalmodel.runtime.plan import (
     CompiledProgram,
     ExecutionPlan,
@@ -24,6 +25,8 @@ __all__ = [
     "AsyncExecutor",
     "CompiledProgram",
     "ExecutionError",
+    "ExecutionFrame",
+    "ExecutionFrameSegment",
     "ExecutionNodeMetadata",
     "ExecutionPlan",
     "ExecutionRecorder",

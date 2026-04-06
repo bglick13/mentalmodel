@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.runtime.frame import ROOT_FRAME, ExecutionFrame
 
 
 @dataclass(slots=True)
@@ -22,6 +23,7 @@ class ExecutionRecorder:
         node_id: str,
         event_type: str,
         timestamp_ms: int,
+        frame: ExecutionFrame = ROOT_FRAME,
         payload: Mapping[str, JsonValue] | None = None,
     ) -> ExecutionRecord:
         self.last_run_id = run_id
@@ -33,6 +35,7 @@ class ExecutionRecorder:
             event_type=event_type,
             sequence=self._sequence,
             timestamp_ms=timestamp_ms,
+            frame=frame,
             payload=dict(payload or {}),
         )
         self.records.append(record)

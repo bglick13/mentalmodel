@@ -131,6 +131,7 @@ def record_resolved_inputs(
         node_id=metadata.node_id,
         event_type=NODE_INPUTS_RESOLVED,
         timestamp_ms=context.clock.now_ms(),
+        frame=context.frame,
         payload={
             "input_keys": [alias for alias, _ in metadata.input_bindings],
             "inputs": serialize_runtime_value(inputs),

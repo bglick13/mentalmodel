@@ -86,16 +86,29 @@ Common event types include:
 - `join.resolved`
 - `invariant.checked`
 
+Each record now also carries execution-frame metadata:
+
+- `frame_id`
+- `frame_path`
+- `loop_node_id`
+- `iteration_index`
+
+Today most workflows only emit the root frame. The additive frame metadata is
+there so future looped workflows can remain inspectable without changing the
+bundle model again.
+
 ### `outputs.json`
 
-Serialized node outputs keyed by node id.
+Serialized node outputs keyed by node id, plus a `framed_outputs` array for
+frame-aware addressing when the same logical node executes multiple times.
 
 Use this when you want the actual materialized output of one node, not just the
 fact that it ran.
 
 ### `state.json`
 
-Final actor state values.
+Final actor state values, plus a `framed_state` array for frame-aware state
+inspection.
 
 Use this to debug stateful nodes and state transitions.
 
@@ -121,6 +134,9 @@ For most bugs, this sequence works well:
 4. `mentalmodel runs inputs --graph-id <graph_id> --node-id <node_id>`
 5. `mentalmodel runs outputs --graph-id <graph_id> --node-id <node_id>`
 6. `mentalmodel replay --graph-id <graph_id>`
+
+If the same logical node can execute more than once, add `--frame-id` or
+loop-based filters before steps 4 and 5 so the lookup stays unambiguous.
 
 That gives you:
 
@@ -153,6 +169,8 @@ mentalmodel runs inputs --graph-id async_rl_demo --node-id staleness_invariant
 mentalmodel runs outputs --graph-id async_rl_demo --node-id rollout_join
 mentalmodel runs trace --graph-id async_rl_demo --node-id staleness_invariant
 mentalmodel runs records --graph-id async_rl_demo --node-id staleness_invariant
+mentalmodel runs outputs --graph-id trainer --node-id step_result --frame-id steps[3]
+mentalmodel replay --graph-id trainer --frame-id steps[3]
 ```
 
 ### Compare two runs

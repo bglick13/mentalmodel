@@ -12,6 +12,7 @@ from unittest.mock import patch
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
     RUN_SCHEMA_VERSION,
@@ -51,6 +52,126 @@ class RunsTest(unittest.TestCase):
         )
         run_id = report.runtime.run_id
         assert run_id is not None
+        return run_id
+
+    def _materialize_framed_run(self, root: Path) -> str:
+        run_id = "run-framed"
+        run_dir = root / ".runs" / "framed_graph" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_json(
+            run_dir / "summary.json",
+            {
+                "schema_version": RUN_SCHEMA_VERSION,
+                "graph_id": "framed_graph",
+                "run_id": run_id,
+                "created_at_ms": 1000,
+                "success": True,
+                "node_count": 1,
+                "edge_count": 0,
+                "record_count": 4,
+                "output_count": 2,
+                "state_count": 0,
+                "trace_sink_configured": False,
+                "trace_mode": "disk",
+                "trace_mirror_to_disk": True,
+                "trace_capture_local_spans": True,
+                "trace_service_name": "mentalmodel",
+            },
+        )
+        frame_zero = [
+            {"iteration_index": 0, "loop_node_id": "steps"},
+        ]
+        frame_one = [
+            {"iteration_index": 1, "loop_node_id": "steps"},
+        ]
+        write_jsonl(
+            run_dir / "records.jsonl",
+            [
+                {
+                    "record_id": f"{run_id}:1",
+                    "run_id": run_id,
+                    "node_id": "step_result",
+                    "frame_id": "steps[0]",
+                    "frame_path": frame_zero,
+                    "loop_node_id": "steps",
+                    "iteration_index": 0,
+                    "event_type": "node.inputs_resolved",
+                    "sequence": 1,
+                    "timestamp_ms": 1000,
+                    "payload": {"inputs": {"item": "a"}},
+                },
+                {
+                    "record_id": f"{run_id}:2",
+                    "run_id": run_id,
+                    "node_id": "step_result",
+                    "frame_id": "steps[0]",
+                    "frame_path": frame_zero,
+                    "loop_node_id": "steps",
+                    "iteration_index": 0,
+                    "event_type": "node.succeeded",
+                    "sequence": 2,
+                    "timestamp_ms": 1001,
+                    "payload": {"kind": "effect", "output_type": "dict"},
+                },
+                {
+                    "record_id": f"{run_id}:3",
+                    "run_id": run_id,
+                    "node_id": "step_result",
+                    "frame_id": "steps[1]",
+                    "frame_path": frame_one,
+                    "loop_node_id": "steps",
+                    "iteration_index": 1,
+                    "event_type": "node.inputs_resolved",
+                    "sequence": 3,
+                    "timestamp_ms": 1002,
+                    "payload": {"inputs": {"item": "b"}},
+                },
+                {
+                    "record_id": f"{run_id}:4",
+                    "run_id": run_id,
+                    "node_id": "step_result",
+                    "frame_id": "steps[1]",
+                    "frame_path": frame_one,
+                    "loop_node_id": "steps",
+                    "iteration_index": 1,
+                    "event_type": "node.succeeded",
+                    "sequence": 4,
+                    "timestamp_ms": 1003,
+                    "payload": {"kind": "effect", "output_type": "dict"},
+                },
+            ],
+        )
+        write_json(
+            run_dir / "outputs.json",
+            {
+                "outputs": {},
+                "framed_outputs": [
+                    {
+                        "node_id": "step_result",
+                        "frame_id": "steps[0]",
+                        "frame_path": frame_zero,
+                        "loop_node_id": "steps",
+                        "iteration_index": 0,
+                        "value": {"score": 1},
+                    },
+                    {
+                        "node_id": "step_result",
+                        "frame_id": "steps[1]",
+                        "frame_path": frame_one,
+                        "loop_node_id": "steps",
+                        "iteration_index": 1,
+                        "value": {"score": 2},
+                    },
+                ],
+            },
+        )
+        write_json(
+            run_dir / "state.json",
+            {
+                "state": {},
+                "framed_state": [],
+            },
+        )
         return run_id
 
     def test_run_helpers_load_latest_materialized_run(self) -> None:
@@ -229,6 +350,76 @@ class RunsTest(unittest.TestCase):
             self.assertTrue(node_summaries["staleness_invariant"].invariant_passed)
             self.assertEqual(node_summaries["staleness_invariant"].invariant_status, "pass")
             self.assertEqual(node_summaries["staleness_invariant"].invariant_severity, "error")
+
+    def test_frame_aware_run_helpers_require_explicit_scope_for_ambiguous_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_id = self._materialize_framed_run(root)
+
+            with self.assertRaises(RunInspectionError):
+                load_run_node_output(
+                    runs_dir=root,
+                    graph_id="framed_graph",
+                    run_id=run_id,
+                    node_id="step_result",
+                )
+
+            output = load_run_node_output(
+                runs_dir=root,
+                graph_id="framed_graph",
+                run_id=run_id,
+                node_id="step_result",
+                frame_id="steps[1]",
+            )
+            self.assertEqual(output, {"score": 2})
+
+            with self.assertRaises(RunInspectionError):
+                load_run_node_inputs(
+                    runs_dir=root,
+                    graph_id="framed_graph",
+                    run_id=run_id,
+                    node_id="step_result",
+                )
+
+            inputs = load_run_node_inputs(
+                runs_dir=root,
+                graph_id="framed_graph",
+                run_id=run_id,
+                node_id="step_result",
+                iteration_index=0,
+                loop_node_id="steps",
+            )
+            self.assertEqual(inputs, {"item": "a"})
+
+            trace = load_run_node_trace(
+                runs_dir=root,
+                graph_id="framed_graph",
+                run_id=run_id,
+                node_id="step_result",
+                frame_id="steps[0]",
+            )
+            self.assertEqual(len(trace.records), 2)
+            self.assertTrue(all(record["frame_id"] == "steps[0]" for record in trace.records))
+
+    def test_build_replay_report_can_filter_by_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_id = self._materialize_framed_run(root)
+
+            report = build_replay_report(
+                runs_dir=root,
+                graph_id="framed_graph",
+                run_id=run_id,
+                frame_id="steps[1]",
+            )
+
+            self.assertEqual(report.frame_ids, ("steps[1]",))
+            self.assertEqual(len(report.events), 2)
+            self.assertEqual(len(report.node_summaries), 1)
+            node_summary = report.node_summaries[0]
+            self.assertEqual(node_summary.node_id, "step_result")
+            self.assertEqual(node_summary.frame_id, "steps[1]")
+            self.assertEqual(node_summary.iteration_index, 1)
 
     def test_build_run_diff_detects_changed_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -71,6 +71,7 @@ class CompiledActorNode(Generic[InputT, OutputT, StateT]):
             node_id=self.metadata.node_id,
             event_type=STATE_READ,
             timestamp_ms=context.clock.now_ms(),
+            frame=context.frame,
             payload={"had_state": previous_state is not None},
         )
         result = await self.handler.handle(
@@ -85,6 +86,7 @@ class CompiledActorNode(Generic[InputT, OutputT, StateT]):
                 node_id=self.metadata.node_id,
                 event_type=STATE_TRANSITION,
                 timestamp_ms=context.clock.now_ms(),
+                frame=context.frame,
                 payload={
                     "from_state": summarize_runtime_value(previous_state),
                     "to_state": summarize_runtime_value(cast(RuntimeValue, result.next_state)),
@@ -120,6 +122,7 @@ class CompiledEffectNode(Generic[InputT, OutputT]):
             node_id=self.metadata.node_id,
             event_type=EFFECT_INVOKED,
             timestamp_ms=context.clock.now_ms(),
+            frame=context.frame,
             payload={
                 "input_keys": [alias for alias, _ in self.metadata.input_bindings]
             },
@@ -130,6 +133,7 @@ class CompiledEffectNode(Generic[InputT, OutputT]):
             node_id=self.metadata.node_id,
             event_type=EFFECT_COMPLETED,
             timestamp_ms=context.clock.now_ms(),
+            frame=context.frame,
             payload={"output_type": type(output).__name__},
         )
         emit_metric_batch(
@@ -165,6 +169,7 @@ class CompiledJoinNode(Generic[InputT, OutputT]):
             node_id=self.metadata.node_id,
             event_type=JOIN_RESOLVED,
             timestamp_ms=context.clock.now_ms(),
+            frame=context.frame,
             payload={
                 "input_keys": [alias for alias, _ in self.metadata.input_bindings]
             },
@@ -192,6 +197,7 @@ class CompiledInvariantNode(Generic[InputT, DetailT]):
             node_id=self.metadata.node_id,
             event_type=INVARIANT_CHECKED,
             timestamp_ms=context.clock.now_ms(),
+            frame=context.frame,
             payload={"passed": result.passed, "severity": self.severity},
         )
         if not result.passed:

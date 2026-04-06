@@ -83,6 +83,7 @@ uv run mentalmodel graph --entrypoint mentalmodel.examples.async_rl.demo:build_p
 uv run mentalmodel docs --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
 uv run mentalmodel replay --graph-id async_rl_demo
+uv run mentalmodel replay --graph-id async_rl_demo --frame-id steps[3]
 uv run mentalmodel otel show-config
 uv run mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
 uv run mentalmodel runs list
@@ -92,6 +93,7 @@ uv run mentalmodel runs inputs --graph-id async_rl_demo --node-id staleness_inva
 uv run mentalmodel runs outputs --graph-id async_rl_demo --node-id staleness_invariant
 uv run mentalmodel runs trace --graph-id async_rl_demo --node-id staleness_invariant
 uv run mentalmodel runs records --graph-id async_rl_demo --node-id staleness_invariant
+uv run mentalmodel runs outputs --graph-id trainer --node-id step_result --frame-id steps[3]
 uv run mentalmodel runs diff --graph-id async_rl_demo --run-a <run_a> --run-b <run_b>
 uv run mentalmodel runs repair --dry-run
 uv run mentalmodel doctor --entrypoint mentalmodel.examples.async_rl.demo:build_program
@@ -123,6 +125,10 @@ Milestone 8 run-inspection commands:
 - `replay` reconstructs the full semantic event timeline for one run
 - `runs diff` compares two persisted run bundles, including invariant outcomes
   and node-level payload changes
+- frame-aware inspection is additive: when a logical node executes in multiple
+  frames, use `--frame-id`, `--loop-node-id`, or `--iteration-index` to make
+  `runs inputs`, `runs outputs`, `runs trace`, `runs records`, and `replay`
+  target the exact iteration you mean
 
 Run bundle versioning:
 

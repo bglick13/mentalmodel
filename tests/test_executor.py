@@ -215,6 +215,10 @@ class ExecutorTest(unittest.TestCase):
         self.assertIn("state.transition", event_types)
         self.assertIn("effect.invoked", event_types)
         self.assertIn("invariant.checked", event_types)
+        self.assertTrue(all(record.frame.frame_id == "root" for record in result.records))
+        self.assertTrue(all(record.frame.iteration_index is None for record in result.records))
+        self.assertTrue(all(entry.frame.frame_id == "root" for entry in result.framed_outputs))
+        self.assertTrue(all(entry.frame.frame_id == "root" for entry in result.framed_state))
 
     def test_execution_records_have_monotonic_sequences_and_expected_order(self) -> None:
         result = asyncio.run(AsyncExecutor().run(build_program()))

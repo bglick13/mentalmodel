@@ -23,6 +23,7 @@ from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter, crea
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.errors import ExecutionError
 from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
+from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 from mentalmodel.runtime.plan import (
     CompiledProgram,
     ExecutionPlan,
@@ -39,8 +40,10 @@ class ExecutionResult:
     run_id: str
     graph: IRGraph
     outputs: dict[str, RuntimeValue]
+    framed_outputs: tuple[FramedNodeValue[RuntimeValue], ...]
     records: tuple[ExecutionRecord, ...]
     state: dict[str, RuntimeValue]
+    framed_state: tuple[FramedStateValue[RuntimeValue], ...]
     spans: tuple[RecordedSpan, ...]
     trace_summary: dict[str, str | bool | None]
 
@@ -88,8 +91,16 @@ class AsyncExecutor:
             run_id=context.run_id,
             graph=compiled.graph,
             outputs=dict(outputs),
+            framed_outputs=tuple(
+                FramedNodeValue(node_id=node_id, frame=context.frame, value=value)
+                for node_id, value in sorted(outputs.items())
+            ),
             records=tuple(self.recorder.records),
             state=dict(context.state_store),
+            framed_state=tuple(
+                FramedStateValue(state_key=state_key, frame=context.frame, value=value)
+                for state_key, value in sorted(context.state_store.items())
+            ),
             spans=self.tracing.snapshot_spans(),
             trace_summary=self.tracing.trace_summary(),
         )
@@ -181,6 +192,7 @@ class AsyncExecutor:
                 node_id=node.metadata.node_id,
                 event_type=NODE_STARTED,
                 timestamp_ms=node_ctx.clock.now_ms(),
+                frame=node_ctx.frame,
                 payload={
                     "kind": node.metadata.kind,
                     "input_count": len(node.metadata.dependencies),
@@ -201,6 +213,7 @@ class AsyncExecutor:
                     node_id=node.metadata.node_id,
                     event_type=NODE_FAILED,
                     timestamp_ms=node_ctx.clock.now_ms(),
+                    frame=node_ctx.frame,
                     payload=error_payload(exc),
                 )
                 raise
@@ -221,6 +234,7 @@ class AsyncExecutor:
                 node_id=node.metadata.node_id,
                 event_type=NODE_SUCCEEDED,
                 timestamp_ms=node_ctx.clock.now_ms(),
+                frame=node_ctx.frame,
                 payload={
                     "kind": node.metadata.kind,
                     "output_type": type(output).__name__,

@@ -66,8 +66,10 @@ The returned `ExecutionResult` includes:
 - `run_id`
 - `graph`
 - `outputs`
+- `framed_outputs`
 - `records`
 - `state`
+- `framed_state`
 - `spans`
 - `trace_summary`
 
@@ -122,6 +124,13 @@ Common events include:
 | `join.resolved` | A join saw all inputs and resolved |
 | `invariant.checked` | An invariant executed |
 
+Each record also carries execution-frame metadata:
+
+- `frame_id`
+- `frame_path`
+- `loop_node_id`
+- `iteration_index`
+
 These records are the package's primary debugging substrate.
 
 OTel spans are useful, but they are secondary to the semantic records.
@@ -142,6 +151,10 @@ Important files include:
 - `outputs.json`
 - `state.json`
 - `otel-spans.jsonl` when local span mirroring is enabled
+
+The artifact model is already frame-aware even though native loop execution is
+still planned work. That is intentional: iteration support should land on top
+of a stable inspection model rather than forcing a second run-schema migration.
 
 This is the main local debugging surface. A good mental model is:
 
@@ -176,7 +189,8 @@ A few things to understand clearly:
 - the runtime is DAG-oriented today
 - there is not yet a native loop primitive
 - execution is one run of one compiled workflow
-- `.runs` and replay are therefore run-scoped, not iteration-scoped yet
+- `.runs` and replay already carry frame metadata, but current authored
+  workflows usually only use the root frame until native loop execution lands
 
 That is an active area of planned package work, not an accidental omission.
 

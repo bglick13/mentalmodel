@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from mentalmodel.core.interfaces import RuntimeValue
 from mentalmodel.ir.graph import IRGraph, IRNode
+from mentalmodel.runtime.frame import ROOT_FRAME, ExecutionFrame
 
 if TYPE_CHECKING:
     from mentalmodel.observability.metrics import MetricContext, MetricEmitter
@@ -35,6 +36,7 @@ class ExecutionContext:
     node_id: str | None = None
     node_kind: str | None = None
     runtime_context: str | None = None
+    frame: ExecutionFrame = field(default_factory=lambda: ROOT_FRAME)
     state_store: dict[str, RuntimeValue] = field(default_factory=dict)
     outputs: dict[str, RuntimeValue] = field(default_factory=dict)
 
@@ -66,6 +68,23 @@ class ExecutionContext:
             node_id=node.node_id,
             node_kind=node.kind,
             runtime_context=node.metadata.get("runtime_context"),
+            frame=self.frame,
+            state_store=self.state_store,
+            outputs=self.outputs,
+        )
+
+    def with_frame(self, frame: ExecutionFrame) -> ExecutionContext:
+        return ExecutionContext(
+            run_id=self.run_id,
+            graph=self.graph,
+            recorder=self.recorder,
+            tracing=self.tracing,
+            metrics=self.metrics,
+            clock=self.clock,
+            node_id=self.node_id,
+            node_kind=self.node_kind,
+            runtime_context=self.runtime_context,
+            frame=frame,
             state_store=self.state_store,
             outputs=self.outputs,
         )
@@ -80,6 +99,11 @@ class ExecutionContext:
             attrs["mentalmodel.node.kind"] = self.node_kind
         if self.runtime_context is not None:
             attrs["mentalmodel.runtime.context"] = self.runtime_context
+        attrs["mentalmodel.frame.id"] = self.frame.frame_id
+        if self.frame.loop_node_id is not None:
+            attrs["mentalmodel.loop.node_id"] = self.frame.loop_node_id
+        if self.frame.iteration_index is not None:
+            attrs["mentalmodel.loop.iteration_index"] = str(self.frame.iteration_index)
         if extra:
             attrs.update(extra)
         return attrs
