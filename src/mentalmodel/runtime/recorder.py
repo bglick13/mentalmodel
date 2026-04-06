@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.runtime.frame import ROOT_FRAME, ExecutionFrame
+
+RecordListener = Callable[[ExecutionRecord], None]
 
 
 @dataclass(slots=True)
@@ -14,6 +16,7 @@ class ExecutionRecorder:
 
     records: list[ExecutionRecord] = field(default_factory=list)
     last_run_id: str | None = None
+    listeners: Sequence[RecordListener] = field(default_factory=tuple)
     _sequence: int = 0
 
     def record(
@@ -39,4 +42,6 @@ class ExecutionRecorder:
             payload=dict(payload or {}),
         )
         self.records.append(record)
+        for listener in self.listeners:
+            listener(record)
         return record

@@ -75,3 +75,15 @@ class DocsSiteTest(unittest.TestCase):
         self.assertIn("docs/recipes/parameterized-verification", recipes)
         self.assertIn("review_workflow", reusable_blocks)
         self.assertIn("review_workflow", step_loops)
+
+    def test_phase_26_docs_cover_dashboard_ui(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        docs_json = (repo_root / "docs.json").read_text(encoding="utf-8")
+        cli_ui = (repo_root / "cli" / "ui.mdx").read_text(encoding="utf-8")
+        guide = (repo_root / "guides" / "dashboard-ui.mdx").read_text(encoding="utf-8")
+
+        self.assertIn("cli/ui", docs_json)
+        self.assertIn("guides/dashboard-ui", docs_json)
+        self.assertIn("mentalmodel ui", cli_ui)
+        self.assertIn("review_workflow", guide)
+        self.assertIn("graph.json", guide)

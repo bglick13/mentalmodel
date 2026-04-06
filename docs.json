@@ -41,6 +41,7 @@
           "group": "Guides",
           "pages": [
             "guides/authoring-workflows",
+            "guides/dashboard-ui",
             "guides/reusable-blocks",
             "guides/step-loops",
             "guides/effects-and-actors",
@@ -94,6 +95,7 @@
               "cli/graph",
               "cli/docs",
               "cli/verify",
+              "cli/ui",
               "cli/replay",
               "cli/runs",
               "cli/otel",

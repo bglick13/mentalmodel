@@ -10,6 +10,7 @@ from mentalmodel.core.interfaces import JsonValue, RuntimeValue
 from mentalmodel.errors import RunInspectionError
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.ir.serialization import ir_graph_from_json, ir_graph_to_json
 from mentalmodel.observability.export import (
     execution_record_to_json,
     recorded_span_to_json,
@@ -21,7 +22,7 @@ from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 
 RUNS_DIRNAME = ".runs"
-RUN_SCHEMA_VERSION = 6
+RUN_SCHEMA_VERSION = 7
 
 
 @dataclass(slots=True, frozen=True)
@@ -30,6 +31,7 @@ class RunArtifacts:
 
     run_dir: Path
     summary_path: Path
+    graph_path: Path
     records_path: Path
     outputs_path: Path
     state_path: Path
@@ -145,6 +147,7 @@ def write_run_artifacts(
 
     run_dir = default_runs_dir(root=runs_dir) / graph.graph_id / run_id
     summary_path = run_dir / "summary.json"
+    graph_path = run_dir / "graph.json"
     records_path = run_dir / "records.jsonl"
     outputs_path = run_dir / "outputs.json"
     state_path = run_dir / "state.json"
@@ -181,6 +184,7 @@ def write_run_artifacts(
             "runtime_profile_names": list(runtime_profile_names),
         },
     )
+    write_json(graph_path, ir_graph_to_json(graph))
     write_jsonl(records_path, (execution_record_to_json(record) for record in records))
     write_json(
         outputs_path,
@@ -207,6 +211,7 @@ def write_run_artifacts(
     return RunArtifacts(
         run_dir=run_dir,
         summary_path=summary_path,
+        graph_path=graph_path,
         records_path=records_path,
         outputs_path=outputs_path,
         state_path=state_path,
@@ -328,6 +333,28 @@ def load_run_payload(
         invocation_name=invocation_name,
     )
     return read_json(summary.run_dir / filename)
+
+
+def load_run_graph(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    invocation_name: str | None = None,
+) -> IRGraph:
+    """Load the persisted lowered graph for one resolved run bundle."""
+
+    summary = resolve_run_summary(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+    )
+    payload = read_json(summary.run_dir / "graph.json")
+    try:
+        return ir_graph_from_json(payload)
+    except TypeError as exc:
+        raise RunInspectionError(f"Malformed graph.json in run {summary.run_id!r}: {exc}") from exc
 
 
 def plan_run_repairs(

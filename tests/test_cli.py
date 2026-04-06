@@ -213,6 +213,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.command, "demo")
         self.assertEqual(args.name, "async-rl")
 
+    def test_ui_command_parses(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["ui", "--host", "0.0.0.0", "--port", "9000"])
+        self.assertEqual(args.command, "ui")
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.port, 9000)
+
     def test_doctor_command_outputs_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             target_dir = Path(tmpdir) / "skills"

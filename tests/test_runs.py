@@ -25,6 +25,7 @@ from mentalmodel.runtime.runs import (
     apply_run_repairs,
     iter_run_dirs,
     list_run_summaries,
+    load_run_graph,
     load_run_node_inputs,
     load_run_node_output,
     load_run_node_trace,
@@ -226,6 +227,10 @@ class RunsTest(unittest.TestCase):
                 node_id="staleness_invariant",
             )
             self.assertEqual(trace.node_id, "staleness_invariant")
+
+            graph = load_run_graph(runs_dir=root, graph_id="async_rl_demo")
+            self.assertEqual(graph.graph_id, "async_rl_demo")
+            self.assertGreater(len(graph.nodes), 0)
 
     def test_run_summary_persists_runtime_environment_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

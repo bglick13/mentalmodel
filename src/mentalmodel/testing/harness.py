@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -16,6 +17,7 @@ from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.runtime import AsyncExecutor, ExecutionRecorder, ExecutionResult
 from mentalmodel.runtime.events import INVARIANT_CHECKED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
+from mentalmodel.runtime.recorder import RecordListener
 from mentalmodel.runtime.runs import RunArtifacts, write_run_artifacts
 from mentalmodel.testing.invariants import PropertyCheckResult, run_property_checks
 
@@ -172,6 +174,7 @@ def run_verification(
     persist_run_artifacts: bool = True,
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
+    record_listeners: Sequence[RecordListener] = (),
 ) -> VerificationReport:
     """Run static analysis, runtime execution, and property checks."""
 
@@ -181,6 +184,7 @@ def run_verification(
         program,
         environment=environment,
         invocation_name=invocation_name,
+        record_listeners=record_listeners,
     )
     property_checks = (
         run_property_checks(module, program)
@@ -240,8 +244,9 @@ def _capture_runtime(
     *,
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
+    record_listeners: Sequence[RecordListener] = (),
 ) -> RuntimeExecutionCapture:
-    recorder = ExecutionRecorder()
+    recorder = ExecutionRecorder(listeners=tuple(record_listeners))
     executor = AsyncExecutor(
         recorder=recorder,
         environment=environment or EMPTY_RUNTIME_ENVIRONMENT,

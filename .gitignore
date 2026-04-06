@@ -24,6 +24,8 @@ build/
 dist/
 *.egg-info/
 .eggs/
+apps/dashboard/dist/
+apps/dashboard/node_modules/
 
 # OS/editor noise
 .DS_Store

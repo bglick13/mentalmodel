@@ -64,6 +64,7 @@ uv run mentalmodel doctor --entrypoint mentalmodel.examples.async_rl.demo:build_
 uv run mentalmodel demo agent-tool-use
 uv run mentalmodel demo autoresearch-sorting
 uv run mentalmodel verify --spec src/mentalmodel/examples/review_workflow/review_workflow_fixture.toml
+uv run mentalmodel ui
 ```
 
 `mentalmodel verify` writes a run bundle to `.runs` by default. The most useful
@@ -84,6 +85,8 @@ separate handwritten instrumentation path.
 `agent-tool-use` is the second serious reference example, and
 `review_workflow` is the serious reference path for `Block`, `StepLoop`,
 runtime environments, and spec-driven verification.
+`mentalmodel ui` is the hosted-style dashboard surface over the same `.runs`,
+replay, and invocation services used by the CLI.
 `review_workflow` can be verified directly with its packaged TOML specs.
 `autoresearch-sorting` shows the bounded objective/search layer with an
 autoresearch-style bundle output.

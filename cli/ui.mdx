@@ -1,0 +1,68 @@
+---
+title: mentalmodel ui
+description: Launch the hosted dashboard UI on top of persisted .runs data and live verification sessions.
+---
+
+`mentalmodel ui` starts the FastAPI-backed dashboard surface for local and
+hosted-style inspection workflows.
+
+## Command
+
+```bash
+uv run mentalmodel ui
+```
+
+Common flags:
+
+```bash
+uv run mentalmodel ui --host 0.0.0.0 --port 8765
+uv run mentalmodel ui --runs-dir /tmp/mentalmodel-runs
+uv run mentalmodel ui --frontend-dist apps/dashboard/dist --open-browser
+```
+
+## What it serves
+
+- a React dashboard if `apps/dashboard/dist` exists
+- JSON APIs for:
+  - launchable workflow specs
+  - live execution sessions
+  - persisted run summaries
+  - persisted run graphs
+  - replay views
+  - node inputs, outputs, and traces
+
+## How to use that
+
+For the built-in proof path:
+
+1. Build the frontend once:
+
+```bash
+cd apps/dashboard
+npm install
+npm run build
+```
+
+2. Start the UI:
+
+```bash
+cd /path/to/mentalmodel
+uv run mentalmodel ui --open-browser
+```
+
+3. In the dashboard:
+
+- choose `Ticket Review Fixture` or `Ticket Review Strict`
+- run the workflow
+- inspect the graph panel to drill into nodes
+- inspect the invariant list to jump directly to constraint nodes
+- inspect the records table for the full logs-like semantic stream
+
+## What to look for
+
+The review workflow proof case should show:
+
+- different resolution metrics for fixture vs strict runs
+- loop frame ids like `ticket_review_loop[0]`
+- warning-severity invariant results attached to the loop body
+- root `queue_summary` outputs with `processed`, `escalations`, and `auto_publish`

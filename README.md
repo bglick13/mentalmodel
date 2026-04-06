@@ -206,6 +206,20 @@ Reference demos:
   `AutoResearch` plugin node, and can also materialize an `autoresearch`-style
   `program.md` bundle
 
+Dashboard UI:
+
+- build the frontend once with:
+  - `cd apps/dashboard`
+  - `npm install`
+  - `npm run typecheck`
+  - `npm run build`
+- then launch the hosted-style UI from the repository root with:
+  - `uv run mentalmodel ui --open-browser`
+- the first proof workflow is `review_workflow`; the UI can launch either
+  runtime environment, inspect the persisted graph, inspect node
+  inputs/outputs, inspect invariant results, and browse the full semantic
+  record stream
+
 Optimization and autoresearch:
 
 - use `mentalmodel.optimization` for bounded candidate search over workflows

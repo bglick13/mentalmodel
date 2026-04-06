@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import webbrowser
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast
@@ -64,6 +65,7 @@ from mentalmodel.runtime.runs import (
 )
 from mentalmodel.skills import build_install_plan, install_skills
 from mentalmodel.testing import execute_program, run_verification
+from mentalmodel.ui.api import create_dashboard_app
 
 DEFAULT_VERIFY_ENTRYPOINT = "mentalmodel.examples.async_rl.demo:build_program"
 
@@ -256,6 +258,31 @@ def run_docs(
     if stdout or output_dir is None:
         for name, content in artifacts.as_mapping().items():
             console.print(Panel(Markdown(content), title=name))
+    return 0
+
+
+def run_ui(
+    *,
+    runs_dir: Path | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    frontend_dist: Path | None = None,
+    open_browser: bool = False,
+) -> int:
+    """Launch the dashboard API and static frontend host."""
+
+    import uvicorn
+
+    dist_dir = frontend_dist
+    if dist_dir is None:
+        repo_root = Path(__file__).resolve().parents[2]
+        candidate = repo_root / "apps" / "dashboard" / "dist"
+        dist_dir = candidate if candidate.exists() else None
+    app = create_dashboard_app(runs_dir=runs_dir, frontend_dist=dist_dir)
+    url = f"http://{host}:{port}"
+    if open_browser:
+        webbrowser.open(url)
+    uvicorn.run(app, host=host, port=port)
     return 0
 
 
@@ -1528,6 +1555,13 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--iteration-index", type=int)
     replay.add_argument("--json", action="store_true", help="Emit JSON output.")
 
+    ui = subparsers.add_parser("ui", help="Launch the hosted dashboard UI.")
+    ui.add_argument("--runs-dir", type=Path)
+    ui.add_argument("--host", default="127.0.0.1")
+    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--frontend-dist", type=Path)
+    ui.add_argument("--open-browser", action="store_true")
+
     otel = subparsers.add_parser("otel", help="Inspect or materialize OTEL configuration.")
     otel_subparsers = otel.add_subparsers(dest="otel_command")
     otel_subparsers.required = True
@@ -1701,6 +1735,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 loop_node_id=args.loop_node_id,
                 iteration_index=args.iteration_index,
                 json_output=args.json,
+            )
+        if args.command == "ui":
+            return run_ui(
+                runs_dir=args.runs_dir,
+                host=args.host,
+                port=args.port,
+                frontend_dist=args.frontend_dist,
+                open_browser=args.open_browser,
             )
         if args.command == "otel":
             if args.otel_command == "show-config":

@@ -72,6 +72,7 @@ uv run mentalmodel demo async-rl
 uv run mentalmodel demo agent-tool-use
 uv run mentalmodel demo autoresearch-sorting
 uv run mentalmodel verify --spec src/mentalmodel/examples/review_workflow/review_workflow_fixture.toml
+uv run mentalmodel ui
 ```
 
 ## Run artifacts
@@ -109,6 +110,8 @@ uv run mentalmodel verify --spec src/mentalmodel/examples/review_workflow/review
   the programming model is not RL-shaped by accident.
 - `review_workflow` is the serious reference path for `Block`, `StepLoop`,
   runtime environments, and spec-driven verification.
+- `mentalmodel ui` is the hosted-style dashboard surface over the same `.runs`,
+  replay, and invocation services used by the CLI.
 - `autoresearch-sorting` shows the bounded objective/search layer and writes an
   autoresearch-style `program.md` bundle when run with `--write-artifacts`.
 

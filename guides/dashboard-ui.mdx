@@ -1,0 +1,65 @@
+---
+title: Dashboard UI
+description: Use the bespoke React dashboard to launch workflows, inspect graphs, and debug invariants on top of persisted .runs data.
+---
+
+The dashboard is the first dedicated human UI on top of the same run and replay
+services that power the CLI.
+
+## Architecture
+
+The Phase 26 stack is split cleanly:
+
+- backend API: shared Python services over `.runs`, replay, and invocation specs
+- frontend: React/TypeScript app in `apps/dashboard`
+- persistence: existing `.runs` artifacts plus a persisted `graph.json` per run
+
+That matters for hosted-service design. The UI is not reconstructing graphs from
+ad hoc frontend logic or ephemeral Python objects.
+
+## Proof workflow
+
+The initial proof case is the `review_workflow` example:
+
+- `review-workflow-fixture`
+- `review-workflow-strict`
+
+Both are launchable from the UI and are backed by the same TOML invocation
+specs used by the CLI.
+
+## Local flow
+
+Build the frontend once:
+
+```bash
+cd apps/dashboard
+npm install
+npm run typecheck
+npm run build
+```
+
+Then launch the dashboard:
+
+```bash
+cd /path/to/mentalmodel
+uv run mentalmodel ui --open-browser
+```
+
+## What the UI should help with
+
+- run the workflow without dropping to raw entrypoint strings
+- inspect the lowered graph and click into nodes
+- inspect node inputs and outputs, including loop-scoped frames
+- inspect invariant status without grepping raw records
+- view the full semantic record stream in a logs-like table
+- compare the fixture and strict runtime profiles through the resolution metrics
+
+## Relationship to the CLI
+
+The UI does not replace the CLI. A good debugging sequence is:
+
+1. run or inspect in the dashboard
+2. use `mentalmodel runs outputs` or `mentalmodel replay` when you need exact
+   raw payloads
+3. use `.runs/<graph>/<run>/` artifacts directly when you are building new
+   tooling or debugging the dashboard itself
