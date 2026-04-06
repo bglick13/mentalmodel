@@ -61,6 +61,24 @@ When you run without `--json`, the command renders three tables.
 | collect_data | 2 | 1 | 2 | node_completed | pass |
 | process_results | 2 | 3 | 4 | node_completed | |
 
+## How to interpret replay
+
+Use `replay` when you want a whole-run narrative instead of one-node detail.
+
+The most useful reading pattern is:
+
+1. skim the summary table
+2. scan the event table for where the run changes phase or fails
+3. use the node summary table to identify nodes with unusual event counts or
+   failed invariants
+4. jump from there to `runs trace`, `runs inputs`, or `runs outputs`
+
+`replay` is especially useful for answering:
+
+- what happened first?
+- which node failure cascaded into the rest of the run?
+- did the run order match my mental model of the workflow?
+
 ## Examples
 
 <CodeGroup>
@@ -89,3 +107,9 @@ mentalmodel replay \
 
 - **`replay`** reconstructs the full ordered event timeline. It reads `records.jsonl` and renders events in sequence order with timestamps and payloads. Use it when you want to understand _what happened_ and _in what order_ during a run.
 - **`runs show`** shows the static metadata and file index for a bundle — graph ID, schema version, record counts, trace configuration, and paths to each file. Use it when you want a quick summary of a run or need to locate the raw bundle files.
+
+The two commands pair well:
+
+1. `runs show` to find the right run
+2. `replay` to understand the whole run
+3. `runs trace` for a specific node

@@ -53,6 +53,12 @@ mentalmodel runs list
 mentalmodel runs list --graph-id my-graph --limit 5
 ```
 
+Use `runs list` when your question is:
+
+- what runs do I have?
+- which graph ids are active?
+- which run ids should I inspect or diff next?
+
 ---
 
 ## runs show
@@ -79,6 +85,14 @@ mentalmodel runs show --graph-id my-graph --run-id run-abc123
   Emit a JSON object with full run metadata and file paths.
 </ParamField>
 
+Use `runs show` when you want bundle metadata first, not node-level details.
+
+It answers:
+
+- did the run succeed?
+- how many records and outputs exist?
+- where are the files on disk?
+
 ---
 
 ## runs latest
@@ -100,6 +114,9 @@ mentalmodel runs latest --graph-id my-graph
 <ParamField query="--json" type="flag">
   Emit a JSON object with the resolved run summary.
 </ParamField>
+
+This is the fastest “start with the newest run” command and is often the first
+step after `mentalmodel verify`.
 
 ---
 
@@ -131,6 +148,12 @@ mentalmodel runs inputs --node-id collect_data
   Emit a JSON object with `graph_id`, `run_id`, `node_id`, and `inputs`.
 </ParamField>
 
+Use this when you need to answer:
+
+- what exact payload hit this node?
+- did input binding happen the way I expected?
+- what did the invariant or reducer actually receive?
+
 ---
 
 ## runs outputs
@@ -160,6 +183,12 @@ mentalmodel runs outputs --node-id process_results
 <ParamField query="--json" type="flag">
   Emit a JSON object with `graph_id`, `run_id`, `node_id`, and `output`.
 </ParamField>
+
+Use this when you need to answer:
+
+- what did this node actually produce?
+- is the output shape what I expected?
+- did the join or actor emit the right values?
 
 ---
 
@@ -196,6 +225,20 @@ mentalmodel runs trace --node-id collect_data
 </ParamField>
 
 The table output shows two sections: a **records table** (Seq, Event, Timestamp, Payload) and a **Matching Spans table** (Name, Duration (ns), Error).
+
+The records table is the more important one.
+
+Typical interpretation flow:
+
+- `node.started` means the node became runnable
+- `node.inputs_resolved` shows the exact bound input payload
+- semantic events such as `effect.invoked` or `invariant.checked` show the
+  node-specific work
+- `node.succeeded` or `node.failed` shows the outcome
+
+Use `runs trace` when your question is:
+
+- what happened around this node, in order?
 
 ---
 
@@ -234,6 +277,12 @@ mentalmodel runs records --graph-id my-graph
 <ParamField query="--json" type="flag">
   Emit a JSON array of record objects.
 </ParamField>
+
+Prefer `runs records` over `runs trace` when you want:
+
+- semantic records only
+- event-type filtering
+- no span data
 
 ---
 
@@ -277,6 +326,12 @@ mentalmodel runs diff \
 </ParamField>
 
 The output includes a **summary table** (differs, state equal, verification outcomes for each run), a **Node Diffs table** (per-node event/input/output equality), an **Invariant Diffs table** (when invariant outcomes differ), and a **State Diff panel** (when state is not equal).
+
+Use `runs diff` when your question is:
+
+- what changed between two runs?
+- which node drifted?
+- did an invariant start failing?
 
 ---
 
@@ -331,3 +386,14 @@ mentalmodel runs repair --dry-run --json
   ]
 }
 ```
+
+## A practical debugging sequence
+
+For most failures or regressions, this sequence works well:
+
+1. `runs latest`
+2. `runs show`
+3. `runs trace --node-id <suspect>`
+4. `runs inputs --node-id <suspect>`
+5. `runs outputs --node-id <suspect>`
+6. `runs diff` if you have a known-good comparison run

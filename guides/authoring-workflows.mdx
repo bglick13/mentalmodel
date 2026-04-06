@@ -1,42 +1,166 @@
 ---
 title: "Authoring Workflows"
-description: "Structure programs as factory functions using Workflow, children, and Ref to express data dependencies."
+description: "How to structure mentalmodel workflows so they stay readable as they grow."
 ---
 
-A `Workflow` is the top-level container for every mentalmodel program. You assemble nodes into a tree of children and connect them with `Ref` to express data flow. The entire program lives in a plain Python function so it is easy to parameterize, test, and version.
+The fastest way to make a `mentalmodel` program unreadable is to treat
+`Workflow(children=[...])` as a dumping ground.
 
-## Workflow structure
+The fastest way to keep it readable is to let the top-level workflow express
+architecture, not implementation detail.
 
-`Workflow` accepts three key fields:
+This guide focuses on that authored shape.
 
-| Field | Type | Purpose |
-|---|---|---|
-| `name` | `str` | Stable identifier — becomes the graph ID in the IR |
-| `children` | `Sequence[ChildT]` | Ordered list of child primitives |
-| `description` | `str \| None` | Human-readable summary stored as IR metadata |
+## The basic rule
+
+Use containers to express structure and `Ref` to express dataflow.
+
+- `Workflow`, `Parallel`, and `RuntimeContext` provide readable grouping
+- `Ref` provides executable dependency edges
+
+If a reader can understand your workflow by looking at the containers and a few
+well-named nodes, you are on the right path.
+
+## Start with a program factory
+
+Always build workflows in a function that returns a `Workflow`.
 
 ```python
-from mentalmodel import Workflow, Actor, Effect, Ref
+from mentalmodel import Workflow
 
-workflow = Workflow(
-    name="my_pipeline",
-    description="A short description of what this program does.",
+def build_program() -> Workflow:
+    return Workflow(
+        name="hello_world",
+        description="Minimal example workflow.",
+        children=[...],
+    )
+```
+
+This keeps the authored model:
+
+- parameterizable
+- testable
+- easy to pass to CLI entrypoints
+- easy to reuse in demos, verification, and optimization flows
+
+## Use containers for semantic grouping
+
+A good top-level workflow usually reads like a list of major subsystems.
+
+```python
+Workflow(
+    name="async_rl_demo",
     children=[
-        Actor("data_source", handler=...),
-        Effect("transform", handler=..., inputs=[Ref("data_source")]),
+        RuntimeContext(
+            name="local_control_plane",
+            runtime="local",
+            children=[...],
+        ),
+        RuntimeContext(
+            name="remote_sampling",
+            runtime="sandbox",
+            children=[...],
+        ),
     ],
 )
 ```
 
-<Note>
-`name` is the node's stable identifier throughout the IR, tracing, and metrics. Once you choose a name, treat it as permanent — renaming a node changes its graph ID and breaks stored run history.
-</Note>
+That is better than a flat list of twenty nodes with no visual structure.
 
-## Children define containment and local sequencing
+## Use names that describe roles, not implementations
 
-The `children` list encodes both **containment** (which nodes belong to this scope) and **local sequencing** (the order in which sibling nodes are evaluated by the executor). Nodes earlier in the list are available as `Ref` targets for nodes that appear later.
+Good names:
 
-You can nest containers — `Workflow`, `Parallel`, and `RuntimeContext` all accept `children` — to build hierarchical programs:
+- `batch_source`
+- `sample_policy`
+- `reward_join`
+- `staleness_invariant`
+- `learner_update`
+
+Bad names:
+
+- `handler1`
+- `step2`
+- `foo`
+- `reward_join_v2`
+
+Node names become:
+
+- IR ids
+- `.runs` keys
+- replay filters
+- span names
+- diff targets
+
+So naming is not cosmetic.
+
+## `Ref` is where dataflow becomes real
+
+Containers do not create data dependencies by themselves. `Ref` does.
+
+```python
+Effect(
+    "sample_policy",
+    handler=PolicySampler(),
+    inputs=[Ref("batch_source"), Ref("policy_snapshot")],
+)
+```
+
+That is the line that tells the runtime:
+
+- which outputs this node consumes
+- when it becomes runnable
+- what should be persisted in `node.inputs_resolved`
+
+Treat `Ref` edges as part of the architecture, not as minor wiring.
+
+## Prefer explicit fanout and join
+
+When work is conceptually parallel, say so in the source.
+
+```python
+Parallel(
+    "reward_fanout",
+    children=[
+        Effect("pangram_reward", handler=PangramScorer(), inputs=[Ref("sample_policy")]),
+        Effect("quality_reward", handler=QualityScorer(), inputs=[Ref("sample_policy")]),
+    ],
+)
+
+Join(
+    "reward_join",
+    inputs=[Ref("pangram_reward"), Ref("quality_reward")],
+    reducer=RewardJoinReducer(),
+)
+```
+
+This gives you:
+
+- a more readable graph
+- a more readable Mermaid view
+- a more readable replay trace
+
+## Keep handlers domain-focused
+
+Handlers should contain domain logic, not graph plumbing.
+
+If you find yourself writing handler code that knows about prefixed node ids or
+container names, that is usually a sign the authored structure is getting too
+stringly.
+
+Today, this is one of the known ergonomic gaps the package is actively working
+to improve further with reusable blocks.
+
+## A practical structure for medium-sized workflows
+
+For current `mentalmodel`, a good pattern is:
+
+1. top-level `Workflow`
+2. a small number of semantically meaningful container blocks
+3. executable leaf nodes inside each block
+4. explicit joins and invariants near the points where meaning is established
+
+Example:
 
 ```python
 Workflow(
@@ -48,179 +172,88 @@ Workflow(
             children=[
                 Actor("policy_snapshot", handler=...),
                 Actor("batch_source", handler=...),
-                Effect("sample_policy", handler=..., inputs=[
-                    Ref("batch_source"),
-                    Ref("policy_snapshot"),
-                ]),
+                RuntimeContext(
+                    name="remote_sampling",
+                    runtime="sandbox",
+                    children=[
+                        Effect("sample_policy", handler=..., inputs=[...]),
+                    ],
+                ),
+                Parallel(
+                    name="reward_fanout",
+                    children=[
+                        Effect("pangram_reward", handler=..., inputs=[Ref("sample_policy")]),
+                        Effect("quality_reward", handler=..., inputs=[Ref("sample_policy")]),
+                    ],
+                ),
+                Join("rollout_join", inputs=[...], reducer=...),
+                Invariant("staleness_invariant", checker=..., inputs=[Ref("rollout_join")]),
+                Actor("learner_update", handler=..., inputs=[Ref("rollout_join")]),
             ],
-        )
+        ),
     ],
 )
 ```
 
-## Using Ref for cross-node dependencies
+The top-level shape tells the reader roughly what the program does before they
+need to read any handler implementation.
 
-`Ref` declares a data dependency between two nodes. It contains a `target` (the name of the upstream node) and an optional `port` (defaults to `"default"`).
+## What not to assume about child order
 
-```python
-from mentalmodel import Ref
+Child order is useful for readability and produces deterministic lowering, but
+it is not the real execution contract.
 
-# Reference the default output port of "policy_snapshot"
-Ref("policy_snapshot")
+The runtime executes nodes based on dependency readiness. If two nodes become
+ready at the same time, the executor uses deterministic ordering internally,
+but the true causal structure comes from `Ref` edges.
 
-# Reference a named port (advanced)
-Ref("policy_snapshot", port="state")
+So:
+
+- use child order to make the authored source pleasant to read
+- use `Ref` to make execution semantics explicit
+
+## Use the tooling while authoring
+
+The most useful authoring loop is:
+
+```bash
+mentalmodel check --entrypoint demo:build_program
+mentalmodel graph --entrypoint demo:build_program
+mentalmodel docs --entrypoint demo:build_program
+mentalmodel verify --entrypoint demo:build_program
 ```
 
-You pass `Ref` objects in the `inputs` list of the consuming node. The executor resolves each `Ref` at runtime and passes the resolved values as a typed dict to the handler.
+That gives you:
 
-```python
-Effect[SamplePolicyInputs, SamplePolicyOutput](
-    "sample_policy",
-    handler=PolicySampler(group_size=4, sampler_lag=0),
-    inputs=[Ref("batch_source"), Ref("policy_snapshot")],
-)
-```
+- structural validation
+- topology visibility
+- generated inventories
+- real runtime proof
 
-<Warning>
-`Ref` targets must match the `name` of a node that is already reachable in the same scope or an enclosing scope. Referencing a node that does not exist causes a lowering error.
-</Warning>
+If the graph or docs become hard to read, the workflow is probably too hard to
+read too.
 
-## Building the program as a factory function
+## Current limitation
 
-Wrap every `Workflow` construction in a factory function that accepts configuration parameters and returns the fully-built `Workflow`. This pattern keeps your program pure (no global mutable state), easy to test with different configurations, and composable with the optimization layer.
+Today the package does not yet have first-class reusable block instantiation or
+native loop control flow. That means larger real workflows still need some
+extra authoring discipline to stay legible.
 
-```python
-def build_program(
-    group_size: int = 4,
-    *,
-    sampler_lag: int = 0,
-    max_off_policy_steps: int = 0,
-    initial_policy_version: int = 3,
-) -> Workflow[AsyncRlNode]:
-    """Build the async RL authoring model."""
-    return Workflow(
-        name="async_rl_demo",
-        description="Milestone 2 async RL demo authored in semantic primitives.",
-        children=[...],
-    )
-```
+Those are active design areas, not hidden limitations.
 
-The return type annotation (`Workflow[AsyncRlNode]`) uses a `TypeAlias` that unions all legal child node types. This gives you static type-checking coverage across the entire program tree.
+## Next steps
 
-## Naming conventions
-
-Follow these conventions for all node names:
-
-- **Stable**: treat names as permanent identifiers, not display labels.
-- **Lowercase snake_case**: `policy_snapshot`, `rollout_join`, `learner_update`.
-- **Descriptive nouns or noun phrases**: the name should identify the role of the node, not its implementation.
-- **No version suffixes**: `policy_snapshot_v2` is an antipattern — use the `description` field or metadata for version context.
-
-## Full example: async_rl demo
-
-The following is the complete factory function from the `async_rl` demo. It shows all the concepts above working together: nested `RuntimeContext` scopes, `Ref`-wired data flow, parallel fanout, a join reducer, an invariant, and incremental state.
-
-```python
-from mentalmodel import (
-    Actor, Effect, Invariant, Join, Parallel, Ref, Workflow,
-    extract_output_metrics, infer_output_metrics,
-)
-from mentalmodel.plugins.runtime_context import RuntimeContext
-
-
-def build_program(
-    group_size: int = 4,
-    *,
-    sampler_lag: int = 0,
-    max_off_policy_steps: int = 0,
-    initial_policy_version: int = 3,
-) -> Workflow[AsyncRlNode]:
-    return Workflow(
-        name="async_rl_demo",
-        description="Milestone 2 async RL demo authored in semantic primitives.",
-        children=[
-            RuntimeContext(
-                name="local_control_plane",
-                runtime="local",
-                children=[
-                    Actor[PolicySnapshotInputs, PolicySnapshotOutput, PolicySnapshotState](
-                        "policy_snapshot",
-                        handler=PolicySnapshot(initial_policy_version=initial_policy_version),
-                    ),
-                    Actor[BatchSourceInputs, list[PromptRecord], BatchState](
-                        "batch_source",
-                        handler=BatchSource(),
-                    ),
-                    RuntimeContext(
-                        name="remote_sampling",
-                        runtime="sandbox",
-                        children=[
-                            Effect[SamplePolicyInputs, SamplePolicyOutput](
-                                "sample_policy",
-                                handler=PolicySampler(
-                                    group_size=group_size,
-                                    sampler_lag=sampler_lag,
-                                ),
-                                inputs=[Ref("batch_source"), Ref("policy_snapshot")],
-                            )
-                        ],
-                    ),
-                    Parallel[...](
-                        name="reward_fanout",
-                        children=[
-                            Effect[RewardInputs, RewardScores](
-                                "pangram_reward",
-                                handler=PangramScorer(),
-                                inputs=[Ref("sample_policy")],
-                            ),
-                            Effect[RewardInputs, RewardScores](
-                                "quality_reward",
-                                handler=QualityScorer(),
-                                inputs=[Ref("sample_policy")],
-                            ),
-                            Effect[RewardInputs, KLPrefetchOutput](
-                                "kl_prefetch",
-                                handler=KLPrefetch(),
-                                inputs=[Ref("sample_policy")],
-                            ),
-                        ],
-                    ),
-                    Join[RolloutJoinInputs, RolloutJoinOutput](
-                        "rollout_join",
-                        inputs=[
-                            Ref("policy_snapshot"),
-                            Ref("sample_policy"),
-                            Ref("pangram_reward"),
-                            Ref("quality_reward"),
-                            Ref("kl_prefetch"),
-                        ],
-                        reducer=RolloutJoinReducer(),
-                    ),
-                    Invariant[InvariantInputs, int](
-                        "staleness_invariant",
-                        checker=PolicyStalenessChecker(
-                            max_off_policy_steps=max_off_policy_steps
-                        ),
-                        inputs=[Ref("rollout_join")],
-                    ),
-                    Actor[LearnerInputs, LearnerOutput, LearnerState](
-                        "learner_update",
-                        handler=LearnerUpdate(),
-                        inputs=[Ref("rollout_join")],
-                        metrics=[infer_output_metrics(prefix="mentalmodel.demo.learner_update")],
-                    ),
-                    Effect[RefreshInputs, RefreshOutput](
-                        "refresh_sampler",
-                        handler=RefreshSampler(),
-                        inputs=[Ref("learner_update")],
-                    ),
-                ],
-            )
-        ],
-    )
-```
-
-<Tip>
-Run `build_program()` without arguments to get a zero-configuration program you can execute immediately during development and testing.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Runtime" icon="gear" href="/concepts/runtime">
+    See how the authored graph becomes a compiled execution plan.
+  </Card>
+  <Card title="Effects and actors" icon="bolt" href="/guides/effects-and-actors">
+    Learn how to design good handlers for stateful and effectful nodes.
+  </Card>
+  <Card title="Parallel and join" icon="diagram-project" href="/guides/parallel-and-join">
+    Go deeper on fanout, synchronization, and join reducers.
+  </Card>
+  <Card title="Run bundles" icon="folder-tree" href="/observability/run-bundles">
+    Learn how to inspect what actually happened at runtime.
+  </Card>
+</CardGroup>

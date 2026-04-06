@@ -663,6 +663,8 @@ API work has a place to plug into immediately.
 - all examples in the docs are runnable and verified
 - the docs establish a stable location and pattern for subsequent milestone
   updates
+- major CLI and tutorial pages include realistic output examples plus guidance
+  on how to interpret that output and what command to run next
 
 ## Phase 17: Reusable Blocks and Namespaced Instantiation
 
@@ -915,6 +917,66 @@ scaffolding from Pangramanizer, not just add more features to `mentalmodel`.
 - no magical verification parameter conventions without typed validation
 - no implementation that improves Pangramanizer at the cost of weakening
   generality
+
+## Signals from the Generated Docs Pass
+
+The initial Mintlify-generated docs assumed a package that was somewhat more
+capable than the current implementation. Much of that overreach was generic doc
+generator noise, but some of it is useful signal for the roadmap.
+
+These signals should influence future package shape:
+
+### 1. The package wants a stronger multi-step story
+
+The generated docs naturally reached for a fuller workflow model than the
+current one-step DAG runtime provides. That reinforces native multi-step support
+as a core gap, not just an application-level annoyance.
+
+### 2. Reusable composition wants to be more first-class
+
+The generated documentation read more naturally when describing reusable
+sub-workflows than the current package supports ergonomically. That reinforces
+`Block` + `Use` as the right direction.
+
+### 3. Interactive debugging is a real product need
+
+The docs tended to assume a more interactive inspection/debugging experience
+than the package currently has. That is useful signal in favor of the planned
+step-mode milestone rather than a reason to dismiss the gap.
+
+### 4. Richer graph and machine-readable inspection will matter
+
+Some generated descriptions assumed broader inspection surfaces than the current
+CLI offers. We should not add features blindly because a doc generator guessed
+them, but it is useful signal that:
+
+- richer IR inspection
+- richer graph inspection
+- clearer structured CLI outputs
+
+will likely be high leverage once blocks and loops land.
+
+### 5. Static analysis breadth is a future growth area
+
+Some generated claims about checks were wrong today, but the categories they
+reached for were reasonable. Once the core model grows to include blocks and
+loops, the analyzer surface should expand too.
+
+### Non-signal examples
+
+The following generated assumptions are not strong product signals by
+themselves:
+
+- vague “SDK” framing
+- unsupported claims with no clear runtime or IR backing
+- broad promises that sound good but do not map cleanly to a package surface
+
+### Practical conclusion
+
+When generated docs repeatedly assume a capability that fits the package’s
+direction and real user pain, we should treat that as useful product signal.
+When they assume a capability that does not map to a clear runtime/IR/design
+surface, we should treat it as generator noise.
 
 ## Follow-On Product Milestones
 

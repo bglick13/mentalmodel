@@ -1,9 +1,17 @@
 ---
 title: "verify"
-description: "Run analysis, runtime verification, and property/Hypothesis checks against a mentalmodel program."
+description: "Run static analysis, execute the workflow, run property checks, and persist a `.runs` bundle."
 ---
 
-The `verify` command combines static analysis, a live runtime execution, and any property-based tests defined in your module into a single pass. It persists a debug bundle to `.runs/` after each execution.
+`mentalmodel verify` is the main end-to-end validation command.
+
+It combines:
+
+1. static analysis
+2. real runtime execution
+3. property-check execution when the module defines any
+
+and writes a run bundle to `.runs/`.
 
 ## Usage
 
@@ -14,56 +22,119 @@ mentalmodel verify --entrypoint module:function
 ## Flags
 
 <ParamField query="--entrypoint" type="string" default="mentalmodel.examples.async_rl.demo:build_program">
-  Program entrypoint in `module.submodule:function_name` format. The CLI imports the module, calls the function, and expects a `Workflow` instance in return.
+  Workflow entrypoint in `module.submodule:function_name` format.
 </ParamField>
 
 <ParamField query="--runs-dir" type="path">
-  Root directory for persisted run artifacts. Defaults to `./.runs` in the current working directory.
+  Root directory for persisted run artifacts. Defaults to `./.runs`.
 </ParamField>
 
 <ParamField query="--json" type="flag">
-  Emit a single JSON object to stdout instead of rendering Rich tables.
+  Emit structured JSON instead of Rich tables.
 </ParamField>
 
-## What it runs
+## What verify actually does
 
-`verify` executes three phases in order:
+### 1. Static analysis
 
-1. **Static analysis** — runs the same structural and semantic checks as [`mentalmodel check`](/cli/check).
-2. **Runtime verification** — executes the workflow and records outputs, state entries, and execution records.
-3. **Property checks** — discovers and runs any property-based tests (including Hypothesis-backed tests) defined in the module.
+This is the same analysis used by `mentalmodel check`.
 
-Each run writes a debug bundle to `.runs/<graph_id>/<run_id>/`. Use [`mentalmodel runs`](/cli/runs) or [`mentalmodel replay`](/cli/replay) to inspect the bundle.
+It catches current graph-level issues such as:
 
-## Output
+- duplicate node ids
+- malformed edge references
+- missing workflow roots
+- missing runtime-context metadata
+- missing plugin provenance
 
-When you run without `--json`, the command renders up to three tables.
+### 2. Runtime execution
 
-**Summary table:**
+The workflow is executed by the async runtime.
 
-| Graph | Static Errors | Warnings | Runtime | Property Checks |
-|---|---|---|---|---|
-| my-graph | 0 | 1 | pass | 3 |
+This produces:
 
-**Runtime Verification table:**
+- node outputs
+- state transitions
+- semantic execution records
+- local span capture when enabled
 
-| Success | Records | Outputs | State Entries | Run Artifacts | Error |
-|---|---|---|---|---|---|
-| yes | 12 | 3 | 2 | .runs/my-graph/run-abc123 | |
+### 3. Property checks
 
-**Property Checks table** (shown when property checks exist):
+If the entrypoint module defines registered property checks, `verify` runs them
+after runtime execution.
 
-| Name | Hypothesis | Success | Error |
-|---|---|---|---|
-| test_output_bounds | yes | yes | |
-| test_invariant_holds | no | yes | |
+This is how demo workflows can combine:
 
-When no property checks are discovered, the CLI prints a yellow notice.
+- runtime invariants inside the graph
+- broader Hypothesis-backed checks outside the graph
+
+## What gets written
+
+A successful or failed verify run writes:
+
+```text
+.runs/<graph_id>/<run_id>/
+```
+
+Typically containing:
+
+- `summary.json`
+- `verification.json`
+- `records.jsonl`
+- `outputs.json`
+- `state.json`
+- `otel-spans.jsonl`
+
+Use:
+
+```bash
+mentalmodel runs latest --graph-id <graph_id>
+mentalmodel runs trace --graph-id <graph_id> --node-id <node_id>
+```
+
+immediately after `verify` when debugging.
+
+## Reading the output
+
+Without `--json`, the command renders:
+
+- a summary table
+- a runtime verification table
+- a property-check table when checks exist
+
+The most important fields are:
+
+- static errors
+- warnings
+- runtime success/failure
+- run artifact directory
+- property check success/failure
+
+Example:
+
+```text
+mentalmodel verify summary
+Graph       Static Errors  Warnings  Runtime  Property Checks
+async_rl_demo 0            0         pass     2
+
+Runtime Verification
+Success  Records  Outputs  State Entries  Run Artifacts
+yes      48       10       3              .runs/async_rl_demo/run-abc123
+```
+
+How to use that:
+
+- if `Static Errors` is nonzero, fix the graph before trusting runtime output
+- if `Runtime` failed, go straight to the run bundle and inspect `runs trace`
+- if runtime passed but a property check failed, inspect the property-check name
+  first, then compare it to runtime outputs and records
+- always note the `Run Artifacts` path; that is the anchor for deeper debugging
 
 ## Examples
 
 <CodeGroup>
-```bash Basic verify
+
+```bash Basic
 mentalmodel verify --entrypoint mypackage.workflows:build_program
 ```
 
@@ -73,34 +144,51 @@ mentalmodel verify \
   --runs-dir /tmp/my-runs
 ```
 
-```bash JSON output
+```bash JSON
 mentalmodel verify \
   --entrypoint mypackage.workflows:build_program \
   --json
 ```
+
 </CodeGroup>
-
-## Run artifacts
-
-After each invocation, `verify` writes a bundle to the runs directory:
-
-```
-.runs/
-└── <graph_id>/
-    └── <run_id>/
-        ├── summary.json
-        ├── verification.json
-        ├── records.jsonl
-        ├── outputs.json
-        ├── state.json
-        └── otel-spans.jsonl
-```
-
-Use [`mentalmodel runs show`](/cli/runs) to inspect the bundle contents.
 
 ## Exit codes
 
 | Code | Meaning |
-|---|---|
-| `0` | All phases passed — no static errors, runtime succeeded, all property checks passed |
-| `1` | One or more phases failed |
+| --- | --- |
+| `0` | Analysis passed, runtime succeeded, and all property checks passed |
+| `1` | One or more verification layers failed |
+
+## When to use verify instead of check
+
+Use `check` when you want:
+
+- fast structural feedback
+- no runtime execution
+- no run bundle
+
+Use `verify` when you want:
+
+- a real execution
+- persisted artifacts
+- invariant runtime proof
+- property-check execution
+
+Most meaningful workflow changes should end with `verify`, not just `check`.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="runs" icon="folder-tree" href="/cli/runs">
+    Inspect the bundle that verify wrote.
+  </Card>
+  <Card title="replay" icon="clock-rotate-left" href="/cli/replay">
+    Reconstruct the semantic event timeline for the run.
+  </Card>
+  <Card title="Run bundles" icon="folder-tree" href="/observability/run-bundles">
+    Understand the artifact model in more detail.
+  </Card>
+  <Card title="Debugging" icon="bug" href="/observability/debugging">
+    Learn how to trace failures back to authored nodes.
+  </Card>
+</CardGroup>

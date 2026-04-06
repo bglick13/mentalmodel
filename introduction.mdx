@@ -1,58 +1,142 @@
 ---
 title: "Introduction"
-description: "mentalmodel is a Python SDK for authoring programs whose topology, causality, state transitions, effects, and invariants are mechanically recoverable by humans and AI coding agents."
+description: "mentalmodel is a Python package for authoring programs whose topology, causality, effects, invariants, and runtime behavior stay mechanically recoverable."
 ---
 
-## What is mentalmodel?
+## What mentalmodel is for
 
-`mentalmodel` gives you a small set of semantic primitives for building programs that stay legible over time. When you author a workflow with `mentalmodel`, the structure you write down is not just documentation—it becomes the source of truth for static analysis, generated diagrams, generated docs, and runtime observability.
+`mentalmodel` is for programs where architecture matters after the first week.
 
-The core idea: instead of building ad hoc orchestrators where causality and side effects are implicit, you declare your program's topology, data dependencies, runtime boundaries, and correctness properties using explicit primitives. Everything downstream—diagrams, docs, traces, verification—derives from that declaration.
+Instead of relying on ad hoc orchestration code, conventions, and tribal
+knowledge, you author against a small set of semantic primitives. That authored
+structure becomes the source of truth for:
 
-## Key value propositions
+- static analysis
+- Mermaid diagrams
+- generated docs
+- runtime execution
+- semantic execution records
+- `.runs` debugging bundles
+- OpenTelemetry traces and metrics
 
-**Semantic primitives over ad hoc orchestration**
+The package is not trying to replace Python. It is trying to make workflow
+structure, side effects, state transitions, and correctness checks explicit
+enough that both humans and coding agents can keep the right mental model of
+the program.
 
-You write programs using a small, composable vocabulary: `Workflow`, `Actor`, `Effect`, `Invariant`, `Parallel`, `Join`, `Ref`, and `RuntimeContext`. Each primitive has a well-defined role. There is no ambiguity about what is stateful, what has side effects, or what the data flow is.
+## The core idea
 
-**Automatic observability**
+Most workflow-like systems get harder to reason about over time because the
+important semantics are implicit:
 
-The async runtime instruments every node execution with OpenTelemetry spans automatically. Span attributes include semantic metadata (`mentalmodel.node.kind`, `mentalmodel.node.id`, `mentalmodel.workflow.id`, etc.) so traces carry meaning without you writing any instrumentation code.
+- which code is stateful
+- which code performs side effects
+- which nodes depend on which other nodes
+- what invariants must hold
+- where code is allowed to run
 
-**Static analysis**
+`mentalmodel` makes those decisions explicit in code.
 
-`mentalmodel check` lowers your authoring model into a canonical intermediate representation (IR) and runs structural and semantic analyzers over it. It catches unresolved refs, orphaned nodes, illegal cycles, undeclared effects, and missing invariants before you run anything.
+You describe a program using primitives like:
 
-**Generated docs and diagrams**
+- `Workflow`
+- `Actor`
+- `Effect`
+- `Invariant`
+- `Parallel`
+- `Join`
+- `Ref`
 
-`mentalmodel docs` and `mentalmodel graph` generate markdown documentation and Mermaid diagrams directly from the IR. The outputs are always in sync with your code because they are derived from it, not written by hand.
+And when you need an extension, you add one through the plugin system, as with
+`RuntimeContext` and `AutoResearch`.
 
-**Agent-ready**
+## What the package already does well
 
-`mentalmodel` ships with installable coding-agent skills (`mentalmodel install-skills`) that teach agents to prefer semantic primitives, route side effects through `Effect`, attach invariants to joins and state transitions, and run `mentalmodel check` after meaningful changes.
+### One authored model powers multiple surfaces
 
-## Core primitives
+The same workflow definition can drive:
 
-| Primitive | Role |
-|---|---|
-| `Workflow` | Top-level container that names and groups a program |
-| `Actor` | Stateful node with a typed handler; owns a state store |
-| `Effect` | Impure node that models a side effect with explicit inputs and outputs |
-| `Invariant` | Correctness property attached to a node; checked at runtime and by `mentalmodel verify` |
-| `Parallel` | Groups concurrent children for fanout; always pairs with a `Join` |
-| `Join` | Waits for all named inputs and reduces them into a single output |
-| `Ref` | Cross-tree dependency reference; makes non-sequential data flow explicit |
-| `RuntimeContext` | Plugin primitive that annotates a subtree with a runtime boundary (e.g., `sandbox`, `local`) |
+- `mentalmodel check`
+- `mentalmodel graph`
+- `mentalmodel docs`
+- `mentalmodel verify`
+- `.runs` inspection
+- replay and diffing
 
-All primitives lower into a canonical IR graph. Mermaid diagrams, markdown docs, static analysis, and the async executor all operate on that IR—nothing bypasses it.
+That means diagrams and debugging artifacts stay aligned with the code instead
+of drifting.
 
-## Next steps
+### Semantic runtime records come first
+
+OpenTelemetry is supported, but it is not the package's source of truth.
+
+The primary runtime ledger is the semantic event stream recorded by the
+executor. That is what powers:
+
+- `runs trace`
+- `runs inputs`
+- `runs outputs`
+- `replay`
+- run diffing
+
+This is an important distinction: `mentalmodel` is designed so that you can
+still understand a run even without a hosted observability backend.
+
+### The extension model is real
+
+Plugins are not just documentation hooks. `mentalmodel` already supports
+runtime-executable plugins. That is how the `AutoResearch` demo works today.
+
+## What it is not
+
+`mentalmodel` is not:
+
+- a domain-specific RL package
+- a generic business-workflow engine like Temporal
+- a replacement for Python application structure
+- a hidden magic runtime that infers everything from ordinary code
+
+It is a programming model with explicit semantics.
+
+## Current core primitives
+
+| Primitive | Purpose |
+| --- | --- |
+| `Workflow` | Names and groups a program |
+| `Actor` | Stateful semantic node |
+| `Effect` | Explicit side-effect boundary |
+| `Invariant` | Runtime correctness check |
+| `Parallel` | Fanout grouping |
+| `Join` | Explicit synchronization / merge point |
+| `Ref` | Data dependency edge |
+| `RuntimeContext` | Plugin-based runtime boundary annotation |
+
+## A better way to think about it
+
+Use `mentalmodel` when you want the answer to questions like these to be easy:
+
+- What can run concurrently?
+- Which node produced this value?
+- What side effect just happened?
+- Which invariant failed, with which exact inputs?
+- What changed between two runs?
+- Which runtime boundary did this node execute under?
+
+If those questions matter, the package is a good fit.
+
+## Where to go next
 
 <CardGroup cols={2}>
   <Card title="Quick start" icon="bolt" href="/quickstart">
-    Install mentalmodel, write your first workflow, and run the CLI tools in five minutes.
+    Build and verify a tiny workflow first, then inspect its run bundle.
   </Card>
-  <Card title="Installation" icon="package" href="/installation">
-    Detailed install instructions for pip and uv, Python version requirements, and pre-commit setup.
+  <Card title="Core primitives" icon="shapes" href="/concepts/primitives">
+    Learn what each primitive means and when to use it.
+  </Card>
+  <Card title="Runtime model" icon="diagram-project" href="/concepts/runtime">
+    Understand how lowering, execution, records, and `.runs` fit together.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/cli/overview">
+    See the commands you will use most while developing and debugging workflows.
   </Card>
 </CardGroup>

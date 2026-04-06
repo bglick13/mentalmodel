@@ -33,6 +33,12 @@ Most commands support a `--json` flag. When you pass `--json`, the command write
 mentalmodel check --entrypoint mypackage.workflows:build --json | jq .error_count
 ```
 
+Use `--json` when:
+
+- a script or agent needs to make decisions from CLI output
+- you want stable machine-readable output instead of Rich tables
+- you are building dashboards or automation around `mentalmodel`
+
 ## Top-level commands
 
 | Command | Description |
@@ -47,6 +53,36 @@ mentalmodel check --entrypoint mypackage.workflows:build --json | jq .error_coun
 | [`install-skills`](/cli/install-skills) | Install packaged coding-agent skill templates |
 | [`demo`](/cli/demo) | Run or materialize a packaged reference demo |
 | [`doctor`](/cli/doctor) | Run preflight checks for agent and debugging setup |
+
+## A practical command flow
+
+Most real usage looks like this:
+
+1. `mentalmodel check`
+2. `mentalmodel verify`
+3. `mentalmodel runs ...`
+4. `mentalmodel replay`
+5. `mentalmodel graph` / `mentalmodel docs` when structure needs review
+
+In other words:
+
+- `check` tells you whether the graph shape is valid
+- `verify` tells you whether it runs
+- `runs` tells you what happened at a specific node
+- `replay` tells you what happened across the whole run
+- `graph` and `docs` tell you whether the authored structure is still legible
+
+## Choosing the right command
+
+| Goal | Command to start with |
+| --- | --- |
+| Validate authored structure | [`check`](/cli/check) |
+| Execute the workflow and persist artifacts | [`verify`](/cli/verify) |
+| Inspect a specific node’s inputs or outputs | [`runs`](/cli/runs) |
+| Reconstruct full run order | [`replay`](/cli/replay) |
+| Review topology visually | [`graph`](/cli/graph) |
+| Generate shareable design docs | [`docs`](/cli/docs) |
+| Confirm tooling / env setup | [`doctor`](/cli/doctor) |
 
 ## Exit codes
 

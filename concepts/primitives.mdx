@@ -1,261 +1,286 @@
 ---
 title: "Primitives"
-description: "The semantic building blocks you compose to describe a program: Workflow, Actor, Effect, Invariant, Parallel, Join, Ref, and RuntimeContext."
+description: "The semantic building blocks of a mentalmodel program: what each primitive means and how it is meant to be used."
 ---
 
-Every mentalmodel program is built from a small set of typed primitives. Each primitive maps to a specific semantic role — no more, no less. When you call `lower_program`, every primitive compiles into the same IR graph through the `LowersToIR` protocol.
+Every `mentalmodel` program is authored from a small set of primitives. The key
+idea is that each primitive has one semantic job.
 
-```python
-class LowersToIR(Protocol):
-    name: str
+That is what makes the resulting program readable:
 
-    def lower(self, ctx: LoweringContext) -> IRFragment:
-        """Lower the primitive into an IR fragment."""
-```
+- `Actor` means state
+- `Effect` means side effect or impure boundary
+- `Invariant` means correctness condition
+- `Ref` means dependency edge
 
-All eight primitives implement this protocol either directly or through a registered plugin. The result is a single, uniform `IRGraph` that every downstream tool — docs, diagrams, static analysis, and the async runtime — can consume without knowing which primitive produced each node.
+These primitives lower into a shared IR graph, and that same IR powers:
 
----
+- analysis
+- diagrams
+- generated docs
+- runtime execution
+- replay and `.runs`
+
+## A quick mental model
+
+Think of the primitives in three groups:
+
+### Structural
+
+- `Workflow`
+- `Parallel`
+- `RuntimeContext`
+
+These group other nodes and shape the readable structure of the program.
+
+### Executable
+
+- `Actor`
+- `Effect`
+- `Join`
+- `Invariant`
+
+These become runtime-executable nodes.
+
+### Linking
+
+- `Ref`
+
+This is how data dependencies are declared.
 
 ## Workflow
 
-`Workflow` is the top-level container for a program. It groups children into a named semantic unit and becomes the root node of the compiled `IRGraph`. The `graph_id` of every run equals the workflow's `name`.
+`Workflow` is the top-level semantic container for a program.
 
 ```python
-from mentalmodel import Workflow, Actor, Effect
+from mentalmodel import Workflow
 
-workflow = Workflow(
-    name="order-pipeline",
-    description="Processes incoming orders end-to-end.",
-    children=[
-        # ... actors, effects, invariants
-    ],
+program = Workflow(
+    name="hello_world",
+    description="Minimal workflow.",
+    children=[...],
 )
 ```
 
-**When to use it:** exactly once, as the outermost wrapper. You cannot nest workflows; use `Parallel` or `RuntimeContext` for sub-groups.
+Use it to:
 
-**Lowering:** emits one `kind="workflow"` node. All direct children are linked by `contains` edges from the workflow node.
+- name the program
+- group its top-level nodes
+- define the graph id used in `.runs`
 
----
+`Workflow` is a container primitive. It lowers to a `workflow` node plus
+`contains` edges to its children.
 
 ## Actor
 
-`Actor` is a stateful semantic processing node. It holds an `ActorHandler` that receives typed inputs, an optional previous state, and an `ExecutionContext`, and returns an `ActorResult` with an output and an optional next state.
+`Actor` is the primitive for stateful computation.
 
 ```python
-from dataclasses import dataclass
 from mentalmodel import Actor, Ref
-from mentalmodel.core.interfaces import ActorHandler
-from mentalmodel.core.models import ActorResult
 
-@dataclass
-class ScoringHandler:
-    async def handle(self, inputs, state, ctx):
-        score = inputs["features"]["value"] * 1.5
-        return ActorResult(output={"score": score}, next_state={"last": score})
-
-scorer = Actor(
-    name="scorer",
-    handler=ScoringHandler(),
-    inputs=[Ref("feature-extractor")],
+Actor(
+    "cursor",
+    handler=CursorHandler(),
+    inputs=[Ref("source")],
 )
 ```
 
-**When to use it:** any node that reads and writes durable state, or whose output depends on prior runs.
+Use `Actor` when:
 
-**Lowering:** emits one `kind="actor"` node with `metadata["stateful"] = "true"` and `metadata["handler"]` set to the handler class name.
+- the node reads prior state
+- the node writes next state
+- the output depends on accumulated or durable state
 
-<Note>
-Static analysis raises a `missing-runtime-context` warning for every `actor` node that does not inherit a `runtime_context` value. Wrap actors in a `RuntimeContext` to silence this and make deployment boundaries explicit.
-</Note>
+At runtime, an actor handler receives:
 
----
+- resolved typed inputs
+- previous state, if any
+- an `ExecutionContext`
+
+and returns an `ActorResult(output=..., next_state=...)`.
 
 ## Effect
 
-`Effect` marks an explicit impure boundary — any I/O, network call, or side effect lives here. The `EffectHandler.invoke` method receives typed inputs and an `ExecutionContext` and returns the effect's output.
+`Effect` is the primitive for explicit impure boundaries.
 
 ```python
 from mentalmodel import Effect, Ref
-from mentalmodel.core.interfaces import EffectHandler
 
-@dataclass
-class SendEmailHandler:
-    async def invoke(self, inputs, ctx):
-        # send the email
-        return {"sent": True}
-
-notify = Effect(
-    name="send-notification",
-    handler=SendEmailHandler(),
-    inputs=[Ref("scorer")],
+Effect(
+    "fetch_profile",
+    handler=FetchProfile(),
+    inputs=[Ref("user_id_source")],
 )
 ```
 
-**When to use it:** database writes, HTTP calls, message queue publishes, or any operation with observable side effects.
+Use `Effect` for:
 
-**Lowering:** emits one `kind="effect"` node with `metadata["effectful"] = "true"`. The runtime emits `effect.invoked` and `effect.completed` events around each invocation.
+- network calls
+- filesystem access
+- database operations
+- model inference calls
+- any observable external operation
 
----
+`Effect` is intentionally explicit. If something has side effects, it should not
+be disguised as an `Actor`.
 
 ## Invariant
 
-`Invariant` attaches a named checker to explicit program values. The `InvariantChecker.check` method receives resolved inputs and an `ExecutionContext`, and returns an `InvariantResult` with `passed: bool` and typed `details`.
+`Invariant` attaches a named runtime check to explicit values.
 
 ```python
 from mentalmodel import Invariant, Ref
-from mentalmodel.core.interfaces import InvariantChecker
-from mentalmodel.core.models import InvariantResult
 
-@dataclass
-class ScoreRangeChecker:
-    async def check(self, inputs, ctx):
-        score = inputs["scorer"]["score"]
-        passed = 0.0 <= score <= 1.0
-        return InvariantResult(passed=passed, details={"score": score})
-
-range_check = Invariant(
-    name="score-in-range",
-    checker=ScoreRangeChecker(),
-    inputs=[Ref("scorer")],
-    severity="error",
+Invariant(
+    "profile_not_empty",
+    checker=ProfileNotEmpty(),
+    inputs=[Ref("fetch_profile")],
 )
 ```
 
-**When to use it:** any constraint you want verified at runtime or checked as a property test — value ranges, causal ordering, key-set alignment, state monotonicity.
+Use it for:
 
-**Lowering:** emits one `kind="invariant"` node. When the check fails at runtime, the executor raises `InvariantViolationError` and records the failure as a metric observation.
+- value-range checks
+- key-set alignment
+- causal ordering
+- monotonicity constraints
+- domain-specific correctness properties
 
----
+At runtime, invariants are first-class nodes. They execute, emit records, and
+fail the run when `passed=False`.
 
 ## Parallel
 
-`Parallel` is a semantic grouping for fanout work. It behaves like `Workflow` in terms of lowering — it emits a container node and links children via `contains` edges — but signals to readers that its children run concurrently.
+`Parallel` is a structural grouping for fanout work.
 
 ```python
-from mentalmodel import Parallel, Actor, Ref
+from mentalmodel import Parallel
 
-fanout = Parallel(
-    name="feature-extraction",
+Parallel(
+    "reward_fanout",
     children=[
-        Actor(name="text-features", handler=..., inputs=[Ref("raw-input")]),
-        Actor(name="image-features", handler=..., inputs=[Ref("raw-input")]),
+        ...,
+        ...,
     ],
 )
 ```
 
-**When to use it:** whenever multiple independent actors or effects can proceed at the same time.
+Use it to make concurrency readable in authored code. `Parallel` does not
+create new dependency semantics by itself; the actual dataflow still comes from
+`Ref`.
 
-**Lowering:** emits one `kind="parallel"` node. The runtime schedules all children as soon as their data dependencies are satisfied.
+That distinction matters:
 
----
+- `Parallel` improves human legibility
+- `Ref` is what makes nodes runnable
 
 ## Join
 
-`Join` is an explicit merge point. It collects the outputs of multiple upstream nodes and, if a `JoinReducer` is provided, reduces them into a single value. Without a reducer it passes the raw input mapping through.
+`Join` is the explicit synchronization and merge point after fanout.
 
 ```python
 from mentalmodel import Join, Ref
-from mentalmodel.core.interfaces import JoinReducer
 
-@dataclass
-class ConcatReducer:
-    async def reduce(self, inputs, ctx):
-        return {k: v for d in inputs.values() for k, v in d.items()}
-
-merged = Join(
-    name="merged-features",
-    inputs=[Ref("text-features"), Ref("image-features")],
-    reducer=ConcatReducer(),
+Join(
+    "rollout_join",
+    inputs=[Ref("reward_a"), Ref("reward_b")],
+    reducer=RolloutJoinReducer(),
 )
 ```
 
-**When to use it:** after a `Parallel` block, or wherever you need to synchronize multiple upstream values before passing them to the next stage.
+Use it when:
 
-**Lowering:** emits one `kind="join"` node. The runtime records a `join.resolved` event once all inputs are available.
+- multiple upstream values must all be present before continuing
+- you want a reducer to combine them into one typed output
+- you want the merge point to be visible in the graph and records
 
----
+Without a reducer, a `Join` passes the resolved input mapping through directly.
 
 ## Ref
 
-`Ref` is a typed pointer to another node's output port. It is the only way to express a cross-tree data dependency. Children inside the same container are sequenced by containment; everything else uses `Ref`.
+`Ref` declares a dependency on another node's output.
 
 ```python
 from mentalmodel import Ref
 
-# Point at the default output port of "scorer"
-ref = Ref(target="scorer")
-
-# Point at a named port
-ref_named = Ref(target="scorer", port="probability")
+Ref("sample_policy")
+Ref("sample_policy", port="default")
 ```
 
-**Fields:**
+`Ref` is how non-tree edges are expressed. It is the authored signal that:
 
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `target` | `str` | required | The `name` of the upstream primitive. |
-| `port` | `str` | `"default"` | The named output port on the upstream node. |
+- this node depends on that node
+- the dependency is dataflow, not just containment
 
-During lowering, each `Ref` in a node's `inputs` list becomes a directed `kind="data"` edge from the referenced node's port to the consuming node's `input` port.
-
----
+`Ref` targets do not need to appear earlier in the `children` list. They just
+need to resolve to real node ids after lowering.
 
 ## RuntimeContext
 
-`RuntimeContext` is a plugin primitive (not a core primitive) that groups children under a named deployment environment. Every child node inherits `metadata["runtime_context"]` equal to the context's `runtime` string.
+`RuntimeContext` is the main built-in plugin primitive today. It groups a
+subtree under a runtime boundary such as `local` or `sandbox`.
 
 ```python
-from mentalmodel import RuntimeContext, Actor, Effect, Ref
+from mentalmodel import RuntimeContext
 
-cloud = RuntimeContext(
-    name="cloud-runtime",
-    runtime="cloud",
-    children=[
-        Actor(name="scorer", handler=..., inputs=[Ref("feature-extractor")]),
-        Effect(name="write-result", handler=..., inputs=[Ref("scorer")]),
-    ],
+RuntimeContext(
+    name="remote_sampling",
+    runtime="sandbox",
+    children=[...],
 )
 ```
 
-**When to use it:** whenever you need to declare that certain nodes run in a specific environment (cloud, edge, local, etc.) and you want static analysis and runtime context propagation to enforce those boundaries.
+Use it when you want runtime placement to be explicit in:
 
-**Lowering:** handled by `RuntimeContextPlugin`. It emits one `kind="runtime_context"` node, propagates `runtime_context` into child metadata through a child `LoweringContext`, and wires `contains` edges. Plugin provenance (`plugin_kind`, `plugin_origin`, `plugin_version`) is also stamped onto the node.
+- analysis
+- docs
+- Mermaid
+- records
+- span attributes
 
----
+It is not a core primitive implemented directly in `mentalmodel.core`; it is a
+plugin-based extension that proves the extension model is part of the real
+package, not an afterthought.
 
-## The lowering protocol
+## What is actually guaranteed today
 
-All primitives implement `LowersToIR` — either directly (core primitives) or via a registered `PrimitivePlugin`. The `LoweringContext` drives the traversal:
+Some important clarifications:
 
-<Steps>
-  <Step title="lower() is called">
-    `LoweringContext.lower(primitive)` checks whether the primitive has a `lower` method. Core primitives do; plugin primitives delegate to their registered `PrimitivePlugin`.
-  </Step>
-  <Step title="Container or leaf?">
-    Container primitives (`Workflow`, `Parallel`, `RuntimeContext`) call `ctx.lower_container(node, children)`, which recursively lowers each child and adds `contains` edges. Leaf primitives (`Actor`, `Effect`, `Invariant`, `Join`) call `ctx.lower_leaf(node, inputs)`, which adds `data` edges for each `Ref`.
-  </Step>
-  <Step title="Metadata and provenance are stamped">
-    `_apply_metadata` merges `inherited_metadata` (propagated from parent containers) with the node's own metadata and then stamps `NodeProvenance` fields: `plugin_kind`, `plugin_origin`, and optionally `plugin_version`.
-  </Step>
-  <Step title="IRFragment is returned">
-    Each primitive returns an `IRFragment` containing its nodes and edges. The caller extends its own fragment with the child fragment.
-  </Step>
-  <Step title="IRGraph is assembled">
-    `lower_program` collects all fragments into a single `IRGraph(graph_id=workflow.name, nodes=..., edges=...)`.
-  </Step>
-</Steps>
+- There is a real `LowersToIR` protocol in the codebase, but most users will
+  interact with primitives and plugins rather than the protocol directly.
+- `Parallel` is a grouping signal, not a magic scheduler override.
+- Child order is useful for readability, but true execution order comes from
+  dependency edges and runtime readiness.
+- The current package does not yet have a native loop primitive. Multi-step
+  workflows are an active design area.
 
-```python
-from mentalmodel.ir.lowering import lower_program
+## How to choose the right primitive
 
-graph = lower_program(workflow)
-print(graph.graph_id)          # "order-pipeline"
-print(len(graph.nodes))        # one node per primitive
-print(len(graph.edges))        # data + contains edges
-```
+Ask these questions:
 
-<Tip>
-Node ids are stable across calls as long as primitive names do not change. This makes graph ids, run directories, and edge ids deterministic and diff-friendly.
-</Tip>
+| Question | Primitive |
+| --- | --- |
+| Does this node own state? | `Actor` |
+| Does this node perform I/O or any side effect? | `Effect` |
+| Do I need to assert correctness on concrete values? | `Invariant` |
+| Am I fanning out independent work? | `Parallel` |
+| Am I synchronizing multiple upstream values? | `Join` |
+| Am I declaring a dependency edge? | `Ref` |
+| Am I grouping nodes under a runtime boundary? | `RuntimeContext` |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Authoring workflows" icon="diagram-project" href="/guides/authoring-workflows">
+    Learn how to assemble these primitives into a readable program.
+  </Card>
+  <Card title="Runtime model" icon="gear" href="/concepts/runtime">
+    See how authored primitives become executable nodes and semantic records.
+  </Card>
+  <Card title="Plugins" icon="plug" href="/concepts/plugins">
+    Learn how extension primitives participate in lowering and runtime execution.
+  </Card>
+  <Card title="Invariants" icon="shield-check" href="/concepts/invariants">
+    Go deeper on runtime correctness checks and property verification.
+  </Card>
+</CardGroup>

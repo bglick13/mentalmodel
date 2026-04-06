@@ -39,6 +39,37 @@ flowchart LR
     process_results -->|"data"| reward_signal
 ```
 
+## How to interpret the graph
+
+Read Mermaid output in two passes:
+
+1. container structure
+2. dataflow edges
+
+Container edges (`contains`) answer:
+
+- what belongs to this workflow or runtime context?
+- what are the major blocks of the program?
+
+Data edges (`data`) answer:
+
+- what depends on what?
+- what must happen before a downstream node becomes runnable?
+
+This is especially useful for spotting:
+
+- missing joins after fanout
+- unexpectedly dense dependency structure
+- nodes that ended up in the wrong runtime context or grouping block
+
+`graph` is the best command when your question is:
+
+- “is this workflow still architecturally readable?”
+
+not:
+
+- “what happened in a specific run?”
+
 ## Examples
 
 <CodeGroup>

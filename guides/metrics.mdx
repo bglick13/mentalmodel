@@ -1,36 +1,59 @@
 ---
 title: "Metrics"
-description: "Understand built-in operational metrics, attach domain metrics to Actor and Effect nodes, and configure OTel export."
+description: "How built-in runtime metrics and output-derived metrics work in mentalmodel."
 ---
 
-mentalmodel emits two categories of metrics: **operational metrics** that the runtime produces automatically for every run, and **domain metrics** that you define on individual `Actor` and `Effect` nodes. Both categories flow through the same OpenTelemetry-backed pipeline.
+`mentalmodel` exposes two different metric layers:
+
+1. built-in operational metrics emitted by the runtime
+2. output-derived domain metrics attached to `Actor` and `Effect` nodes
+
+Both go through the same metric emitter interface, but they serve different
+purposes.
 
 ## Built-in operational metrics
 
-The runtime emits these metrics on every execution without any configuration on your part:
+These are emitted automatically by the runtime:
 
-| Metric name | Kind | Description |
-|---|---|---|
-| `mentalmodel.run.started` | counter | Incremented once when a run begins |
-| `mentalmodel.run.completed` | counter | Incremented once when a run finishes; tagged with `success=true/false` |
-| `mentalmodel.node.executions` | counter | Incremented once per node execution; tagged with `node_kind` and `runtime_context` |
-| `mentalmodel.node.duration_ms` | histogram | Execution duration in milliseconds per node; tagged with `node_kind`, `runtime_context`, and `success` |
-| `mentalmodel.invariant.failures` | counter | Incremented each time an invariant check returns `passed=false`; tagged with `severity` |
+| Metric name | Kind | Meaning |
+| --- | --- | --- |
+| `mentalmodel.run.started` | counter | One run started |
+| `mentalmodel.run.completed` | counter | One run completed, tagged by success |
+| `mentalmodel.node.executions` | counter | One node execution started |
+| `mentalmodel.node.duration_ms` | histogram | One node execution duration |
+| `mentalmodel.invariant.failures` | counter | One invariant failed |
 
-These definitions live in `mentalmodel.observability.metrics` as module-level constants (`RUN_STARTED`, `RUN_COMPLETED`, `NODE_EXECUTIONS`, `NODE_DURATION_MS`, `INVARIANT_FAILURES`).
+These are good for:
 
-## Domain metrics
+- high-level run tracking
+- latency trends
+- failure counting
+- runtime-context and node-kind breakdowns
 
-Attach domain metrics to any `Actor` or `Effect` via the `metrics` parameter. Each entry is an `OutputMetricSpec` produced by one of two helpers.
+They are intentionally low-cardinality.
 
-### infer_output_metrics — automatic extraction
+## Output-derived metrics
 
-`infer_output_metrics` scans the node's output after each execution and emits one histogram per numeric field. It only accepts flat `Mapping` outputs with at most 8 keys whose names match `^[A-Za-z][A-Za-z0-9_]{0,63}$` and whose values are `int | float`. High-cardinality mappings or nested structures are silently skipped.
+When a node returns domain data that should become metrics, attach metric
+policies to the node.
+
+Today this is supported on:
+
+- `Actor`
+- `Effect`
+
+through the `metrics=[...]` parameter.
+
+There are two main ways to do it.
+
+## `infer_output_metrics(...)`
+
+Use this when the output is already a small flat numeric summary.
 
 ```python
-from mentalmodel import infer_output_metrics
+from mentalmodel import Actor, Ref, infer_output_metrics
 
-Actor[LearnerInputs, LearnerOutput, LearnerState](
+Actor(
     "learner_update",
     handler=LearnerUpdate(),
     inputs=[Ref("rollout_join")],
@@ -38,121 +61,46 @@ Actor[LearnerInputs, LearnerOutput, LearnerState](
 )
 ```
 
-With `prefix="mentalmodel.demo.learner_update"` and a `LearnerOutput` of `{"updated_policy_version": 4, "sample_count": 8}`, the runtime emits:
-
-- `mentalmodel.demo.learner_update.sample_count` (histogram, value 8)
-- `mentalmodel.demo.learner_update.updated_policy_version` (histogram, value 4)
-
-<Warning>
-`infer_output_metrics` rejects outputs with more than 8 fields or any non-numeric value. Use `extract_output_metrics` with a custom extractor when you need richer control.
-</Warning>
-
-### extract_output_metrics — custom extractor
-
-`extract_output_metrics` delegates to a `MetricExtractor` you implement. This is the right approach for derived values (mean, max, count), computed attributes, or outputs that do not fit the flat-numeric constraint.
+This works well for outputs such as:
 
 ```python
-from mentalmodel import extract_output_metrics, MetricDefinition, MetricKind
-
-Effect[RewardInputs, RewardScores](
-    "pangram_reward",
-    handler=PangramScorer(),
-    inputs=[Ref("sample_policy")],
-    metrics=[
-        extract_output_metrics(
-            RewardSummaryMetrics(metric_prefix="mentalmodel.demo.reward.pangram")
-        )
-    ],
-)
+{
+    "updated_policy_version": 4,
+    "sample_count": 8,
+}
 ```
 
-## MetricDefinition, MetricKind, MetricContext, MetricObservation
+The inference path is deliberately conservative:
 
-These four types form the observable layer:
+- output must be a flat mapping
+- keys must be safe metric names
+- values must be numeric
+- mappings with too many fields are skipped
 
-```python
-from mentalmodel import (
-    MetricDefinition,
-    MetricKind,
-    MetricContext,
-    MetricObservation,
-)
-```
+This is a guardrail against accidental high-cardinality metric export.
 
-**`MetricKind`** — `StrEnum` with two values:
+## `extract_output_metrics(...)`
 
-```python
-class MetricKind(StrEnum):
-    COUNTER = "counter"
-    HISTOGRAM = "histogram"
-```
-
-**`MetricDefinition`** — declares the shape of one metric instrument:
-
-```python
-@dataclass(slots=True, frozen=True)
-class MetricDefinition:
-    name: str
-    kind: MetricKind
-    description: str = ""
-    unit: str | None = None
-    attribute_keys: tuple[str, ...] = field(default_factory=tuple)
-```
-
-**`MetricContext`** — stable context injected by the runtime into every `extract` call:
-
-```python
-@dataclass(slots=True, frozen=True)
-class MetricContext:
-    graph_id: str
-    run_id: str
-    node_id: str | None
-    node_kind: str | None
-    runtime_context: str | None
-    service_name: str
-
-    def default_attributes(self) -> dict[str, MetricAttributeValue]: ...
-```
-
-Call `context.default_attributes()` in your extractor to get a pre-populated attribute dict that includes `graph_id`, `service_name`, `node_kind`, and `runtime_context`.
-
-**`MetricObservation`** — one recorded data point:
-
-```python
-@dataclass(slots=True, frozen=True)
-class MetricObservation:
-    definition: MetricDefinition
-    value: int | float
-    attributes: dict[str, MetricAttributeValue] = field(default_factory=dict)
-```
-
-## MetricExtractor protocol and OutputMetricSpec
-
-```python
-from mentalmodel import MetricExtractor, OutputMetricSpec
-
-class MetricExtractor(Protocol[OutputT_contra]):
-    def extract(
-        self,
-        output: OutputT_contra,
-        context: MetricContext,
-    ) -> Sequence[MetricObservation]: ...
-```
-
-`OutputMetricSpec` is the internal wrapper produced by `infer_output_metrics` and `extract_output_metrics`. You do not construct it directly.
-
-### Full extractor example
+Use this when the output needs aggregation or custom shaping.
 
 ```python
 from dataclasses import dataclass
-from mentalmodel import MetricContext, MetricExtractor, MetricObservation, MetricDefinition, MetricKind
+from mentalmodel import (
+    MetricContext,
+    MetricDefinition,
+    MetricExtractor,
+    MetricKind,
+    MetricObservation,
+    extract_output_metrics,
+)
+
 
 RewardScores = dict[str, float]
 
 
 @dataclass(slots=True, frozen=True)
 class RewardSummaryMetrics(MetricExtractor[RewardScores]):
-    metric_prefix: str
+    prefix: str
 
     def extract(
         self,
@@ -162,68 +110,159 @@ class RewardSummaryMetrics(MetricExtractor[RewardScores]):
         if not output:
             return tuple()
         values = list(output.values())
-        mean_value = sum(values) / len(values)
-        base_attributes = context.default_attributes()
+        attrs = context.default_attributes()
         return (
             MetricObservation(
                 definition=MetricDefinition(
-                    name=f"{self.metric_prefix}.mean",
+                    name=f"{self.prefix}.mean",
                     kind=MetricKind.HISTOGRAM,
-                    description="Mean reward across sampled rollouts.",
+                    description="Mean reward value.",
                 ),
-                value=mean_value,
-                attributes=dict(base_attributes),
+                value=sum(values) / len(values),
+                attributes=dict(attrs),
             ),
             MetricObservation(
                 definition=MetricDefinition(
-                    name=f"{self.metric_prefix}.max",
+                    name=f"{self.prefix}.count",
                     kind=MetricKind.HISTOGRAM,
-                    description="Maximum reward across sampled rollouts.",
-                ),
-                value=max(values),
-                attributes=dict(base_attributes),
-            ),
-            MetricObservation(
-                definition=MetricDefinition(
-                    name=f"{self.metric_prefix}.count",
-                    kind=MetricKind.HISTOGRAM,
-                    description="Number of scored rollouts in one reward pass.",
+                    description="Number of scored items.",
                 ),
                 value=len(values),
-                attributes=dict(base_attributes),
+                attributes=dict(attrs),
             ),
         )
 ```
 
-## Configuring OTel export
+Then attach it:
 
-Metrics export is **only active when an external OTel sink is configured**. Without one, the runtime uses `NoOpMetricEmitter` and all observations are silently discarded.
+```python
+Effect(
+    "pangram_reward",
+    handler=PangramScorer(),
+    inputs=[Ref("sample_policy")],
+    metrics=[
+        extract_output_metrics(
+            RewardSummaryMetrics(prefix="mentalmodel.demo.reward.pangram")
+        )
+    ],
+)
+```
 
-<Tabs>
-  <Tab title="OTLP gRPC">
-    ```bash
-    MENTALMODEL_TRACING_MODE=otlp_grpc \
-    MENTALMODEL_OTLP_ENDPOINT=http://localhost:4317 \
-    python my_program.py
-    ```
-  </Tab>
-  <Tab title="OTLP HTTP">
-    ```bash
-    MENTALMODEL_TRACING_MODE=otlp_http \
-    MENTALMODEL_OTLP_ENDPOINT=http://localhost:4318 \
-    python my_program.py
-    ```
-  </Tab>
-  <Tab title="Console (debugging)">
-    ```bash
-    MENTALMODEL_TRACING_MODE=console python my_program.py
-    ```
-    Console mode writes observations to `stderr` — useful for local debugging. It does **not** push to an OTel collector.
-  </Tab>
-</Tabs>
+This path is what you want for:
 
-When the mode is `disk` or `disabled` (the default with no environment variables set), no metrics are exported. Built-in operational metrics are still computed internally but are discarded.
+- dynamic maps
+- aggregated reward summaries
+- domain-specific counters
+- provider-native metric projections
 
-<Note>
-During objective evaluation (`evaluate_objective`, `search_objective`) the runtime always uses `RecordingMetricEmitter` regardless of the OTel configuration. This ensures that metric signals used to score candidates are captured deterministically without requiring an external collector.
-</Note>
+## Important design rule
+
+Do not emit one metric per example or per dynamic id by default.
+
+For example, this output:
+
+```python
+{
+    "sample-123": 0.81,
+    "sample-124": 0.77,
+    "sample-125": 0.95,
+}
+```
+
+should usually be aggregated first, not exported directly as metrics.
+
+That kind of data belongs better in:
+
+- node outputs
+- semantic records
+- traces
+- `.runs`
+
+than in default low-cardinality metrics.
+
+## Metric context
+
+Custom extractors receive a `MetricContext` that carries stable runtime
+attributes such as:
+
+- `graph_id`
+- `run_id`
+- `node_id`
+- `node_kind`
+- `runtime_context`
+- `service_name`
+
+Use `context.default_attributes()` as the base for emitted observations.
+
+## When metrics are actually exported
+
+Metrics are only exported when the configured observability mode creates a real
+metric emitter:
+
+- `otlp_http`
+- `otlp_grpc`
+- `console`
+
+When the mode is `disk` or `disabled`, metrics are not exported externally.
+
+That does **not** make the runtime blind:
+
+- `.runs` still exists
+- outputs and records still exist
+- verification still works
+
+But it does mean you should not expect a local metrics backend unless you have
+configured one.
+
+## OTLP examples
+
+<CodeGroup>
+
+```bash OTLP HTTP
+MENTALMODEL_OTEL_MODE=otlp_http \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces \
+python my_program.py
+```
+
+```bash OTLP gRPC
+MENTALMODEL_OTEL_MODE=otlp_grpc \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+python my_program.py
+```
+
+```bash Console
+MENTALMODEL_OTEL_MODE=console python my_program.py
+```
+
+</CodeGroup>
+
+If you are using the self-hosted demo stack, prefer the helper flow described in
+[observability/opentelemetry](/observability/opentelemetry) and
+[docs/otel-self-hosted](/docs/otel-self-hosted).
+
+## What this should feel like in practice
+
+A good `mentalmodel` metric setup should make you feel like:
+
+- the runtime already gives you useful operational metrics
+- node outputs can become domain metrics with a small amount of explicit code
+- you do not need to sprinkle raw metric calls throughout handlers
+
+That is the standard the package is aiming for.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Runtime" icon="gear" href="/concepts/runtime">
+    See where metrics fit into the executor and execution context.
+  </Card>
+  <Card title="OpenTelemetry" icon="wave-square" href="/observability/opentelemetry">
+    Learn how tracing and metrics are configured and exported.
+  </Card>
+  <Card title="Run bundles" icon="folder-tree" href="/observability/run-bundles">
+    See the local debugging surface that complements exported telemetry.
+  </Card>
+  <Card title="Optimization" icon="wand-magic-sparkles" href="/guides/optimization">
+    See how metric signals feed bounded optimization flows.
+  </Card>
+</CardGroup>

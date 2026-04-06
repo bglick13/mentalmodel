@@ -60,6 +60,44 @@ When you run without `--json`, the command renders two tables.
 
 When there are no findings, the CLI prints `No findings.` in green.
 
+## How to interpret the output
+
+Use the summary table to answer:
+
+- did lowering succeed?
+- how large is the current graph?
+- do I have hard blockers or just warnings?
+
+Use the findings table to answer:
+
+- which node is the problem attached to?
+- is this a graph-shape issue or a modeling-quality issue?
+
+A common workflow is:
+
+1. run `check`
+2. fix all `error` findings first
+3. decide whether the current `warning` findings are acceptable
+4. then move on to `verify`
+
+Example:
+
+```text
+mentalmodel check summary
+Graph       Nodes  Edges  Errors  Warnings
+hello_world 4      3      0       1
+
+Findings
+Severity  Code                     Node               Message
+warning   missing-runtime-context  greeting_source    Node does not inherit or declare a runtime context.
+```
+
+What this means:
+
+- the graph lowered successfully
+- there are no hard blockers
+- the package is warning that runtime placement is still implicit for that node
+
 ## Examples
 
 <CodeGroup>

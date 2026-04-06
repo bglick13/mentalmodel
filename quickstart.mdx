@@ -1,372 +1,318 @@
 ---
 title: "Quick start"
-description: "Install mentalmodel, write a workflow, and run the CLI tools in five minutes."
+description: "Install mentalmodel, build a small workflow, and inspect its runtime artifacts."
 ---
+
+This page intentionally starts with a tiny workflow, not the full async RL
+demo. The goal is to learn the model first:
+
+1. author a small semantic graph
+2. run static analysis
+3. execute it
+4. inspect the resulting `.runs` bundle
+
+Once that makes sense, the bigger demos will feel much more legible.
 
 ## Prerequisites
 
-- Python 3.11 or higher
-- `pip` or `uv` (uv recommended)
+- Python 3.11 or newer
+- `uv` recommended, though `pip` also works
 
 <Steps>
+  <Step title="Install mentalmodel">
+    <CodeGroup>
 
-<Step title="Install mentalmodel">
+    ```bash uv
+    uv add mentalmodel
+    ```
 
-<CodeGroup>
+    ```bash pip
+    pip install mentalmodel
+    ```
 
-```bash pip
-pip install mentalmodel
-```
+    </CodeGroup>
 
-```bash uv
-uv add mentalmodel
-```
+    Verify the CLI is available:
 
-</CodeGroup>
+    ```bash
+    mentalmodel --help
+    ```
+  </Step>
 
-Verify the install:
+  <Step title="Write a tiny workflow">
+    Create `demo.py`:
 
-```bash
-mentalmodel --help
-```
+    ```python
+    from __future__ import annotations
 
-</Step>
+    from dataclasses import dataclass
+    from typing import TypedDict
 
-<Step title="Write your first workflow">
-
-Create a file called `demo.py`. The example below is the `async_rl` reference demo that ships with `mentalmodel`. It models an async reinforcement learning pipeline using semantic primitives.
-
-```python
-from __future__ import annotations
-
-import asyncio
-from dataclasses import dataclass
-from typing import TypedDict
-
-from mentalmodel.core import (
-    Actor,
-    ActorHandler,
-    Effect,
-    EffectHandler,
-    Invariant,
-    InvariantChecker,
-    InvariantResult,
-    Join,
-    JoinReducer,
-    Parallel,
-    Ref,
-    Workflow,
-)
-from mentalmodel.core.models import ActorResult
-from mentalmodel.plugins.runtime_context import RuntimeContext
-from mentalmodel.runtime.context import ExecutionContext
-from mentalmodel.testing import assert_causal_order, invariant_fail, invariant_pass
+    from mentalmodel import Actor, Effect, Invariant, Ref, Workflow
+    from mentalmodel.core import ActorHandler, EffectHandler, InvariantChecker
+    from mentalmodel.core.models import ActorResult, InvariantResult
+    from mentalmodel.runtime.context import ExecutionContext
 
 
-# --- Type definitions ---
-
-class BatchSourceInputs(TypedDict):
-    pass
-
-class BatchState(TypedDict):
-    cursor: int
-
-class PromptRecord(TypedDict):
-    prompt_id: str
-    prompt_text: str
-
-class SamplePolicyInputs(TypedDict):
-    batch_source: list[PromptRecord]
-
-class SampleRecord(TypedDict):
-    prompt_id: str
-    sample_index: int
-    completion_text: str
-
-class SamplePolicyOutput(TypedDict):
-    sampled_policy_version: int
-    samples: list[SampleRecord]
-
-RewardScores = dict[str, float]
-
-class RewardInputs(TypedDict):
-    sample_policy: SamplePolicyOutput
-
-class RolloutJoinInputs(TypedDict):
-    sample_policy: SamplePolicyOutput
-    pangram_reward: RewardScores
-    quality_reward: RewardScores
-
-class RolloutJoinOutput(TypedDict):
-    sampled_policy_version: int
-    samples: list[SampleRecord]
-    pangram_scores: RewardScores
-    quality_scores: RewardScores
-
-class LearnerState(TypedDict):
-    policy_version: int
-
-class LearnerInputs(TypedDict):
-    rollout_join: RolloutJoinOutput
-
-class LearnerOutput(TypedDict):
-    updated_policy_version: int
-    sample_count: int
-
-class InvariantInputs(TypedDict):
-    rollout_join: RolloutJoinOutput
+    class SourceInputs(TypedDict):
+        pass
 
 
-# --- Handlers ---
-
-@dataclass(slots=True)
-class BatchSource(ActorHandler[BatchSourceInputs, BatchState, list[PromptRecord]]):
-    async def handle(self, inputs: BatchSourceInputs, state: BatchState | None, ctx: ExecutionContext) -> ActorResult[list[PromptRecord], BatchState]:
-        del inputs, ctx
-        cursor = 0 if state is None else state["cursor"]
-        batch: list[PromptRecord] = [
-            {"prompt_id": f"prompt-{cursor}", "prompt_text": "Rewrite this sentence clearly."},
-            {"prompt_id": f"prompt-{cursor + 1}", "prompt_text": "Humanize this paragraph."},
-        ]
-        return ActorResult(output=batch, next_state={"cursor": cursor + len(batch)})
+    class GreetingState(TypedDict):
+        count: int
 
 
-@dataclass(slots=True)
-class PolicySampler(EffectHandler[SamplePolicyInputs, SamplePolicyOutput]):
-    group_size: int
-
-    async def invoke(self, inputs: SamplePolicyInputs, ctx: ExecutionContext) -> SamplePolicyOutput:
-        del ctx
-        batch = inputs["batch_source"]
-        await asyncio.sleep(0.01)
-        samples: list[SampleRecord] = [
-            {"prompt_id": p["prompt_id"], "sample_index": i, "completion_text": f"sample {i}"}
-            for p in batch
-            for i in range(self.group_size)
-        ]
-        return {"sampled_policy_version": 0, "samples": samples}
+    class GreetingOutput(TypedDict):
+        greeting: str
+        count: int
 
 
-@dataclass(slots=True)
-class PangramScorer(EffectHandler[RewardInputs, RewardScores]):
-    async def invoke(self, inputs: RewardInputs, ctx: ExecutionContext) -> RewardScores:
-        del ctx
-        samples = inputs["sample_policy"]["samples"]
-        await asyncio.sleep(0.02)
-        return {f"{s['prompt_id']}:{s['sample_index']}": 0.8 for s in samples}
+    class UppercaseInputs(TypedDict):
+        greeting_source: GreetingOutput
 
 
-@dataclass(slots=True)
-class QualityScorer(EffectHandler[RewardInputs, RewardScores]):
-    async def invoke(self, inputs: RewardInputs, ctx: ExecutionContext) -> RewardScores:
-        del ctx
-        samples = inputs["sample_policy"]["samples"]
-        await asyncio.sleep(0.015)
-        return {f"{s['prompt_id']}:{s['sample_index']}": 0.6 for s in samples}
+    class UppercaseOutput(TypedDict):
+        message: str
 
 
-@dataclass(slots=True)
-class RolloutJoinReducer(JoinReducer[RolloutJoinInputs, RolloutJoinOutput]):
-    async def reduce(self, inputs: RolloutJoinInputs, ctx: ExecutionContext) -> RolloutJoinOutput:
-        del ctx
-        sp = inputs["sample_policy"]
-        return {
-            "sampled_policy_version": sp["sampled_policy_version"],
-            "samples": sp["samples"],
-            "pangram_scores": inputs["pangram_reward"],
-            "quality_scores": inputs["quality_reward"],
-        }
+    class MessageInvariantInputs(TypedDict):
+        uppercase_message: UppercaseOutput
 
 
-@dataclass(slots=True)
-class LearnerUpdate(ActorHandler[LearnerInputs, LearnerState, LearnerOutput]):
-    async def handle(self, inputs: LearnerInputs, state: LearnerState | None, ctx: ExecutionContext) -> ActorResult[LearnerOutput, LearnerState]:
-        del ctx
-        rollout = inputs["rollout_join"]
-        prev = 0 if state is None else state["policy_version"]
-        next_ver = prev + 1
-        return ActorResult(
-            output={"updated_policy_version": next_ver, "sample_count": len(rollout["samples"])},
-            next_state={"policy_version": next_ver},
-        )
+    @dataclass(slots=True)
+    class GreetingSource(ActorHandler[SourceInputs, GreetingState, GreetingOutput]):
+        async def handle(
+            self,
+            inputs: SourceInputs,
+            state: GreetingState | None,
+            ctx: ExecutionContext,
+        ) -> ActorResult[GreetingOutput, GreetingState]:
+            del inputs, ctx
+            next_count = 1 if state is None else state["count"] + 1
+            output: GreetingOutput = {
+                "greeting": "hello mentalmodel",
+                "count": next_count,
+            }
+            next_state: GreetingState = {"count": next_count}
+            return ActorResult(output=output, next_state=next_state)
 
 
-@dataclass(slots=True)
-class PolicyStalenessChecker(InvariantChecker[InvariantInputs, int]):
-    max_off_policy_steps: int
-
-    async def check(self, inputs: InvariantInputs, ctx: ExecutionContext) -> InvariantResult[int]:
-        del ctx
-        rollout = inputs["rollout_join"]
-        sampled = rollout["sampled_policy_version"]
-        current = rollout.get("sampled_policy_version", sampled)
-        details = {"sampled_policy_version": sampled, "current_policy_version": current}
-        try:
-            assert_causal_order(sampled, current, max_lag=self.max_off_policy_steps)
-        except AssertionError:
-            return invariant_fail(details=details)
-        return invariant_pass(details=details)
+    @dataclass(slots=True)
+    class UppercaseMessage(EffectHandler[UppercaseInputs, UppercaseOutput]):
+        async def invoke(
+            self,
+            inputs: UppercaseInputs,
+            ctx: ExecutionContext,
+        ) -> UppercaseOutput:
+            del ctx
+            return {"message": inputs["greeting_source"]["greeting"].upper()}
 
 
-# --- Program ---
-
-def build_program() -> Workflow:
-    return Workflow(
-        name="async_rl_demo",
-        description="Async RL pipeline authored in semantic primitives.",
-        children=[
-            RuntimeContext(
-                name="local_control_plane",
-                runtime="local",
-                children=[
-                    Actor("batch_source", handler=BatchSource()),
-                    RuntimeContext(
-                        name="remote_sampling",
-                        runtime="sandbox",
-                        children=[
-                            Effect(
-                                "sample_policy",
-                                handler=PolicySampler(group_size=4),
-                                inputs=[Ref("batch_source")],
-                            ),
-                        ],
-                    ),
-                    Parallel(
-                        name="reward_fanout",
-                        children=[
-                            Effect("pangram_reward", handler=PangramScorer(), inputs=[Ref("sample_policy")]),
-                            Effect("quality_reward", handler=QualityScorer(), inputs=[Ref("sample_policy")]),
-                        ],
-                    ),
-                    Join(
-                        "rollout_join",
-                        inputs=[Ref("sample_policy"), Ref("pangram_reward"), Ref("quality_reward")],
-                        reducer=RolloutJoinReducer(),
-                    ),
-                    Invariant(
-                        "staleness_invariant",
-                        checker=PolicyStalenessChecker(max_off_policy_steps=0),
-                        inputs=[Ref("rollout_join")],
-                    ),
-                    Actor("learner_update", handler=LearnerUpdate(), inputs=[Ref("rollout_join")]),
-                ],
+    @dataclass(slots=True)
+    class MessageNotEmpty(InvariantChecker[MessageInvariantInputs, str]):
+        async def check(
+            self,
+            inputs: MessageInvariantInputs,
+            ctx: ExecutionContext,
+        ) -> InvariantResult[str]:
+            del ctx
+            message = inputs["uppercase_message"]["message"]
+            return InvariantResult(
+                passed=bool(message.strip()),
+                details={"message": message},
             )
-        ],
-    )
-```
 
-<Tip>
-The full reference demo with metrics, KL prefetch, and Hypothesis property checks lives at
-`mentalmodel/examples/async_rl/demo.py` in the source tree. Run it with
-`mentalmodel demo async-rl`.
-</Tip>
 
-</Step>
+    def build_program() -> Workflow:
+        return Workflow(
+            name="hello_world",
+            description="A minimal workflow with one actor, one effect, and one invariant.",
+            children=[
+                Actor("greeting_source", handler=GreetingSource()),
+                Effect(
+                    "uppercase_message",
+                    handler=UppercaseMessage(),
+                    inputs=[Ref("greeting_source")],
+                ),
+                Invariant(
+                    "message_not_empty",
+                    checker=MessageNotEmpty(),
+                    inputs=[Ref("uppercase_message")],
+                ),
+            ],
+        )
+    ```
 
-<Step title="Check your workflow">
+    This example shows the basic shape of the model:
 
-Run `mentalmodel check` to lower your program into the IR and run static analysis:
+    - `Actor` owns state
+    - `Effect` performs a transformation at an explicit boundary
+    - `Invariant` checks a property of a concrete output
+    - `Ref` makes the data dependencies explicit
+  </Step>
 
-```bash
-mentalmodel check --entrypoint demo:build_program
-```
+  <Step title="Run static analysis">
+    ```bash
+    mentalmodel check --entrypoint demo:build_program
+    ```
 
-A clean workflow produces no findings:
+    On success you should see a short summary and no findings.
 
-```text
-No findings.
-```
+    Example:
 
-If there are structural problems—unresolved `Ref` targets, orphaned nodes, or missing invariants on stateful actors—they appear here with codes and node IDs before any code runs.
+    ```text
+    mentalmodel check summary
+    Graph       Nodes  Edges  Errors  Warnings
+    hello_world 4      3      0       1
 
-</Step>
+    Findings
+    Severity  Code                     Node               Message
+    warning   missing-runtime-context  greeting_source    Node does not inherit or declare a runtime context.
+    ```
 
-<Step title="Verify your workflow">
+    How to read that:
 
-`mentalmodel verify` executes the program, checks invariants at runtime, and writes a debugging bundle to `.runs/<graph_id>/<run_id>/`:
+    - `Graph` is the workflow name and the future `.runs` graph id
+    - `Nodes` and `Edges` tell you how large the lowered graph is
+    - `Errors` block execution confidence; `Warnings` are usually design-quality signals
+    - the `missing-runtime-context` warning is common in tiny examples and means
+      you have not yet declared where that node runs
 
-```bash
-mentalmodel verify --entrypoint demo:build_program
-```
+    Today, `check` verifies structural and semantic properties such as:
 
-Expected output:
+    - duplicate node ids
+    - malformed graph edges
+    - missing workflow roots
+    - missing runtime-context metadata
+    - missing plugin provenance
 
-```text
-Run complete. Invariants: 1 checked, 0 failed.
-Bundle written to .runs/async_rl_demo/<run_id>/
-```
+    It does not try to prove arbitrary business correctness from your code.
 
-The bundle includes `verification.json`, `summary.json`, `records.jsonl`, `outputs.json`, and `state.json`. Use `mentalmodel runs latest --graph-id async_rl_demo` to inspect the most recent run.
+    Useful next step:
 
-</Step>
+    - if you see `duplicate-node-id` or edge errors, fix the authored graph first
+    - if you only see warnings, you can usually continue to `verify`
+  </Step>
 
-<Step title="Generate a Mermaid diagram">
+  <Step title="Execute and persist a run bundle">
+    ```bash
+    mentalmodel verify --entrypoint demo:build_program
+    ```
 
-`mentalmodel graph` renders your program topology as a Mermaid flowchart:
+    `verify` performs:
 
-```bash
-mentalmodel graph --entrypoint demo:build_program
-```
+    1. static analysis
+    2. runtime execution
+    3. property-check execution when the module defines any
 
-Output (truncated):
+    It also writes a run bundle under:
 
-```text
-flowchart LR
-    batch_source["batch_source<br/>actor"]
-    learner_update["learner_update<br/>actor"]
-    sample_policy["sample_policy<br/>effect"]
-    pangram_reward["pangram_reward<br/>effect"]
-    quality_reward["quality_reward<br/>effect"]
-    staleness_invariant["staleness_invariant<br/>invariant"]
-    rollout_join["rollout_join<br/>join"]
-    reward_fanout["reward_fanout<br/>parallel"]
-    local_control_plane["local_control_plane<br/>runtime_context"]
-    remote_sampling["remote_sampling<br/>runtime_context"]
-    async_rl_demo["async_rl_demo<br/>workflow"]
-    async_rl_demo -->|"contains"| local_control_plane
-    local_control_plane -->|"contains"| batch_source
-    ...
-    batch_source -->|"data"| sample_policy
-    sample_policy -->|"data"| pangram_reward
-    sample_policy -->|"data"| quality_reward
-    ...
-```
+    ```text
+    .runs/hello_world/<run_id>/
+    ```
 
-Pass `--format json` to get the raw IR instead.
+    Example summary:
 
-</Step>
+    ```text
+    mentalmodel verify summary
+    Graph       Static Errors  Warnings  Runtime  Property Checks
+    hello_world 0              1         pass     0
 
-<Step title="Generate markdown docs">
+    Runtime Verification
+    Success  Records  Outputs  State Entries  Run Artifacts
+    yes      10       3        1              .runs/hello_world/run-abc123
+    ```
 
-`mentalmodel docs` writes a markdown documentation bundle derived from the IR:
+    How to read that:
 
-```bash
-mentalmodel docs --entrypoint demo:build_program --output docs/mentalmodel
-```
+    - `Runtime pass` means the workflow actually executed successfully
+    - `Records` is how many semantic events were emitted
+    - `Outputs` is how many nodes produced persisted outputs
+    - `State Entries` matters for actors; here it shows the actor state was recorded
+    - `Run Artifacts` is the directory you will inspect next
+  </Step>
 
-This creates four files under `docs/mentalmodel/`:
+  <Step title="Inspect what actually happened">
+    These commands are the fastest way to build intuition:
 
-```text
-docs/mentalmodel/
-  topology.md        # node counts, edge list, findings summary
-  node-inventory.md  # per-node metadata
-  invariants.md      # invariant catalog with checkers and inputs
-  runtime-contexts.md # runtime boundary map
-```
+    ```bash
+    mentalmodel runs latest --graph-id hello_world
+    mentalmodel runs outputs --graph-id hello_world --node-id uppercase_message
+    mentalmodel runs inputs --graph-id hello_world --node-id message_not_empty
+    mentalmodel runs trace --graph-id hello_world --node-id message_not_empty
+    mentalmodel replay --graph-id hello_world
+    ```
 
-These files stay in sync with your code automatically because they are generated from the IR on every run.
+    This is the core `mentalmodel` loop:
 
-</Step>
+    - author the workflow
+    - verify it
+    - inspect `.runs`
+    - refine the graph
 
+    A practical interpretation flow:
+
+    - `runs latest` tells you which run bundle to inspect
+    - `runs outputs` answers “what did this node produce?”
+    - `runs inputs` answers “what exact payload did this node see?”
+    - `runs trace` answers “what happened around this node?”
+    - `replay` answers “what happened in the whole run, in order?”
+  </Step>
+
+  <Step title="Generate graph and docs">
+    ```bash
+    mentalmodel graph --entrypoint demo:build_program
+    mentalmodel docs --entrypoint demo:build_program --output-dir docs/hello_world
+    ```
+
+    `graph` renders a Mermaid topology view.
+
+    `docs` generates IR-derived markdown artifacts, including:
+
+    - topology
+    - node inventory
+    - invariant catalog
+    - runtime-context summary
+
+    These are most useful when:
+
+    - the workflow is getting large enough that you want a high-level review
+    - you want to explain the program to another human
+    - you want to compare authored structure against runtime behavior
+  </Step>
 </Steps>
+
+## When to move to a bigger example
+
+Once the tiny workflow above feels clear, use the packaged demos:
+
+```bash
+mentalmodel demo async-rl
+mentalmodel demo agent-tool-use
+mentalmodel demo autoresearch-sorting
+```
+
+Those examples show:
+
+- runtime contexts
+- fanout and joins
+- output-derived metrics
+- runtime-executable plugins
+- replay and run diffing
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Core primitives" icon="shapes" href="/concepts/primitives">
-    Deep dive into Workflow, Actor, Effect, Invariant, Parallel, Join, Ref, and RuntimeContext.
+  <Card title="Primitives" icon="shapes" href="/concepts/primitives">
+    Learn what each primitive means and how it lowers into the IR.
+  </Card>
+  <Card title="Authoring workflows" icon="diagram-project" href="/guides/authoring-workflows">
+    Learn how to structure workflows so they stay readable as they grow.
+  </Card>
+  <Card title="Run bundles" icon="folder-tree" href="/observability/run-bundles">
+    Understand the `.runs` debugging surface in more detail.
   </Card>
   <Card title="CLI reference" icon="terminal" href="/cli/overview">
-    Full reference for every mentalmodel command.
+    Explore the rest of the command surface.
   </Card>
 </CardGroup>
