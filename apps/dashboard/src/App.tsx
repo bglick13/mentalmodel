@@ -10,6 +10,10 @@ import {
 } from "react";
 
 import { ExecutionDetailDrawer } from "./components/ExecutionDetailDrawer";
+import {
+  frameIdForNodeDetailApi,
+  InspectorNodeIo,
+} from "./components/InspectorNodeIo";
 import { GraphPanel } from "./components/GraphPanel";
 import {
   fetchCatalog,
@@ -1140,13 +1144,12 @@ function renderCurrentView({
           activeRun={activeRun}
           exploreNodeId={exploreNodeId}
           exploreRunId={exploreRunId}
+          nodeDetail={nodeDetail}
           runContext={runContext}
           runRecordsInWindow={recordsInTimeWindow}
-          selectNodeAndExplorer={selectNodeAndExplorer}
           selectedNodeId={selectedNodeId}
           selectedFrameId={selectedFrameId}
           selectedNodeRecords={selectedNodeRecords}
-          setActiveView={setActiveView}
           setSpansInspector={setSpansInspector}
           spanItems={spanItems}
           spansInspector={spansInspector}
@@ -1674,17 +1677,60 @@ function NodeDetailView({
   );
 }
 
+function nodeDetailIoPrefetchForSpan(
+  nodeDetail: NodeDetail | null,
+  exploreRunId: string | null,
+  activeRun: RunOverview | null,
+  exploreNodeId: string | null,
+  selectedFrameId: string | null,
+  span: GenericSpan,
+): NodeDetail | null {
+  if (!nodeDetail || !activeRun || exploreRunId !== activeRun.summary.run_id) {
+    return null;
+  }
+  if (exploreNodeId !== span.correlationKeys.nodeId) {
+    return null;
+  }
+  const spanFrame = frameIdForNodeDetailApi(span.correlationKeys.frameId);
+  const explorerFrame = frameIdForNodeDetailApi(selectedFrameId ?? "root");
+  if (spanFrame !== explorerFrame) {
+    return null;
+  }
+  return nodeDetail;
+}
+
+function nodeDetailIoPrefetchForRecord(
+  nodeDetail: NodeDetail | null,
+  exploreRunId: string | null,
+  activeRun: RunOverview | null,
+  exploreNodeId: string | null,
+  selectedFrameId: string | null,
+  record: ExecutionRecord,
+): NodeDetail | null {
+  if (!nodeDetail || !activeRun || exploreRunId !== activeRun.summary.run_id) {
+    return null;
+  }
+  if (exploreNodeId !== record.node_id) {
+    return null;
+  }
+  const recFrame = frameIdForNodeDetailApi(record.frame_id);
+  const explorerFrame = frameIdForNodeDetailApi(selectedFrameId ?? "root");
+  if (recFrame !== explorerFrame) {
+    return null;
+  }
+  return nodeDetail;
+}
+
 function SpansRecordsView({
   activeRun,
   exploreNodeId,
   exploreRunId,
+  nodeDetail,
   runContext,
   runRecordsInWindow,
-  selectNodeAndExplorer,
   selectedNodeId,
   selectedFrameId,
   selectedNodeRecords,
-  setActiveView,
   setSpansInspector,
   spanItems,
   spansInspector,
@@ -1692,14 +1738,14 @@ function SpansRecordsView({
   activeRun: RunOverview | null;
   exploreNodeId: string | null;
   exploreRunId: string | null;
+  /** Latest node-detail payload for the explorer’s node + frame (same API the drawers call). */
+  nodeDetail: NodeDetail | null;
   runContext: ScopeToken[];
   /** Time-window slice of the loaded run’s semantic records (same source as list; used to join spans). */
   runRecordsInWindow: ExecutionRecord[];
-  selectNodeAndExplorer: (nodeId: string, frameId?: string | null) => void;
   selectedNodeId: string | null;
   selectedFrameId: string | null;
   selectedNodeRecords: ExecutionRecord[];
-  setActiveView: (view: ViewId) => void;
   setSpansInspector: Dispatch<SetStateAction<SpansInspector | null>>;
   spanItems: GenericSpan[];
   spansInspector: SpansInspector | null;
@@ -1730,15 +1776,49 @@ function SpansRecordsView({
           null)
       : null;
 
-  function openNodeDetailForRecord(record: ExecutionRecord) {
-    const fid =
-      record.frame_id != null && record.frame_id !== "root"
-        ? record.frame_id
-        : null;
-    selectNodeAndExplorer(record.node_id, fid);
-    setActiveView("node");
-    setSpansInspector(null);
-  }
+  const ioPrefetchForOpenSpan = useMemo(
+    () =>
+      spanDetail != null
+        ? nodeDetailIoPrefetchForSpan(
+            nodeDetail,
+            exploreRunId,
+            activeRun,
+            exploreNodeId,
+            selectedFrameId,
+            spanDetail,
+          )
+        : null,
+    [
+      spanDetail,
+      nodeDetail,
+      exploreRunId,
+      activeRun,
+      exploreNodeId,
+      selectedFrameId,
+    ],
+  );
+
+  const ioPrefetchForOpenRecord = useMemo(
+    () =>
+      recordDetail != null
+        ? nodeDetailIoPrefetchForRecord(
+            nodeDetail,
+            exploreRunId,
+            activeRun,
+            exploreNodeId,
+            selectedFrameId,
+            recordDetail,
+          )
+        : null,
+    [
+      recordDetail,
+      nodeDetail,
+      exploreRunId,
+      activeRun,
+      exploreNodeId,
+      selectedFrameId,
+    ],
+  );
 
   const recordsEmptyReason =
     exploreRunId == null
@@ -1804,8 +1884,9 @@ function SpansRecordsView({
 
           <Panel title="Inspector">
             <p className="spans-detail-hint">
-              Click any span or record on the left to open a side panel with fields and raw
-              JSON—similar to Datadog’s span / log inspector.
+              Open a span or record to see fields, bundle <strong>inputs / output</strong> for
+              that node and frame (same data as the Node view), related semantic lines, and raw
+              JSON.
             </p>
           </Panel>
         </div>
@@ -1813,6 +1894,16 @@ function SpansRecordsView({
 
       {spanDetail ? (
         <ExecutionDetailDrawer
+          afterFields={
+            <InspectorNodeIo
+              enabled
+              frameId={spanDetail.correlationKeys.frameId}
+              graphId={activeRun?.summary.graph_id ?? null}
+              nodeId={spanDetail.correlationKeys.nodeId}
+              prefetchedDetail={ioPrefetchForOpenSpan}
+              runId={spanDetail.correlationKeys.runId ?? exploreRunId}
+            />
+          }
           badge={spanDetail.kindTag.toUpperCase()}
           heading={spanDetail.title}
           kindHue={spanDetail.kindHue}
@@ -1828,24 +1919,14 @@ function SpansRecordsView({
       {recordDetail ? (
         <ExecutionDetailDrawer
           afterFields={
-            recordDetail.event_type === "effect.completed" ? (
-              <section className="exec-detail-section">
-                <h3 className="exec-detail-section-title">Structured output</h3>
-                <p className="spans-explainer">
-                  Semantic records only record an output type hint for effects. The full
-                  return value is stored in the run bundle{" "}
-                  <span className="mono">outputs.json</span> and shown under{" "}
-                  <strong>Node</strong> for this node and frame.
-                </p>
-                <button
-                  type="button"
-                  className="primary-action secondary"
-                  onClick={() => openNodeDetailForRecord(recordDetail)}
-                >
-                  Open node detail (inputs / outputs)
-                </button>
-              </section>
-            ) : null
+            <InspectorNodeIo
+              enabled
+              frameId={recordDetail.frame_id}
+              graphId={activeRun?.summary.graph_id ?? null}
+              nodeId={recordDetail.node_id}
+              prefetchedDetail={ioPrefetchForOpenRecord}
+              runId={recordDetail.run_id}
+            />
           }
           badge={recordDetail.event_type}
           heading={`${recordDetail.event_type} · ${recordDetail.node_id}`}

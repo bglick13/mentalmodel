@@ -2036,3 +2036,35 @@ button.trace-row-card.active {
   line-height: 1.45;
   color: var(--muted);
 }
+
+.exec-detail-io-scope {
+  margin: 0 0 10px;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.exec-detail-io-muted {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.exec-detail-io-error {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: #f0a8a8;
+}
+
+.exec-detail-io-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.exec-detail-io-block .exec-detail-pre-nested {
+  max-height: min(36vh, 280px);
+  overflow: auto;
+}
