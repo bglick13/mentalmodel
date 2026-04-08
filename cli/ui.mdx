@@ -18,11 +18,15 @@ Common flags:
 uv run mentalmodel ui --host 0.0.0.0 --port 8765
 uv run mentalmodel ui --runs-dir /tmp/mentalmodel-runs
 uv run mentalmodel ui --frontend-dist apps/dashboard/dist --open-browser
+uv run mentalmodel ui --frontend-dev-url http://127.0.0.1:5173
+uv run mentalmodel ui --catalog-entrypoint mypkg.dashboard:catalog
 ```
 
 ## What it serves
 
 - a React dashboard if `apps/dashboard/dist` exists
+- a Vite frontend in local dev mode when you point the browser at
+  `--frontend-dev-url`
 - JSON APIs for:
   - launchable workflow specs
   - live execution sessions
@@ -50,13 +54,42 @@ cd /path/to/mentalmodel
 uv run mentalmodel ui --open-browser
 ```
 
+For a rebuild-free local dev loop:
+
+```bash
+cd apps/dashboard
+npm install
+npm run dev:stack
+```
+
+That uses Vite on `http://127.0.0.1:5173` and points it at the Python API
+running on `http://127.0.0.1:8765`.
+
 3. In the dashboard:
 
 - choose `Ticket Review Fixture` or `Ticket Review Strict`
 - run the workflow
 - inspect the graph panel to drill into nodes
+- click grouped metrics to jump directly to the node and frame that emitted them
 - inspect the invariant list to jump directly to constraint nodes
 - inspect the records table for the full logs-like semantic stream
+
+## Custom catalogs
+
+The dashboard is catalog-driven. A catalog provider is a Python entrypoint that
+returns one or more `DashboardCatalogEntry` values.
+
+Run a custom catalog with:
+
+```bash
+uv run mentalmodel ui \
+  --catalog-entrypoint mypkg.dashboard:catalog \
+  --frontend-dev-url http://127.0.0.1:5173
+```
+
+That lets downstream projects like Pangramanizer expose their own specs, metric
+groups, pinned nodes, and default loop drilldown behavior without forking the
+dashboard shell.
 
 ## What to look for
 

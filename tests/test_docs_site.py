@@ -85,5 +85,8 @@ class DocsSiteTest(unittest.TestCase):
         self.assertIn("cli/ui", docs_json)
         self.assertIn("guides/dashboard-ui", docs_json)
         self.assertIn("mentalmodel ui", cli_ui)
+        self.assertIn("--frontend-dev-url", cli_ui)
+        self.assertIn("--catalog-entrypoint", cli_ui)
         self.assertIn("review_workflow", guide)
         self.assertIn("graph.json", guide)
+        self.assertIn("dev:stack", guide)

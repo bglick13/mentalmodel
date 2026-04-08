@@ -106,3 +106,30 @@ class RuntimeEnvironmentTest(unittest.TestCase):
 
         with self.assertRaises(MissingRuntimeProfileError):
             asyncio.run(AsyncExecutor(environment=environment).run(build_program()))
+
+    def test_environment_finalizers_run_after_verification(self) -> None:
+        finalized: list[str] = []
+        environment = RuntimeEnvironment(
+            profiles={
+                "fixture": RuntimeProfile(
+                    name="fixture",
+                    resources=cast(
+                        dict[ResourceKey[object], object],
+                        {MULTIPLIER_RESOURCE: Multiplier(2)},
+                    ),
+                ),
+                "real": RuntimeProfile(
+                    name="real",
+                    resources=cast(
+                        dict[ResourceKey[object], object],
+                        {MULTIPLIER_RESOURCE: Multiplier(5)},
+                    ),
+                ),
+            },
+            finalizers=(lambda: finalized.append("done"),),
+        )
+
+        report = run_verification(build_program(), environment=environment)
+
+        self.assertTrue(report.success)
+        self.assertEqual(finalized, ["done"])

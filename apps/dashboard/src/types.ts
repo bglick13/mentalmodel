@@ -1,3 +1,17 @@
+export type MetricGroup = {
+  group_id: string;
+  title: string;
+  description: string;
+  metric_path_prefixes: string[];
+  max_items: number;
+};
+
+export type PinnedNode = {
+  node_id: string;
+  title: string;
+  description: string;
+};
+
 export type CatalogEntry = {
   spec_id: string;
   label: string;
@@ -5,6 +19,24 @@ export type CatalogEntry = {
   spec_path: string;
   graph_id: string;
   invocation_name: string;
+  category: string;
+  tags: string[];
+  default_loop_node_id: string | null;
+  metric_groups: MetricGroup[];
+  pinned_nodes: PinnedNode[];
+};
+
+export type AnalysisFinding = {
+  code: string;
+  severity: string;
+  message: string;
+  node_id: string | null;
+};
+
+export type AnalysisReport = {
+  error_count: number;
+  warning_count: number;
+  findings: AnalysisFinding[];
 };
 
 export type GraphNode = {
@@ -28,6 +60,31 @@ export type GraphPayload = {
   metadata: Record<string, string>;
   nodes: GraphNode[];
   edges: GraphEdge[];
+};
+
+export type CatalogGraphPayload = {
+  catalog_entry: CatalogEntry;
+  graph: GraphPayload;
+  analysis: AnalysisReport;
+};
+
+export type TimeseriesBucket = {
+  start_ms: number;
+  end_ms: number;
+  records_per_sec: number;
+  loop_events_per_sec: number;
+  unique_nodes: number;
+  unique_nodes_per_sec: number;
+};
+
+export type TimeseriesResponse = {
+  rollup_ms: number;
+  since_ms: number;
+  until_ms: number;
+  graph_id: string;
+  invocation_name: string;
+  buckets: TimeseriesBucket[];
+  runs_scanned: number;
 };
 
 export type RunSummary = {
@@ -106,6 +163,9 @@ export type NumericMetric = {
   path: string;
   label: string;
   value: number;
+  frame_id: string | null;
+  loop_node_id: string | null;
+  iteration_index: number | null;
 };
 
 export type InvariantOverview = {
@@ -124,6 +184,50 @@ export type RunOverview = {
   graph: GraphPayload;
   metrics: NumericMetric[];
   invariants: InvariantOverview[];
+};
+
+/** Coarse bucket for span coloring / icons (from ``mentalmodel.node.kind``). */
+export type SpanKindTag =
+  | "effect"
+  | "join"
+  | "loop"
+  | "queue"
+  | "sink"
+  | "other";
+
+/** Normalized span row for traces / spans UI (built from raw OTel-style payloads). */
+export type GenericSpan = {
+  /** Raw OTel/span ``name`` (before UI normalization). */
+  label: string;
+  /** Primary display line (short, deduped vs node id). */
+  title: string;
+  /** Secondary line: frame / context only (no duplicate of title). */
+  subtitle: string | null;
+  /** Raw ``mentalmodel.node.kind`` when present. */
+  nodeKind: string | null;
+  kindTag: SpanKindTag;
+  /** Hue 0–360 for stripe / badge (stable from kind + node id). */
+  kindHue: number;
+  latencyLabel: string;
+  /** Best-effort duration in milliseconds for charts. */
+  latencyMs: number;
+  statusLabel: string;
+  /** Short id for tables (run id or trace hint). */
+  traceIdDisplay: string;
+  /** Legacy one-line summary; prefer ``title`` + ``subtitle`` in UI. */
+  summaryLine: string;
+  /** Ordered key/value rows for detail panel. */
+  structuredRows: Array<[string, string]>;
+  /** Compact preview rows (legacy / small summaries). */
+  metadata: Array<[string, string]>;
+  /** Original span object for JSON / advanced fields. */
+  rawSpan: Record<string, unknown>;
+  /** Align semantic ``records.jsonl`` rows with this span (same bundle scope). */
+  correlationKeys: {
+    runId: string | null;
+    nodeId: string;
+    frameId: string;
+  };
 };
 
 export type NodeDetail = {

@@ -74,14 +74,14 @@ function layoutGraph(graph: GraphPayload, summaries: ReplayNodeSummary[]) {
     const runtimeContext = node.metadata.runtime_context;
     const tone =
       status === "fail"
-        ? "#dc2626"
+        ? "#ffb4ab"
         : status === "warning"
-          ? "#d97706"
+          ? "#ffcf86"
           : status === "running"
-            ? "#2563eb"
+            ? "#8ed5ff"
             : status === "pass"
-              ? "#16a34a"
-              : "#64748b";
+              ? "#56e5a9"
+              : "#8d9ab9";
     return {
       id: node.node_id,
       type: "default",
@@ -105,13 +105,13 @@ function layoutGraph(graph: GraphPayload, summaries: ReplayNodeSummary[]) {
       },
       style: {
         width: 210,
-        borderRadius: 16,
-        border: `1px solid ${tone}`,
+        borderRadius: 8,
+        border: "none",
         padding: 12,
         background:
-          "linear-gradient(180deg, rgba(15,23,42,0.98) 0%, rgba(30,41,59,0.92) 100%)",
-        color: "#e2e8f0",
-        boxShadow: "0 18px 40px rgba(2, 6, 23, 0.28)",
+          "linear-gradient(180deg, rgba(45,52,73,0.68) 0%, rgba(23,31,51,0.94) 100%)",
+        color: "#dae2fd",
+        boxShadow: `inset 0 0 0 1px ${tone}33, 0 8px 32px rgba(6, 14, 32, 0.42)`,
       },
     };
   });
@@ -132,7 +132,7 @@ function layoutGraph(graph: GraphPayload, summaries: ReplayNodeSummary[]) {
       },
       style: {
         stroke: "#475569",
-        strokeWidth: 1.8,
+        strokeWidth: 1.6,
       },
     }));
 
@@ -168,6 +168,7 @@ export function GraphPanel({
           }))}
           edges={edges}
           fitView
+          fitViewOptions={{ padding: 0.14 }}
           onNodeClick={(_, node) => onSelectNode(node.id)}
           nodesDraggable={false}
           nodesConnectable={false}

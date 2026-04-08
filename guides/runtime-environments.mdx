@@ -128,6 +128,28 @@ Runtime profile metadata appears in the same places you already inspect runs:
 That means `mentalmodel runs show --graph-id ...` tells you not just what ran,
 but which profile set the run was bound against.
 
+## Resource lifecycle and finalizers
+
+Some runtime resources need teardown after execution, for example:
+
+- trackers that should flush on run completion
+- clients or sinks with explicit shutdown
+- temporary runtime-owned helper processes
+
+`RuntimeEnvironment` supports `finalizers=(...)` for that case:
+
+```python
+RuntimeEnvironment(
+    profiles={...},
+    default_profile_name="fixture",
+    finalizers=(tracker.finish,),
+)
+```
+
+`mentalmodel` runs those finalizers after `verify` / `execute_program`, even if
+execution fails. This keeps runtime-owned resources attached to the environment
+model instead of leaking cleanup back into application-side wrapper scripts.
+
 ## CLI verification without Python glue
 
 Runtime environments are now fully usable from the CLI. You do not need a

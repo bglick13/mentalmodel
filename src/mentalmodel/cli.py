@@ -66,6 +66,7 @@ from mentalmodel.runtime.runs import (
 from mentalmodel.skills import build_install_plan, install_skills
 from mentalmodel.testing import execute_program, run_verification
 from mentalmodel.ui.api import create_dashboard_app
+from mentalmodel.ui.catalog import load_dashboard_catalog_subject
 
 DEFAULT_VERIFY_ENTRYPOINT = "mentalmodel.examples.async_rl.demo:build_program"
 
@@ -267,21 +268,30 @@ def run_ui(
     host: str = "127.0.0.1",
     port: int = 8765,
     frontend_dist: Path | None = None,
+    frontend_dev_url: str | None = None,
+    catalog_entrypoint: str | None = None,
     open_browser: bool = False,
 ) -> int:
     """Launch the dashboard API and static frontend host."""
 
     import uvicorn
 
+    catalog_entries = None
+    if catalog_entrypoint is not None:
+        _, catalog_entries = load_dashboard_catalog_subject(catalog_entrypoint)
     dist_dir = frontend_dist
-    if dist_dir is None:
+    if dist_dir is None and frontend_dev_url is None:
         repo_root = Path(__file__).resolve().parents[2]
         candidate = repo_root / "apps" / "dashboard" / "dist"
         dist_dir = candidate if candidate.exists() else None
-    app = create_dashboard_app(runs_dir=runs_dir, frontend_dist=dist_dir)
+    app = create_dashboard_app(
+        runs_dir=runs_dir,
+        frontend_dist=dist_dir,
+        catalog_entries=catalog_entries,
+    )
     url = f"http://{host}:{port}"
     if open_browser:
-        webbrowser.open(url)
+        webbrowser.open(frontend_dev_url or url)
     uvicorn.run(app, host=host, port=port)
     return 0
 
@@ -1560,6 +1570,21 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--frontend-dist", type=Path)
+    ui.add_argument(
+        "--frontend-dev-url",
+        help=(
+            "Optional frontend dev-server URL. When set, the UI backend serves only "
+            "the API and opens this URL instead of the built frontend shell."
+        ),
+    )
+    ui.add_argument(
+        "--catalog-entrypoint",
+        help=(
+            "Optional dashboard catalog provider in `module:attribute` format. "
+            "The subject may be a callable returning dashboard entries or a tuple "
+            "of entries directly."
+        ),
+    )
     ui.add_argument("--open-browser", action="store_true")
 
     otel = subparsers.add_parser("otel", help="Inspect or materialize OTEL configuration.")
@@ -1742,6 +1767,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host=args.host,
                 port=args.port,
                 frontend_dist=args.frontend_dist,
+                frontend_dev_url=args.frontend_dev_url,
+                catalog_entrypoint=args.catalog_entrypoint,
                 open_browser=args.open_browser,
             )
         if args.command == "otel":

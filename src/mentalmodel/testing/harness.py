@@ -158,11 +158,13 @@ def execute_program(
 ) -> ExecutionResult:
     """Run one workflow through the deterministic async executor."""
 
+    resolved_environment = environment or EMPTY_RUNTIME_ENVIRONMENT
     return asyncio.run(
-        AsyncExecutor(
-            environment=environment or EMPTY_RUNTIME_ENVIRONMENT,
+        _run_executor(
+            program,
+            environment=resolved_environment,
             invocation_name=invocation_name,
-        ).run(program)
+        )
     )
 
 
@@ -247,13 +249,19 @@ def _capture_runtime(
     record_listeners: Sequence[RecordListener] = (),
 ) -> RuntimeExecutionCapture:
     recorder = ExecutionRecorder(listeners=tuple(record_listeners))
+    resolved_environment = environment or EMPTY_RUNTIME_ENVIRONMENT
     executor = AsyncExecutor(
         recorder=recorder,
-        environment=environment or EMPTY_RUNTIME_ENVIRONMENT,
+        environment=resolved_environment,
         invocation_name=invocation_name,
     )
     try:
-        result = asyncio.run(executor.run(program))
+        result = asyncio.run(
+            _run_executor_with_instance(
+                executor,
+                program,
+            )
+        )
     except Exception as exc:
         invariant_failures = _collect_invariant_failures(tuple(recorder.records))
         return RuntimeExecutionCapture(
@@ -301,6 +309,31 @@ def _capture_runtime(
         runtime_default_profile_name=result.runtime_default_profile_name,
         runtime_profile_names=result.runtime_profile_names,
     )
+
+
+async def _run_executor(
+    program: Workflow[NamedPrimitive],
+    *,
+    environment: RuntimeEnvironment,
+    invocation_name: str | None,
+    recorder: ExecutionRecorder | None = None,
+) -> ExecutionResult:
+    executor = AsyncExecutor(
+        recorder=recorder,
+        environment=environment,
+        invocation_name=invocation_name,
+    )
+    return await _run_executor_with_instance(executor, program)
+
+
+async def _run_executor_with_instance(
+    executor: AsyncExecutor,
+    program: Workflow[NamedPrimitive],
+) -> ExecutionResult:
+    try:
+        return await executor.run(program)
+    finally:
+        await executor.environment.finalize()
 
 
 def _collect_invariant_failures(

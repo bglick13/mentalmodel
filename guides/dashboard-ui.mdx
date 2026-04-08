@@ -3,19 +3,28 @@ title: Dashboard UI
 description: Use the bespoke React dashboard to launch workflows, inspect graphs, and debug invariants on top of persisted .runs data.
 ---
 
-The dashboard is the first dedicated human UI on top of the same run and replay
-services that power the CLI.
+The dashboard is the dedicated human UI on top of the same run and replay
+services that power the CLI. The intended interaction model is:
+
+- start from a spec or a recent run
+- use grouped metrics and pinned nodes as fast drilldown entrypoints
+- pivot into node inputs, outputs, traces, and invariant results
+- fall back to raw records only when you need the full semantic event stream
 
 ## Architecture
 
 The Phase 26 stack is split cleanly:
 
-- backend API: shared Python services over `.runs`, replay, and invocation specs
+- backend API: shared Python services over `.runs`, replay, invocation specs,
+  and dashboard catalogs
 - frontend: React/TypeScript app in `apps/dashboard`
 - persistence: existing `.runs` artifacts plus a persisted `graph.json` per run
 
 That matters for hosted-service design. The UI is not reconstructing graphs from
 ad hoc frontend logic or ephemeral Python objects.
+
+The dashboard shell is intentionally generic. The built-in review workflow is
+just the default catalog, not a hard-coded product assumption.
 
 ## Proof workflow
 
@@ -45,6 +54,18 @@ cd /path/to/mentalmodel
 uv run mentalmodel ui --open-browser
 ```
 
+For iterative frontend work, use local dev mode instead of rebuilding `dist`:
+
+```bash
+cd apps/dashboard
+npm install
+npm run dev:stack
+```
+
+That starts Vite on `http://127.0.0.1:5173` and the Python API on
+`http://127.0.0.1:8765`. The dev server proxies `/api/*` so the frontend can
+be edited live.
+
 ## What the UI should help with
 
 - run the workflow without dropping to raw entrypoint strings
@@ -52,6 +73,8 @@ uv run mentalmodel ui --open-browser
 - inspect node inputs and outputs, including loop-scoped frames
 - inspect invariant status without grepping raw records
 - view the full semantic record stream in a logs-like table
+- connect grouped metrics directly to the node and frame that emitted them
+- inspect static graph analysis findings alongside runtime results
 - compare the fixture and strict runtime profiles through the resolution metrics
 
 ## Relationship to the CLI
@@ -63,3 +86,24 @@ The UI does not replace the CLI. A good debugging sequence is:
    raw payloads
 3. use `.runs/<graph>/<run>/` artifacts directly when you are building new
    tooling or debugging the dashboard itself
+
+## Custom catalogs
+
+Downstream projects can register their own dashboard surface by exposing a
+catalog entrypoint that returns `DashboardCatalogEntry` values.
+
+Example:
+
+```bash
+uv run mentalmodel ui \
+  --catalog-entrypoint mypkg.dashboard:catalog \
+  --frontend-dev-url http://127.0.0.1:5173
+```
+
+Each catalog entry can define:
+
+- launchable TOML spec path
+- graph id and invocation name filters
+- grouped metric prefixes
+- pinned drilldown nodes
+- default loop replay scope

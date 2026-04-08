@@ -31,11 +31,13 @@ export function RecordsPanel({ title, records }: RecordsPanelProps) {
           <tbody>
             {records.map((record) => (
               <tr key={record.record_id}>
-                <td>{record.sequence}</td>
+                <td className="mono">{record.sequence}</td>
                 <td>{record.node_id}</td>
-                <td>{record.frame_id}</td>
+                <td className="mono">{record.frame_id}</td>
                 <td>{record.event_type}</td>
-                <td>{new Date(record.timestamp_ms).toLocaleTimeString()}</td>
+                <td className="mono">
+                  {new Date(record.timestamp_ms).toLocaleTimeString()}
+                </td>
                 <td>
                   <pre>{JSON.stringify(record.payload, null, 2)}</pre>
                 </td>

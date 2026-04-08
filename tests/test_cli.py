@@ -215,10 +215,48 @@ class CliTest(unittest.TestCase):
 
     def test_ui_command_parses(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["ui", "--host", "0.0.0.0", "--port", "9000"])
+        args = parser.parse_args(
+            [
+                "ui",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "9000",
+                "--frontend-dev-url",
+                "http://127.0.0.1:5173",
+                "--catalog-entrypoint",
+                "mentalmodel.ui.catalog:default_dashboard_catalog",
+            ]
+        )
         self.assertEqual(args.command, "ui")
         self.assertEqual(args.host, "0.0.0.0")
         self.assertEqual(args.port, 9000)
+        self.assertEqual(args.frontend_dev_url, "http://127.0.0.1:5173")
+        self.assertEqual(
+            args.catalog_entrypoint,
+            "mentalmodel.ui.catalog:default_dashboard_catalog",
+        )
+
+    def test_ui_command_supports_frontend_dev_server_and_catalog_provider(self) -> None:
+        with patch("mentalmodel.cli.create_dashboard_app", return_value=object()) as create_app:
+            with patch("mentalmodel.cli.webbrowser.open") as open_browser:
+                with patch("uvicorn.run") as run_server:
+                    exit_code = main(
+                        [
+                            "ui",
+                            "--frontend-dev-url",
+                            "http://127.0.0.1:5173",
+                            "--catalog-entrypoint",
+                            "mentalmodel.ui.catalog:default_dashboard_catalog",
+                            "--open-browser",
+                        ]
+                    )
+        self.assertEqual(exit_code, 0)
+        create_app.assert_called_once()
+        self.assertIsNone(create_app.call_args.kwargs["frontend_dist"])
+        self.assertEqual(len(create_app.call_args.kwargs["catalog_entries"]), 2)
+        open_browser.assert_called_once_with("http://127.0.0.1:5173")
+        run_server.assert_called_once()
 
     def test_doctor_command_outputs_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

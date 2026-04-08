@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -21,6 +22,7 @@ from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import execution_record_to_json
 from mentalmodel.runtime.replay import build_replay_report
 from mentalmodel.runtime.runs import (
+    RunFrameScope,
     RunSummary,
     list_run_summaries,
     load_run_graph,
@@ -29,13 +31,16 @@ from mentalmodel.runtime.runs import (
     load_run_node_trace,
     load_run_payload,
     load_run_records,
+    load_run_spans,
     resolve_run_summary,
 )
 from mentalmodel.testing import VerificationReport, run_verification
 from mentalmodel.ui.catalog import (
     DashboardCatalogEntry,
+    DashboardCatalogError,
+    catalog_entry_from_spec_path,
     default_dashboard_catalog,
-    resolve_catalog_entry,
+    validate_dashboard_catalog,
 )
 
 
@@ -101,16 +106,48 @@ class DashboardExecutionSession:
 class DashboardService:
     """Shared backend service for the hosted dashboard surface."""
 
-    def __init__(self, *, runs_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runs_dir: Path | None = None,
+        catalog_entries: Sequence[DashboardCatalogEntry] | None = None,
+    ) -> None:
         self.runs_dir = runs_dir
+        self._catalog = validate_dashboard_catalog(
+            tuple(catalog_entries)
+            if catalog_entries is not None
+            else default_dashboard_catalog()
+        )
+        self._dynamic_catalog: dict[str, DashboardCatalogEntry] = {}
         self._sessions: dict[str, DashboardExecutionSession] = {}
         self._lock = threading.Lock()
 
     def list_catalog(self) -> tuple[DashboardCatalogEntry, ...]:
-        return default_dashboard_catalog()
+        return tuple(self._catalog) + tuple(self._dynamic_catalog.values())
+
+    def _resolve_entry(self, spec_id: str) -> DashboardCatalogEntry:
+        for entry in self._catalog:
+            if entry.spec_id == spec_id:
+                return entry
+        if spec_id in self._dynamic_catalog:
+            return self._dynamic_catalog[spec_id]
+        raise DashboardCatalogError(f"Unknown dashboard catalog entry {spec_id!r}.")
+
+    def register_spec_path(self, spec_path: Path) -> DashboardCatalogEntry:
+        """Parse a verify TOML on disk and register it for graph preview and launch."""
+
+        entry = catalog_entry_from_spec_path(spec_path)
+        self._dynamic_catalog[entry.spec_id] = entry
+        return entry
+
+    def start_execution_from_path(self, spec_path: Path) -> DashboardExecutionSession:
+        """Register the spec (if needed) and start verification in a background thread."""
+
+        entry = self.register_spec_path(spec_path)
+        return self._start_execution_with_entry(entry)
 
     def load_catalog_graph(self, spec_id: str) -> dict[str, JsonValue]:
-        entry = resolve_catalog_entry(spec_id)
+        entry = self._resolve_entry(spec_id)
         invocation = read_verify_invocation_spec(entry.spec_path)
         _, program = load_workflow_subject(invocation.program)
         graph = lower_program(program)
@@ -121,8 +158,7 @@ class DashboardService:
             "analysis": _analysis_to_payload(analysis),
         }
 
-    def start_execution(self, spec_id: str) -> DashboardExecutionSession:
-        entry = resolve_catalog_entry(spec_id)
+    def _start_execution_with_entry(self, entry: DashboardCatalogEntry) -> DashboardExecutionSession:
         session = DashboardExecutionSession(
             execution_id=f"exec-{uuid.uuid4().hex}",
             spec=entry,
@@ -137,6 +173,10 @@ class DashboardService:
         )
         thread.start()
         return session
+
+    def start_execution(self, spec_id: str) -> DashboardExecutionSession:
+        entry = self._resolve_entry(spec_id)
+        return self._start_execution_with_entry(entry)
 
     def get_execution(self, execution_id: str, *, after_sequence: int = 0) -> dict[str, JsonValue]:
         session = self._require_session(execution_id)
@@ -218,6 +258,22 @@ class DashboardService:
         node_id: str | None = None,
     ) -> tuple[dict[str, JsonValue], ...]:
         return load_run_records(
+            runs_dir=self.runs_dir,
+            graph_id=graph_id,
+            run_id=run_id,
+            node_id=node_id,
+        )
+
+    def get_run_spans(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        node_id: str | None = None,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """Return OTel span rows from ``otel-spans.jsonl`` (optionally filtered by node)."""
+
+        return load_run_spans(
             runs_dir=self.runs_dir,
             graph_id=graph_id,
             run_id=run_id,
@@ -325,22 +381,50 @@ class DashboardService:
             run_id=run_id,
             filename="outputs.json",
         )
-        outputs = outputs_payload.get("outputs")
-        if not isinstance(outputs, dict):
-            return []
         metrics: list[dict[str, JsonValue]] = []
-        for node_id, output in outputs.items():
-            if not isinstance(node_id, str):
-                continue
-            metrics.extend(
-                {
-                    "node_id": node_id,
-                    "path": metric_path,
-                    "value": metric_value,
-                    "label": f"{node_id}.{metric_path}",
-                }
-                for metric_path, metric_value in _flatten_numeric_values(output)
-            )
+        outputs = outputs_payload.get("outputs")
+        if isinstance(outputs, dict):
+            for node_id, output in outputs.items():
+                if not isinstance(node_id, str):
+                    continue
+                metrics.extend(
+                    _metrics_from_output(
+                        node_id=node_id,
+                        output=output,
+                        frame_scope=RunFrameScope(frame_id="root"),
+                    )
+                )
+        framed_outputs = outputs_payload.get("framed_outputs")
+        if isinstance(framed_outputs, list):
+            for item in framed_outputs:
+                if not isinstance(item, dict):
+                    continue
+                framed_node_id: object = item.get("node_id")
+                framed_output: object = item.get("value")
+                frame_id: object = item.get("frame_id")
+                loop_node_id: object = item.get("loop_node_id")
+                iteration_index: object = item.get("iteration_index")
+                if not isinstance(framed_node_id, str) or not isinstance(frame_id, str):
+                    continue
+                if frame_id == "root":
+                    continue
+                metrics.extend(
+                    _metrics_from_output(
+                        node_id=framed_node_id,
+                        output=_as_json_value(framed_output),
+                        frame_scope=RunFrameScope(
+                            frame_id=frame_id,
+                            loop_node_id=(
+                                loop_node_id if isinstance(loop_node_id, str) else None
+                            ),
+                            iteration_index=(
+                                iteration_index
+                                if isinstance(iteration_index, int)
+                                else None
+                            ),
+                        ),
+                    )
+                )
         return metrics
 
     def _available_frames(
@@ -370,6 +454,130 @@ class DashboardService:
             )
         return frames
 
+    def aggregate_record_timeseries(
+        self,
+        *,
+        graph_id: str,
+        invocation_name: str,
+        since_ms: int,
+        until_ms: int,
+        rollup_ms: int,
+        run_id: str | None = None,
+        node_id: str | None = None,
+    ) -> dict[str, JsonValue]:
+        """Bucket semantic records into time slices with Datadog-style rates (per second).
+
+        Counts records whose ``timestamp_ms`` falls in ``[since_ms, until_ms)``.
+        ``loop_events`` counts records with a non-null ``iteration_index``.
+        ``unique_nodes`` is the count of distinct ``node_id`` values per bucket (not a rate
+        of new nodes; displayed as nodes active in that interval).
+        """
+
+        if self.runs_dir is None:
+            return _empty_timeseries(
+                graph_id=graph_id,
+                invocation_name=invocation_name,
+                since_ms=since_ms,
+                until_ms=until_ms,
+                rollup_ms=rollup_ms,
+            )
+        if since_ms >= until_ms or rollup_ms <= 0:
+            raise ValueError("since_ms must be < until_ms and rollup_ms must be positive.")
+
+        span = until_ms - since_ms
+        max_buckets = 500
+        effective_rollup = rollup_ms
+        num_buckets = max(1, (span + effective_rollup - 1) // effective_rollup)
+        if num_buckets > max_buckets:
+            effective_rollup = max(rollup_ms, (span + max_buckets - 1) // max_buckets)
+            num_buckets = max(1, (span + effective_rollup - 1) // effective_rollup)
+            num_buckets = min(num_buckets, max_buckets)
+        rollup_ms = effective_rollup
+
+        summaries = list_run_summaries(
+            runs_dir=self.runs_dir,
+            graph_id=graph_id,
+            invocation_name=invocation_name,
+        )
+        if run_id is not None:
+            summaries = tuple(s for s in summaries if s.run_id == run_id)
+        else:
+            # Approximate which bundles may contain events in [since_ms, until_ms) by run start time.
+            windowed = tuple(
+                s for s in summaries if since_ms <= s.created_at_ms < until_ms
+            )
+            if windowed:
+                summaries = windowed[:200]
+            else:
+                summaries = summaries[: min(100, len(summaries))]
+
+        record_counts = [0] * num_buckets
+        loop_counts = [0] * num_buckets
+        node_sets: list[set[str]] = [set() for _ in range(num_buckets)]
+
+        for summary in summaries:
+            records_path = summary.run_dir / "records.jsonl"
+            if not records_path.is_file():
+                continue
+            with records_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    ts = row.get("timestamp_ms")
+                    if not isinstance(ts, int):
+                        continue
+                    if ts < since_ms or ts >= until_ms:
+                        continue
+                    nid = row.get("node_id")
+                    if node_id is not None:
+                        if nid != node_id:
+                            continue
+                    bi = (ts - since_ms) // rollup_ms
+                    if bi < 0 or bi >= num_buckets:
+                        continue
+                    record_counts[bi] += 1
+                    if isinstance(nid, str):
+                        node_sets[bi].add(nid)
+                    it = row.get("iteration_index")
+                    if isinstance(it, int):
+                        loop_counts[bi] += 1
+
+        secs = rollup_ms / 1000.0
+        buckets: list[dict[str, JsonValue]] = []
+        for i in range(num_buckets):
+            start = since_ms + i * rollup_ms
+            end = min(start + rollup_ms, until_ms)
+            rc = record_counts[i]
+            lc = loop_counts[i]
+            un = len(node_sets[i])
+            buckets.append(
+                {
+                    "start_ms": start,
+                    "end_ms": end,
+                    "records_per_sec": rc / secs if secs else 0.0,
+                    "loop_events_per_sec": lc / secs if secs else 0.0,
+                    "unique_nodes": un,
+                    "unique_nodes_per_sec": un / secs if secs else 0.0,
+                }
+            )
+
+        return {
+            "rollup_ms": rollup_ms,
+            "since_ms": since_ms,
+            "until_ms": until_ms,
+            "graph_id": graph_id,
+            "invocation_name": invocation_name,
+            "buckets": buckets,
+            "runs_scanned": len(summaries),
+        }
+
     def _require_session(self, execution_id: str) -> DashboardExecutionSession:
         with self._lock:
             session = self._sessions.get(execution_id)
@@ -397,6 +605,50 @@ def _analysis_to_payload(report: AnalysisReport) -> dict[str, JsonValue]:
             }
             for finding in report.findings
         ],
+    }
+
+
+def _empty_timeseries(
+    *,
+    graph_id: str,
+    invocation_name: str,
+    since_ms: int,
+    until_ms: int,
+    rollup_ms: int,
+) -> dict[str, JsonValue]:
+    """Return an empty timeseries when no runs dir or no data."""
+
+    span = max(0, until_ms - since_ms)
+    max_buckets = 500
+    effective_rollup = rollup_ms if rollup_ms > 0 else 60_000
+    num_buckets = max(1, (span + effective_rollup - 1) // effective_rollup)
+    if num_buckets > max_buckets:
+        effective_rollup = max(effective_rollup, (span + max_buckets - 1) // max_buckets)
+        num_buckets = max(1, (span + effective_rollup - 1) // effective_rollup)
+        num_buckets = min(num_buckets, max_buckets)
+    rollup_ms = effective_rollup
+    buckets: list[dict[str, JsonValue]] = []
+    for i in range(num_buckets):
+        start = since_ms + i * rollup_ms
+        end = min(start + rollup_ms, until_ms)
+        buckets.append(
+            {
+                "start_ms": start,
+                "end_ms": end,
+                "records_per_sec": 0.0,
+                "loop_events_per_sec": 0.0,
+                "unique_nodes": 0,
+                "unique_nodes_per_sec": 0.0,
+            }
+        )
+    return {
+        "rollup_ms": rollup_ms,
+        "since_ms": since_ms,
+        "until_ms": until_ms,
+        "graph_id": graph_id,
+        "invocation_name": invocation_name,
+        "buckets": buckets,
+        "runs_scanned": 0,
     }
 
 
@@ -455,6 +707,31 @@ def _flatten_numeric_values(
         child_prefix = key if not prefix else f"{prefix}.{key}"
         flattened.extend(_flatten_numeric_values(inner, prefix=child_prefix))
     return flattened
+
+
+def _metrics_from_output(
+    *,
+    node_id: str,
+    output: JsonValue,
+    frame_scope: RunFrameScope,
+) -> list[dict[str, JsonValue]]:
+    metrics: list[dict[str, JsonValue]] = []
+    for metric_path, metric_value in _flatten_numeric_values(output):
+        label = f"{node_id}.{metric_path}"
+        if frame_scope.frame_id is not None and frame_scope.frame_id != "root":
+            label = f"{frame_scope.frame_id}.{label}"
+        metrics.append(
+            {
+                "node_id": node_id,
+                "path": metric_path,
+                "value": metric_value,
+                "label": label,
+                "frame_id": frame_scope.frame_id,
+                "loop_node_id": frame_scope.loop_node_id,
+                "iteration_index": frame_scope.iteration_index,
+            }
+        )
+    return metrics
 
 
 def _record_sequence(record: dict[str, JsonValue]) -> int:

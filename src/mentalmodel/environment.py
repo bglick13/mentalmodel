@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import inspect
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Generic, TypeVar, cast
 
 from mentalmodel.errors import MentalModelError
 
 ResourceT = TypeVar("ResourceT")
+FinalizerResult = object | Awaitable[object]
+RuntimeEnvironmentFinalizer = Callable[[], FinalizerResult]
 
 
 class RuntimeProfileError(MentalModelError):
@@ -69,6 +72,7 @@ class RuntimeEnvironment:
 
     profiles: Mapping[str, RuntimeProfile]
     default_profile_name: str | None = None
+    finalizers: tuple[RuntimeEnvironmentFinalizer, ...] = ()
 
     def __post_init__(self) -> None:
         for profile_name, profile in self.profiles.items():
@@ -110,6 +114,14 @@ class RuntimeEnvironment:
                 f"Runtime profile {profile_name!r} is not configured in the environment."
             )
         return profile
+
+    async def finalize(self) -> None:
+        """Run registered environment finalizers in reverse registration order."""
+
+        for finalizer in reversed(self.finalizers):
+            result = finalizer()
+            if inspect.isawaitable(result):
+                await cast(Awaitable[object], result)
 
 
 @dataclass(slots=True, frozen=True)
