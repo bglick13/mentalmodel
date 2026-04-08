@@ -93,15 +93,18 @@ const VIEWS: Array<{
 ];
 
 const SPEC_PATH_STORAGE_KEY = "mentalmodel.dashboard.specPath";
-const DEFAULT_PANGRAM_VERIFY3 =
+const LEGACY_PANGRAM_VERIFY3 =
   "/Users/ben/repos/pangramanizer/pangramanizer/mentalmodel_training/verification/real_verify3.toml";
 
 function readStoredSpecPath(): string {
   try {
     const v = localStorage.getItem(SPEC_PATH_STORAGE_KEY);
-    return v && v.length > 0 ? v : DEFAULT_PANGRAM_VERIFY3;
+    if (!v || v.length === 0 || v === LEGACY_PANGRAM_VERIFY3) {
+      return "";
+    }
+    return v;
   } catch {
-    return DEFAULT_PANGRAM_VERIFY3;
+    return "";
   }
 }
 
@@ -263,6 +266,13 @@ function App() {
     () => catalog.find((entry) => entry.spec_id === selectedSpecId) ?? null,
     [catalog, selectedSpecId],
   );
+
+  useEffect(() => {
+    if (!selectedCatalog) {
+      return;
+    }
+    setCustomSpecPath(selectedCatalog.spec_path);
+  }, [selectedCatalog?.spec_id, selectedCatalog?.spec_path]);
 
   const exploreNodeIdRef = useRef(exploreNodeId);
   exploreNodeIdRef.current = exploreNodeId;
@@ -1383,6 +1393,15 @@ function OverviewView({
                     </div>
                   </button>
                 ))}
+                {liveRecords.length === 0 &&
+                activeExecution.spec.project_id &&
+                activeExecution.spec.project_id !== "mentalmodel-examples" ? (
+                  <div className="empty-state">
+                    External project executions do not stream live semantic
+                    records into the dashboard yet. Output data appears after
+                    the run finishes and its persisted bundle is loaded.
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : (
@@ -2077,10 +2096,9 @@ function LaunchCompareView({
       <section className="launch-layout launch-layout-single">
         <Panel title="Verify TOML path">
           <p className="launch-hint">
-            Absolute path to a <code>mentalmodel verify --spec</code> file. For
-            pangramanizer verify3, your checkout must be on{" "}
-            <code>PYTHONPATH</code> (e.g. run the UI from the pangram repo with{" "}
-            <code>uv run mentalmodel ui</code>).
+            Absolute path to a <code>mentalmodel verify --spec</code> file. The
+            field follows the currently selected catalog entry by default, but
+            you can also paste any other verify TOML path and load it manually.
           </p>
           <label className="launch-path-label" htmlFor="custom-spec-path">
             Spec path
@@ -2092,7 +2110,7 @@ function LaunchCompareView({
             spellCheck={false}
             value={customSpecPath}
             onChange={(event) => setCustomSpecPath(event.target.value)}
-            placeholder={DEFAULT_PANGRAM_VERIFY3}
+            placeholder={selectedCatalog?.spec_path ?? "/absolute/path/to/verify.toml"}
           />
           {loadError ? <div className="launch-error">{loadError}</div> : null}
           <div className="launch-actions">

@@ -261,6 +261,45 @@ class CliTest(unittest.TestCase):
         open_browser.assert_called_once_with("http://127.0.0.1:5173")
         run_server.assert_called_once()
 
+    def test_ui_command_accepts_workspace_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace_path = Path(tmpdir) / "workspace.toml"
+            workspace_path.write_text(
+                "\n".join(
+                    (
+                        'workspace_id = "workspace"',
+                        'label = "Workspace"',
+                        'description = ""',
+                        "",
+                        "[[projects]]",
+                        'project_id = "mentalmodel-examples"',
+                        'label = "Mentalmodel Examples"',
+                        f'root_dir = "{Path(__file__).resolve().parents[1]}"',
+                        'catalog_provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        'runs_dir = ""',
+                        'description = ""',
+                        'tags = []',
+                        'default_environment = "localhost"',
+                        "enabled = true",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with patch("mentalmodel.cli.create_dashboard_app", return_value=object()) as create_app:
+                with patch("uvicorn.run") as run_server:
+                    exit_code = main(
+                        [
+                            "ui",
+                            "--workspace-config",
+                            str(workspace_path),
+                        ]
+                    )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(create_app.call_args.kwargs["catalog_entries"], ())
+        self.assertEqual(len(create_app.call_args.kwargs["project_catalogs"]), 1)
+        run_server.assert_called_once()
+
     def test_ui_command_accepts_project_catalog_provider(self) -> None:
         fixture_entry = default_dashboard_catalog()[0]
         module_name = "mentalmodel.tests.synthetic_project_catalog_cli"
@@ -292,6 +331,155 @@ class CliTest(unittest.TestCase):
         self.assertEqual(create_app.call_args.kwargs["catalog_entries"], None)
         self.assertEqual(len(create_app.call_args.kwargs["project_catalogs"]), 1)
         run_server.assert_called_once()
+
+    def test_remote_sync_command_parses(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "remote",
+                "sync",
+                "--server-url",
+                "http://127.0.0.1:8765",
+                "--graph-id",
+                "async_rl_demo",
+                "--project-id",
+                "mentalmodel-examples",
+            ]
+        )
+        self.assertEqual(args.command, "remote")
+        self.assertEqual(args.remote_command, "sync")
+        self.assertEqual(args.server_url, "http://127.0.0.1:8765")
+        self.assertEqual(args.graph_id, "async_rl_demo")
+        self.assertEqual(args.project_id, "mentalmodel-examples")
+
+    def test_remote_sync_command_emits_json(self) -> None:
+        with patch("mentalmodel.cli.sync_runs_to_server") as sync_runs:
+            sync_runs.return_value = ()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "remote",
+                        "sync",
+                        "--server-url",
+                        "http://127.0.0.1:8765",
+                        "--json",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["server_url"], "http://127.0.0.1:8765")
+        self.assertEqual(payload["count"], 0)
+
+    def test_remote_write_demo_command_writes_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "remote-demo"
+            exit_code = main(
+                [
+                    "remote",
+                    "write-demo",
+                    "--output-dir",
+                    str(output_dir),
+                    "--mentalmodel-root",
+                    str(Path(__file__).resolve().parents[1]),
+                    "--pangramanizer-root",
+                    str(Path(tmpdir) / "missing-pangramanizer"),
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_dir / "workspace.toml").exists())
+            self.assertTrue((output_dir / "run-dashboard.sh").exists())
+
+    def test_remote_doctor_command_outputs_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "remote-demo"
+            exit_code = main(
+                [
+                    "remote",
+                    "write-demo",
+                    "--output-dir",
+                    str(output_dir),
+                    "--mentalmodel-root",
+                    str(Path(__file__).resolve().parents[1]),
+                    "--pangramanizer-root",
+                    str(Path(tmpdir) / "missing-pangramanizer"),
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "remote",
+                        "doctor",
+                        "--workspace-config",
+                        str(output_dir / "workspace.toml"),
+                        "--runs-dir",
+                        str(output_dir / "data"),
+                        "--json",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["success"])
+
+    def test_projects_commands_round_trip_workspace_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace_path = Path(tmpdir) / "workspace.toml"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "projects",
+                        "add",
+                        "--workspace-config",
+                        str(workspace_path),
+                        "--project-id",
+                        "mentalmodel-examples",
+                        "--label",
+                        "Mentalmodel Examples",
+                        "--root-dir",
+                        str(Path(__file__).resolve().parents[1]),
+                        "--provider",
+                        "mentalmodel.ui.catalog:default_dashboard_catalog",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["project"]["project_id"], "mentalmodel-examples")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "projects",
+                        "list",
+                        "--workspace-config",
+                        str(workspace_path),
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(len(payload["projects"]), 1)
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "projects",
+                        "inspect",
+                        "--workspace-config",
+                        str(workspace_path),
+                        "--project-id",
+                        "mentalmodel-examples",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["catalog_entry_count"], 2)
 
     def test_doctor_command_outputs_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

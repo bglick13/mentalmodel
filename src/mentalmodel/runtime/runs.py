@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -332,6 +333,59 @@ def build_run_manifest(
         catalog_source=catalog_source,
         runtime_default_profile_name=runtime_default_profile_name,
         runtime_profile_names=runtime_profile_names,
+    )
+
+
+def build_run_manifest_from_summary(
+    summary: RunSummary,
+    *,
+    project_id: str | None = None,
+    project_label: str | None = None,
+    environment_name: str | None = None,
+    catalog_entry_id: str | None = None,
+    catalog_source: CatalogSource | None = None,
+) -> RunManifest:
+    """Build the canonical run manifest for one already-persisted run bundle."""
+
+    run_dir = summary.run_dir
+    summary_path = run_dir / "summary.json"
+    graph_path = run_dir / "graph.json"
+    records_path = run_dir / "records.jsonl"
+    outputs_path = run_dir / "outputs.json"
+    state_path = run_dir / "state.json"
+    verification_path = run_dir / "verification.json"
+    spans_path = run_dir / "otel-spans.jsonl"
+    return build_run_manifest(
+        graph_id=summary.graph_id,
+        run_id=summary.run_id,
+        created_at_ms=summary.created_at_ms,
+        completed_at_ms=_completed_at_ms_for_run_dir(run_dir, default=summary.created_at_ms),
+        success=summary.success,
+        summary_path=summary_path,
+        graph_path=graph_path,
+        records_path=records_path,
+        outputs_path=outputs_path,
+        state_path=state_path,
+        spans_path=spans_path if spans_path.exists() else None,
+        verification_path=verification_path if verification_path.exists() else None,
+        trace_summary={
+            "trace_mode": summary.trace_mode,
+            "trace_otlp_endpoint": summary.trace_otlp_endpoint,
+            "trace_mirror_to_disk": summary.trace_mirror_to_disk,
+            "trace_capture_local_spans": summary.trace_capture_local_spans,
+            "trace_sink_configured": summary.trace_sink_configured,
+            "trace_service_name": summary.trace_service_name,
+            "trace_service_namespace": None,
+            "trace_service_version": None,
+        },
+        invocation_name=summary.invocation_name,
+        runtime_default_profile_name=summary.runtime_default_profile_name,
+        runtime_profile_names=summary.runtime_profile_names,
+        project_id=project_id,
+        project_label=project_label,
+        environment_name=environment_name,
+        catalog_entry_id=catalog_entry_id,
+        catalog_source=catalog_source,
     )
 
 
@@ -904,6 +958,24 @@ def _completed_at_ms(
     return created_at_ms
 
 
+def _completed_at_ms_for_run_dir(run_dir: Path, *, default: int) -> int:
+    records_path = run_dir / "records.jsonl"
+    if not records_path.exists():
+        return default
+    latest = default
+    with records_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if isinstance(row, dict):
+                ts = row.get("timestamp_ms")
+                if isinstance(ts, int) and ts > latest:
+                    latest = ts
+    return latest
+
+
 def _artifact_descriptor(
     logical_name: ArtifactName,
     path: Path,
@@ -911,10 +983,13 @@ def _artifact_descriptor(
     *,
     required: bool = True,
 ) -> ArtifactDescriptor:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
     return ArtifactDescriptor(
         logical_name=logical_name,
         relative_path=path.name,
         content_type=content_type,
+        byte_size=path.stat().st_size if path.exists() else None,
+        checksum_sha256=digest,
         required=required,
     )
 

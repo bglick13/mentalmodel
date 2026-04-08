@@ -1,5 +1,9 @@
 """Remote data-plane contract exports."""
 
+from __future__ import annotations
+
+from importlib import import_module
+
 from mentalmodel.remote.contracts import (
     ArtifactDescriptor,
     ArtifactName,
@@ -23,6 +27,12 @@ from mentalmodel.remote.sinks import (
     NoOpExecutionRecordSink,
     record_listener_for_sink,
 )
+from mentalmodel.remote.workspace import (
+    find_project_registration,
+    load_workspace_config,
+    upsert_project_registration,
+    write_workspace_config,
+)
 
 __all__ = [
     "ArtifactDescriptor",
@@ -42,6 +52,35 @@ __all__ = [
     "NoOpExecutionRecordSink",
     "CompositeExecutionRecordSink",
     "record_listener_for_sink",
+    "UploadedArtifact",
+    "RunBundleUpload",
+    "FileRemoteRunStore",
+    "build_run_bundle_upload",
+    "sync_runs_to_server",
     "WorkspaceConfig",
     "validate_workspace_config",
+    "load_workspace_config",
+    "write_workspace_config",
+    "upsert_project_registration",
+    "find_project_registration",
 ]
+
+_LAZY_EXPORTS = {
+    "UploadedArtifact": ("mentalmodel.remote.store", "UploadedArtifact"),
+    "RunBundleUpload": ("mentalmodel.remote.store", "RunBundleUpload"),
+    "FileRemoteRunStore": ("mentalmodel.remote.store", "FileRemoteRunStore"),
+    "build_run_bundle_upload": (
+        "mentalmodel.remote.sync",
+        "build_run_bundle_upload",
+    ),
+    "sync_runs_to_server": ("mentalmodel.remote.sync", "sync_runs_to_server"),
+}
+
+
+def __getattr__(name: str) -> object:
+    if name not in _LAZY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = _LAZY_EXPORTS[name]
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value

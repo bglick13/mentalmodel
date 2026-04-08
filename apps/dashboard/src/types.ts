@@ -19,6 +19,9 @@ export type CatalogEntry = {
   spec_path: string;
   graph_id: string;
   invocation_name: string;
+  project_id?: string | null;
+  project_label?: string | null;
+  catalog_source?: string | null;
   category: string;
   tags: string[];
   default_loop_node_id: string | null;

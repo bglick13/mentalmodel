@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from mentalmodel.core.interfaces import JsonValue
-from mentalmodel.remote import ProjectCatalog
+from mentalmodel.remote import FileRemoteRunStore, ProjectCatalog, RunBundleUpload
 from mentalmodel.ui.catalog import DashboardCatalogEntry
 from mentalmodel.ui.service import DashboardService
 
@@ -28,6 +28,7 @@ def create_dashboard_app(
         catalog_entries=catalog_entries,
         project_catalogs=project_catalogs,
     )
+    remote_store = None if runs_dir is None else FileRemoteRunStore(root_dir=runs_dir)
     app = FastAPI(title="mentalmodel dashboard", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -47,6 +48,27 @@ def create_dashboard_app(
     @app.get("/api/projects", response_model=None)
     def list_projects() -> object:
         return {"projects": list(service.list_projects())}
+
+    @app.post("/api/remote/runs", response_model=None)
+    def ingest_remote_run(
+        payload: Annotated[dict[str, object], Body()],
+    ) -> object:
+        if remote_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote ingest requires runs_dir to be configured on the server.",
+            )
+        try:
+            upload = RunBundleUpload.from_dict(payload)
+            run_dir = remote_store.ingest(upload)
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "status": "ok",
+            "graph_id": upload.manifest.graph_id,
+            "run_id": upload.manifest.run_id,
+            "run_dir": str(run_dir),
+        }
 
     @app.post("/api/catalog/from-path", response_model=None)
     def catalog_from_path(

@@ -343,6 +343,20 @@ Provider-first is the right default because Pangramanizer already has a
 canonical spec catalog module and because providers can attach stable labels,
 categories, pinned nodes, and metric groups.
 
+Manual `spec_path` launch should remain a supported fallback, but it should
+not be ownership-ambiguous. If a launch does not originate from a provider
+catalog entry, the request should still carry or resolve explicit project
+ownership metadata before execution and persistence:
+
+- `project_id`
+- `project_root`
+- `catalog_source = "manual_spec_path"`
+- optional `spec_label`
+
+Path-containment heuristics are acceptable only as a temporary development
+bridge. The durable contract should either resolve the owning project from the
+workspace registry deterministically or reject the launch as unowned.
+
 ### Proposed interfaces
 
 - `ProjectRegistration`
@@ -550,6 +564,22 @@ Split the current service into:
 That separation will let one backend remain local-control-plane-friendly while
 another is remote-storage-backed.
 
+External project execution should eventually be a first-class boundary rather
+than an in-process helper or ad hoc subprocess call. The intended shape is:
+
+- `DashboardExecutionService`
+  - validates launch requests
+  - resolves project ownership and launch metadata
+  - creates execution sessions and status updates
+- `ProjectExecutionWorker`
+  - executes a launch inside the owning project's environment
+  - emits lifecycle updates and, later, streaming records
+  - persists completed bundles back through the shared sink path
+
+For the local developer slice, a subprocess-backed adapter can implement the
+worker contract. That is an implementation detail, not the long-term
+architecture.
+
 ## API compatibility strategy
 
 ### Remote MVP contract
@@ -733,6 +763,8 @@ Deliverable:
 - Add `mentalmodel remote write-demo`.
 - Add `mentalmodel remote doctor` and config inspection.
 - Add project registration commands and provider-based discovery.
+- Add explicit project ownership metadata to manual `spec_path` launches so
+  sessions, persisted runs, and catalog fallbacks all carry `project_id`.
 - Document the one-stack multi-project workflow explicitly.
 - Document transition from today's traces-only OTEL demo to remote data-plane
   demos.
@@ -748,6 +780,12 @@ Deliverable:
 - Add projector jobs into ClickHouse.
 - Add scale-oriented implementation of `/api/analytics/timeseries`.
 - Add optional span query path beyond raw mirrored run artifacts.
+- Replace ad hoc external-project subprocess helpers with a first-class
+  `ProjectExecutionWorker` boundary that can run in the owning project
+  environment for both self-hosted and managed deployments.
+- Until live record streaming is shipped, make async external-run status
+  explicit in the dashboard UX rather than presenting an empty live panel as if
+  nothing happened.
 
 Deliverable:
 
@@ -780,6 +818,8 @@ Acceptance criteria:
 - Pangramanizer does not require a separate dashboard instance
 - the dashboard can surface the real-provider verification paths as coherent
   operator journeys rather than raw run lists
+- manual `spec_path` fallbacks, if still supported, carry explicit
+  project ownership metadata rather than inferred path-only ownership
 - any remaining UI blockers for the combined Phase E + F + 7 push are explicit
   and tracked as product work, not hidden data-plane gaps
 

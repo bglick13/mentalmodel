@@ -51,6 +51,15 @@ from mentalmodel.invocation import (
 )
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.observability import load_tracing_config, write_otel_demo
+from mentalmodel.remote import CatalogSource, sync_runs_to_server
+from mentalmodel.remote.bootstrap import build_remote_doctor_report, write_remote_demo
+from mentalmodel.remote.contracts import ProjectRegistration, WorkspaceConfig
+from mentalmodel.remote.workspace import (
+    find_project_registration,
+    load_workspace_config,
+    upsert_project_registration,
+    write_workspace_config,
+)
 from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
     apply_run_repairs,
@@ -67,7 +76,7 @@ from mentalmodel.skills import build_install_plan, install_skills
 from mentalmodel.testing import execute_program, run_verification
 from mentalmodel.ui.api import create_dashboard_app
 from mentalmodel.ui.catalog import load_dashboard_catalog_subject
-from mentalmodel.ui.workspace import load_project_catalog_subject
+from mentalmodel.ui.workspace import load_project_catalog_subject, workspace_project_catalogs
 
 DEFAULT_VERIFY_ENTRYPOINT = "mentalmodel.examples.async_rl.demo:build_program"
 
@@ -266,6 +275,7 @@ def run_docs(
 def run_ui(
     *,
     runs_dir: Path | None = None,
+    workspace_config: Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
     frontend_dist: Path | None = None,
@@ -277,14 +287,19 @@ def run_ui(
 
     import uvicorn
 
-    catalog_entries = None
+    catalog_entries: tuple[object, ...] | None = None
     project_catalogs = None
+    if workspace_config is not None:
+        workspace = load_workspace_config(workspace_config)
+        project_catalogs = workspace_project_catalogs(workspace)
+        catalog_entries = ()
     if catalog_entrypoint is not None:
         try:
             _, catalog_entries = load_dashboard_catalog_subject(catalog_entrypoint)
         except EntrypointLoadError:
             _, project_catalog = load_project_catalog_subject(catalog_entrypoint)
-            project_catalogs = (project_catalog,)
+            existing = tuple(project_catalogs or ())
+            project_catalogs = existing + (project_catalog,)
     dist_dir = frontend_dist
     if dist_dir is None and frontend_dev_url is None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -568,6 +583,261 @@ def run_otel_write_demo(
         table.add_row(stack, str(path))
     Console().print(table)
     Console().print(f"[green]wrote[/green] {output_dir}")
+    return 0
+
+
+def run_remote_sync(
+    *,
+    server_url: str,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    invocation_name: str | None = None,
+    project_id: str | None = None,
+    project_label: str | None = None,
+    environment_name: str | None = None,
+    catalog_entry_id: str | None = None,
+    catalog_source: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Sync local run bundles to the remote ingest API."""
+
+    manifests = sync_runs_to_server(
+        server_url=server_url,
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+        project_id=project_id,
+        project_label=project_label,
+        environment_name=environment_name,
+        catalog_entry_id=catalog_entry_id,
+        catalog_source=None if catalog_source is None else CatalogSource(catalog_source),
+    )
+    payload = {
+        "server_url": server_url,
+        "count": len(manifests),
+        "runs": [manifest.as_dict() for manifest in manifests],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel remote sync")
+    table.add_column("Graph")
+    table.add_column("Run")
+    table.add_column("Project")
+    for manifest in manifests:
+        table.add_row(
+            manifest.graph_id,
+            manifest.run_id,
+            manifest.project_id or "",
+        )
+    Console().print(table)
+    return 0
+
+
+def run_remote_write_demo(
+    *,
+    output_dir: Path,
+    profile: str,
+    workspace_id: str | None = None,
+    workspace_label: str | None = None,
+    mentalmodel_root: Path | None = None,
+    pangramanizer_root: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Write a local remote-demo directory with workspace config and helper assets."""
+
+    written = write_remote_demo(
+        output_dir=output_dir,
+        profile=profile,
+        workspace_id=workspace_id or "mentalmodel-local",
+        workspace_label=workspace_label or "Mentalmodel Local Stack",
+        mentalmodel_root=mentalmodel_root,
+        pangramanizer_root=pangramanizer_root,
+    )
+    payload = {
+        "profile": profile,
+        "output_dir": str(output_dir.expanduser().resolve()),
+        "files": [str(path) for path in written],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel remote write-demo")
+    table.add_column("Profile")
+    table.add_column("File")
+    for path in written:
+        table.add_row(profile, str(path))
+    Console().print(table)
+    Console().print(f"[green]wrote[/green] {output_dir.expanduser().resolve()}")
+    return 0
+
+
+def run_remote_doctor(
+    *,
+    workspace_config: Path,
+    runs_dir: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Validate one local remote workspace and project registry."""
+
+    report = build_remote_doctor_report(
+        workspace_config=workspace_config,
+        runs_dir=runs_dir,
+    )
+    if json_output:
+        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+        return 0 if report.success else 1
+
+    console = Console()
+    summary = Table(title="mentalmodel remote doctor")
+    summary.add_column("Check")
+    summary.add_column("Status")
+    summary.add_column("Message")
+    for check in report.checks:
+        status_style = {
+            DoctorStatus.PASS: "[green]pass[/green]",
+            DoctorStatus.WARN: "[yellow]warn[/yellow]",
+            DoctorStatus.FAIL: "[red]fail[/red]",
+            DoctorStatus.SKIP: "[cyan]skip[/cyan]",
+        }[check.status]
+        summary.add_row(check.name, status_style, check.message)
+    console.print(summary)
+    return 0 if report.success else 1
+
+
+def run_projects_add(
+    *,
+    workspace_config: Path,
+    project_id: str,
+    label: str,
+    root_dir: Path,
+    provider: str | None,
+    runs_dir: Path | None = None,
+    description: str = "",
+    tags: Sequence[str] = (),
+    default_environment: str | None = None,
+    disabled: bool = False,
+    workspace_id: str | None = None,
+    workspace_label: str | None = None,
+    json_output: bool = False,
+) -> int:
+    """Add or update one project registration in a workspace config."""
+
+    if workspace_config.exists():
+        workspace = load_workspace_config(workspace_config)
+    else:
+        workspace = WorkspaceConfig(
+            workspace_id=workspace_id or workspace_config.stem.replace(".", "-"),
+            label=workspace_label or "Mentalmodel Workspace",
+        )
+    project = ProjectRegistration(
+        project_id=project_id,
+        label=label,
+        root_dir=root_dir.expanduser().resolve(),
+        catalog_provider=provider,
+        runs_dir=None if runs_dir is None else runs_dir.expanduser().resolve(),
+        description=description,
+        tags=tuple(tags),
+        default_environment=default_environment,
+        enabled=not disabled,
+    )
+    updated = upsert_project_registration(workspace, project)
+    written = write_workspace_config(workspace_config, updated)
+    payload = {
+        "workspace_config": str(written),
+        "project": project.as_dict(),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel projects add")
+    table.add_column("Project")
+    table.add_column("Provider")
+    table.add_column("Workspace")
+    table.add_row(project.project_id, project.catalog_provider or "", str(written))
+    Console().print(table)
+    return 0
+
+
+def run_projects_list(
+    *,
+    workspace_config: Path,
+    json_output: bool = False,
+) -> int:
+    """List registered projects from a workspace config."""
+
+    workspace = load_workspace_config(workspace_config)
+    payload = {
+        "workspace_id": workspace.workspace_id,
+        "label": workspace.label,
+        "projects": [project.as_dict() for project in workspace.projects],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel projects")
+    table.add_column("Project")
+    table.add_column("Label")
+    table.add_column("Enabled")
+    table.add_column("Provider")
+    table.add_column("Root")
+    for project in workspace.projects:
+        table.add_row(
+            project.project_id,
+            project.label,
+            "yes" if project.enabled else "no",
+            project.catalog_provider or "",
+            str(project.root_dir),
+        )
+    Console().print(table)
+    return 0
+
+
+def run_projects_inspect(
+    *,
+    workspace_config: Path,
+    project_id: str,
+    json_output: bool = False,
+) -> int:
+    """Show one registered project and its resolved catalog."""
+
+    workspace = load_workspace_config(workspace_config)
+    project = find_project_registration(workspace, project_id)
+    catalog = None if not project.enabled or project.catalog_provider is None else workspace_project_catalogs(
+        WorkspaceConfig(
+            workspace_id=workspace.workspace_id,
+            label=workspace.label,
+            description=workspace.description,
+            projects=(project,),
+        )
+    )[0]
+    payload = {
+        "workspace_id": workspace.workspace_id,
+        "project": project.as_dict(),
+        "catalog_entry_count": 0 if catalog is None else len(catalog.entries),
+        "catalog_entries": [] if catalog is None else [entry.as_dict() for entry in catalog.entries],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel projects inspect")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Project", project.project_id)
+    table.add_row("Label", project.label)
+    table.add_row("Provider", project.catalog_provider or "")
+    table.add_row("Root", str(project.root_dir))
+    table.add_row("Runs Dir", "" if project.runs_dir is None else str(project.runs_dir))
+    table.add_row("Enabled", "yes" if project.enabled else "no")
+    table.add_row("Catalog Entries", str(0 if catalog is None else len(catalog.entries)))
+    Console().print(table)
     return 0
 
 
@@ -1574,6 +1844,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ui = subparsers.add_parser("ui", help="Launch the hosted dashboard UI.")
     ui.add_argument("--runs-dir", type=Path)
+    ui.add_argument("--workspace-config", type=Path)
     ui.add_argument("--host", default="127.0.0.1")
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--frontend-dist", type=Path)
@@ -1608,6 +1879,83 @@ def build_parser() -> argparse.ArgumentParser:
     otel_demo.add_argument("--stack", choices=["lgtm", "jaeger"], default="lgtm")
     otel_demo.add_argument("--output-dir", type=Path, required=True)
     otel_demo.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    remote = subparsers.add_parser("remote", help="Sync runs to a remote ingest API.")
+    remote_subparsers = remote.add_subparsers(dest="remote_command")
+    remote_subparsers.required = True
+
+    remote_sync = remote_subparsers.add_parser(
+        "sync",
+        help="Sync persisted local runs to the remote ingest API.",
+    )
+    remote_sync.add_argument("--server-url", required=True)
+    remote_sync.add_argument("--runs-dir", type=Path)
+    remote_sync.add_argument("--graph-id")
+    remote_sync.add_argument("--run-id")
+    remote_sync.add_argument("--invocation-name")
+    remote_sync.add_argument("--project-id")
+    remote_sync.add_argument("--project-label")
+    remote_sync.add_argument("--environment-name")
+    remote_sync.add_argument("--catalog-entry-id")
+    remote_sync.add_argument(
+        "--catalog-source",
+        choices=[source.value for source in CatalogSource],
+    )
+    remote_sync.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    remote_write_demo = remote_subparsers.add_parser(
+        "write-demo",
+        help="Write a localhost remote-runs demo directory.",
+    )
+    remote_write_demo.add_argument("--profile", choices=["minimal"], default="minimal")
+    remote_write_demo.add_argument("--output-dir", type=Path, required=True)
+    remote_write_demo.add_argument("--workspace-id")
+    remote_write_demo.add_argument("--workspace-label")
+    remote_write_demo.add_argument("--mentalmodel-root", type=Path)
+    remote_write_demo.add_argument("--pangramanizer-root", type=Path)
+    remote_write_demo.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    remote_doctor = remote_subparsers.add_parser(
+        "doctor",
+        help="Validate a local remote-runs workspace and registry.",
+    )
+    remote_doctor.add_argument("--workspace-config", type=Path, required=True)
+    remote_doctor.add_argument("--runs-dir", type=Path)
+    remote_doctor.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    projects = subparsers.add_parser(
+        "projects",
+        help="Manage workspace project registrations for the dashboard stack.",
+    )
+    projects_subparsers = projects.add_subparsers(dest="projects_command")
+    projects_subparsers.required = True
+
+    projects_add = projects_subparsers.add_parser("add", help="Add or update one project.")
+    projects_add.add_argument("--workspace-config", type=Path, required=True)
+    projects_add.add_argument("--workspace-id")
+    projects_add.add_argument("--workspace-label")
+    projects_add.add_argument("--project-id", required=True)
+    projects_add.add_argument("--label", required=True)
+    projects_add.add_argument("--root-dir", type=Path, required=True)
+    projects_add.add_argument("--provider")
+    projects_add.add_argument("--runs-dir", type=Path)
+    projects_add.add_argument("--description", default="")
+    projects_add.add_argument("--tag", action="append", default=[])
+    projects_add.add_argument("--default-environment")
+    projects_add.add_argument("--disabled", action="store_true")
+    projects_add.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    projects_list = projects_subparsers.add_parser("list", help="List workspace projects.")
+    projects_list.add_argument("--workspace-config", type=Path, required=True)
+    projects_list.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    projects_inspect = projects_subparsers.add_parser(
+        "inspect",
+        help="Inspect one registered project and its resolved catalog.",
+    )
+    projects_inspect.add_argument("--workspace-config", type=Path, required=True)
+    projects_inspect.add_argument("--project-id", required=True)
+    projects_inspect.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs = subparsers.add_parser("runs", help="Inspect persisted run artifacts.")
     runs_subparsers = runs.add_subparsers(dest="runs_command")
@@ -1771,6 +2119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "ui":
             return run_ui(
                 runs_dir=args.runs_dir,
+                workspace_config=args.workspace_config,
                 host=args.host,
                 port=args.port,
                 frontend_dist=args.frontend_dist,
@@ -1785,6 +2134,65 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return run_otel_write_demo(
                     stack=args.stack,
                     output_dir=args.output_dir,
+                    json_output=args.json,
+                )
+        if args.command == "remote":
+            if args.remote_command == "sync":
+                return run_remote_sync(
+                    server_url=args.server_url,
+                    runs_dir=args.runs_dir,
+                    graph_id=args.graph_id,
+                    run_id=args.run_id,
+                    invocation_name=args.invocation_name,
+                    project_id=args.project_id,
+                    project_label=args.project_label,
+                    environment_name=args.environment_name,
+                    catalog_entry_id=args.catalog_entry_id,
+                    catalog_source=args.catalog_source,
+                    json_output=args.json,
+                )
+            if args.remote_command == "write-demo":
+                return run_remote_write_demo(
+                    output_dir=args.output_dir,
+                    profile=args.profile,
+                    workspace_id=args.workspace_id,
+                    workspace_label=args.workspace_label,
+                    mentalmodel_root=args.mentalmodel_root,
+                    pangramanizer_root=args.pangramanizer_root,
+                    json_output=args.json,
+                )
+            if args.remote_command == "doctor":
+                return run_remote_doctor(
+                    workspace_config=args.workspace_config,
+                    runs_dir=args.runs_dir,
+                    json_output=args.json,
+                )
+        if args.command == "projects":
+            if args.projects_command == "add":
+                return run_projects_add(
+                    workspace_config=args.workspace_config,
+                    workspace_id=args.workspace_id,
+                    workspace_label=args.workspace_label,
+                    project_id=args.project_id,
+                    label=args.label,
+                    root_dir=args.root_dir,
+                    provider=args.provider,
+                    runs_dir=args.runs_dir,
+                    description=args.description,
+                    tags=args.tag,
+                    default_environment=args.default_environment,
+                    disabled=args.disabled,
+                    json_output=args.json,
+                )
+            if args.projects_command == "list":
+                return run_projects_list(
+                    workspace_config=args.workspace_config,
+                    json_output=args.json,
+                )
+            if args.projects_command == "inspect":
+                return run_projects_inspect(
+                    workspace_config=args.workspace_config,
+                    project_id=args.project_id,
                     json_output=args.json,
                 )
         if args.command == "install-skills":

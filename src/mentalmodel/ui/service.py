@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import subprocess
 import threading
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 from mentalmodel.analysis import AnalysisReport, run_analysis
 from mentalmodel.core.interfaces import JsonValue
@@ -77,6 +80,24 @@ class DashboardExecutionSession:
             if report.runtime.error is not None:
                 self.error = report.runtime.error
 
+    def mark_completed_from_payload(self, payload: dict[str, object]) -> None:
+        runtime = payload.get("runtime")
+        if not isinstance(runtime, dict):
+            raise DashboardCatalogError("External verification payload must include runtime data.")
+        run_id = runtime.get("run_id")
+        run_artifacts_dir = runtime.get("run_artifacts_dir")
+        runtime_error = runtime.get("error")
+        success = payload.get("success")
+        with self._lock:
+            self.status = "succeeded" if success is True else "failed"
+            self.finished_at_ms = int(time.time() * 1000)
+            self.run_id = run_id if isinstance(run_id, str) else None
+            self.run_artifacts_dir = (
+                run_artifacts_dir if isinstance(run_artifacts_dir, str) else None
+            )
+            if isinstance(runtime_error, str):
+                self.error = runtime_error
+
     def mark_failed(self, message: str) -> None:
         with self._lock:
             self.status = "failed"
@@ -117,6 +138,10 @@ class DashboardService:
     ) -> None:
         self.runs_dir = runs_dir
         self._project_catalogs = tuple(project_catalogs or ())
+        self._project_catalog_by_id = {
+            catalog.project.project_id: catalog
+            for catalog in self._project_catalogs
+        }
         base_entries = (
             tuple(catalog_entries)
             if catalog_entries is not None
@@ -165,7 +190,7 @@ class DashboardService:
     def register_spec_path(self, spec_path: Path) -> DashboardCatalogEntry:
         """Parse a verify TOML on disk and register it for graph preview and launch."""
 
-        entry = catalog_entry_from_spec_path(spec_path)
+        entry = self._catalog_entry_from_path(spec_path)
         self._dynamic_catalog[entry.spec_id] = entry
         return entry
 
@@ -177,6 +202,14 @@ class DashboardService:
 
     def load_catalog_graph(self, spec_id: str) -> dict[str, JsonValue]:
         entry = self._resolve_entry(spec_id)
+        external_project = self._external_project_for_entry(entry)
+        if external_project is not None:
+            payload = self._load_external_catalog_graph(entry, external_project.project.root_dir)
+            return {
+                "catalog_entry": _as_json_object(entry.as_dict()),
+                "graph": _as_json_object(payload["graph"]),
+                "analysis": _as_json_object(payload["analysis"]),
+            }
         invocation = read_verify_invocation_spec(entry.spec_path)
         _, program = load_workflow_subject(invocation.program)
         graph = lower_program(program)
@@ -381,6 +414,14 @@ class DashboardService:
 
     def _run_session(self, session: DashboardExecutionSession) -> None:
         try:
+            external_project = self._external_project_for_entry(session.spec)
+            if external_project is not None:
+                report = self._run_external_verification(
+                    session.spec,
+                    external_project.project.root_dir,
+                )
+                session.mark_completed_from_payload(report)
+                return
             invocation = read_verify_invocation_spec(session.spec.spec_path)
             module, program = load_workflow_subject(invocation.program)
             environment = None
@@ -397,6 +438,157 @@ class DashboardService:
             session.mark_completed(report)
         except Exception as exc:  # pragma: no cover - guarded by API tests
             session.mark_failed(f"{type(exc).__name__}: {exc}")
+
+    def _external_project_for_entry(self, entry: DashboardCatalogEntry) -> ProjectCatalog | None:
+        if entry.project_id is None:
+            return None
+        project_catalog = self._project_catalog_by_id.get(entry.project_id)
+        if project_catalog is None:
+            return None
+        current_root = Path(__file__).resolve().parents[3]
+        if project_catalog.project.root_dir.resolve() == current_root.resolve():
+            return None
+        return project_catalog
+
+    def _project_for_spec_path(self, spec_path: Path) -> ProjectCatalog | None:
+        resolved = spec_path.expanduser().resolve()
+        for project_catalog in self._project_catalogs:
+            root_dir = project_catalog.project.root_dir.expanduser().resolve()
+            try:
+                resolved.relative_to(root_dir)
+            except ValueError:
+                continue
+            return project_catalog
+        return None
+
+    def _catalog_entry_from_path(self, spec_path: Path) -> DashboardCatalogEntry:
+        resolved = spec_path.expanduser().resolve()
+        project_catalog = self._project_for_spec_path(resolved)
+        if project_catalog is None:
+            return catalog_entry_from_spec_path(resolved)
+        external_project = self._external_project_for_entry(
+            DashboardCatalogEntry(
+                spec_id="project-probe",
+                label=resolved.stem,
+                description=str(resolved),
+                spec_path=resolved,
+                graph_id="probe",
+                invocation_name="probe",
+                project_id=project_catalog.project.project_id,
+                project_label=project_catalog.project.label,
+            )
+        )
+        if external_project is None:
+            entry = catalog_entry_from_spec_path(resolved)
+        else:
+            metadata = self._load_external_spec_metadata(resolved, external_project.project.root_dir)
+            graph_id = metadata.get("graph_id")
+            invocation_name = metadata.get("invocation_name")
+            if not isinstance(graph_id, str):
+                raise DashboardCatalogError("External spec metadata must include graph_id.")
+            if invocation_name is not None and not isinstance(invocation_name, str):
+                raise DashboardCatalogError(
+                    "External spec metadata invocation_name must be a string when present."
+                )
+            digest = hashlib.sha256(str(resolved).encode()).hexdigest()[:12]
+            entry = DashboardCatalogEntry(
+                spec_id=f"path-{digest}",
+                label=resolved.stem,
+                description=str(resolved),
+                spec_path=resolved,
+                graph_id=graph_id,
+                invocation_name=invocation_name or "verify",
+                category="custom",
+                tags=("spec-path",),
+                catalog_source="spec-path",
+            )
+        return replace(
+            entry,
+            project_id=project_catalog.project.project_id,
+            project_label=project_catalog.project.label,
+            catalog_source=entry.catalog_source or "spec-path",
+        )
+
+    def _load_external_catalog_graph(
+        self,
+        entry: DashboardCatalogEntry,
+        root_dir: Path,
+    ) -> dict[str, dict[str, object]]:
+        payload = self._run_external_python(
+            root_dir=root_dir,
+            script=_EXTERNAL_GRAPH_SCRIPT,
+            args=(str(entry.spec_path),),
+        )
+        graph = payload.get("graph")
+        analysis = payload.get("analysis")
+        if not isinstance(graph, dict) or not isinstance(analysis, dict):
+            raise DashboardCatalogError(
+                "External catalog graph helper must return graph and analysis objects."
+            )
+        return {
+            "graph": cast(dict[str, object], graph),
+            "analysis": cast(dict[str, object], analysis),
+        }
+
+    def _run_external_verification(
+        self,
+        entry: DashboardCatalogEntry,
+        root_dir: Path,
+    ) -> dict[str, object]:
+        runs_dir_arg = (
+            "-"
+            if self.runs_dir is None
+            else str(self.runs_dir.expanduser().resolve())
+        )
+        return self._run_external_python(
+            root_dir=root_dir,
+            script=_EXTERNAL_VERIFY_SCRIPT,
+            args=(str(entry.spec_path), runs_dir_arg),
+        )
+
+    def _load_external_spec_metadata(
+        self,
+        spec_path: Path,
+        root_dir: Path,
+    ) -> dict[str, object]:
+        return self._run_external_python(
+            root_dir=root_dir,
+            script=_EXTERNAL_SPEC_METADATA_SCRIPT,
+            args=(str(spec_path),),
+        )
+
+    def _run_external_python(
+        self,
+        *,
+        root_dir: Path,
+        script: str,
+        args: tuple[str, ...],
+    ) -> dict[str, object]:
+        command = [
+            "uv",
+            "run",
+            "--directory",
+            str(root_dir),
+            "python",
+            "-c",
+            script,
+            *args,
+        ]
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            message = completed.stderr.strip() or completed.stdout.strip() or (
+                f"External project command failed with exit code {completed.returncode}."
+            )
+            raise DashboardCatalogError(message)
+        decoded = json.loads(completed.stdout)
+        if not isinstance(decoded, dict):
+            raise DashboardCatalogError("External project helper must return a JSON object.")
+        return cast(dict[str, object], decoded)
 
     def _derive_numeric_output_metrics(
         self,
@@ -787,3 +979,95 @@ def _as_json_value(value: object) -> JsonValue:
     if isinstance(value, dict):
         return {str(key): _as_json_value(item) for key, item in value.items()}
     raise TypeError(f"Unsupported JSON value type {type(value).__name__}.")
+
+
+_EXTERNAL_GRAPH_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+from mentalmodel.analysis import run_analysis
+from mentalmodel.invocation import load_workflow_subject, read_verify_invocation_spec
+from mentalmodel.ir.lowering import lower_program
+from mentalmodel.ir.serialization import ir_graph_to_json
+
+spec_path = Path(sys.argv[1])
+invocation = read_verify_invocation_spec(spec_path)
+_, program = load_workflow_subject(invocation.program)
+graph = lower_program(program)
+report = run_analysis(graph)
+print(
+    json.dumps(
+        {
+            "graph": ir_graph_to_json(graph),
+            "analysis": {
+                "error_count": report.error_count,
+                "warning_count": report.warning_count,
+                "findings": [
+                    {
+                        "code": finding.code,
+                        "severity": finding.severity,
+                        "message": finding.message,
+                        "node_id": finding.node_id,
+                    }
+                    for finding in report.findings
+                ],
+            },
+        }
+    )
+)
+""".strip()
+
+
+_EXTERNAL_SPEC_METADATA_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+from mentalmodel.invocation import load_workflow_subject, read_verify_invocation_spec
+from mentalmodel.ir.lowering import lower_program
+
+spec_path = Path(sys.argv[1])
+invocation = read_verify_invocation_spec(spec_path)
+_, program = load_workflow_subject(invocation.program)
+graph = lower_program(program)
+print(
+    json.dumps(
+        {
+            "graph_id": graph.graph_id,
+            "invocation_name": invocation.invocation_name,
+        }
+    )
+)
+""".strip()
+
+
+_EXTERNAL_VERIFY_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+from mentalmodel.invocation import (
+    load_runtime_environment_subject,
+    load_workflow_subject,
+    read_verify_invocation_spec,
+)
+from mentalmodel.testing import run_verification
+
+spec_path = Path(sys.argv[1])
+runs_dir_arg = sys.argv[2]
+runs_dir = None if runs_dir_arg == "-" else Path(runs_dir_arg)
+invocation = read_verify_invocation_spec(spec_path)
+module, program = load_workflow_subject(invocation.program)
+environment = None
+if invocation.environment is not None:
+    _, environment = load_runtime_environment_subject(invocation.environment)
+report = run_verification(
+    program,
+    module=module,
+    runs_dir=runs_dir or invocation.runs_dir,
+    environment=environment,
+    invocation_name=invocation.invocation_name,
+)
+print(json.dumps(report.as_dict()))
+""".strip()

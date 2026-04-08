@@ -1,0 +1,123 @@
+---
+title: mentalmodel remote
+description: Bootstrap and operate the first remote-runs localhost stack.
+---
+
+`mentalmodel remote` is the first operator-facing command for the remote runs
+data plane.
+
+## Commands
+
+```bash
+uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
+uv run mentalmodel remote doctor --workspace-config /tmp/mentalmodel-remote/workspace.toml
+uv run mentalmodel remote sync --server-url http://127.0.0.1:8765
+```
+
+## `remote write-demo`
+
+Write a local remote-runs demo directory:
+
+```bash
+uv run mentalmodel remote write-demo \
+  --output-dir /tmp/mentalmodel-remote
+
+uv run mentalmodel remote write-demo \
+  --output-dir /tmp/mentalmodel-remote \
+  --mentalmodel-root /Users/ben/repos/mentalmodel \
+  --pangramanizer-root /Users/ben/repos/pangramanizer
+```
+
+The generated directory includes:
+
+- `workspace.toml` with registered projects
+- `run-dashboard.sh` to launch the shared dashboard/API
+- `sync-local-runs.sh` to upload existing local `.runs`
+- `otel/` with the existing LGTM traces demo
+- `REMOTE-DEMO.md` with the local operator flow
+
+## `remote doctor`
+
+Validate the generated workspace, catalog providers, and writable run storage:
+
+```bash
+uv run mentalmodel remote doctor \
+  --workspace-config /tmp/mentalmodel-remote/workspace.toml
+```
+
+## `remote sync`
+
+Sync one or more persisted local runs into the remote ingest API:
+
+```bash
+uv run mentalmodel remote sync \
+  --server-url http://127.0.0.1:8765 \
+  --runs-dir /tmp/mentalmodel-runs
+
+uv run mentalmodel remote sync \
+  --server-url http://127.0.0.1:8765 \
+  --graph-id async_rl_demo \
+  --run-id run-123
+
+uv run mentalmodel remote sync \
+  --server-url http://127.0.0.1:8765 \
+  --project-id pangramanizer-training \
+  --project-label "Pangramanizer Training" \
+  --environment-name localhost \
+  --catalog-source module-provider
+```
+
+## What it does
+
+- resolves one or more persisted local run bundles from `.runs`
+- builds a canonical `RunManifest` plus artifact descriptors for each run
+- uploads each run bundle to `POST /api/remote/runs`
+- returns the synced run manifests in table or JSON form
+
+The current remote backend is intentionally minimal and deterministic. The API
+stores uploaded artifacts in a remote `.runs` tree and persists the manifest in
+`.remote/manifests`, which keeps the historical inspection API working while the
+later Postgres and object-storage adapters are still being introduced.
+
+## How to use that
+
+1. Write the localhost stack assets:
+
+```bash
+uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
+```
+
+2. Start the shared dashboard/API:
+
+```bash
+cd /tmp/mentalmodel-remote
+./run-dashboard.sh
+```
+
+3. Materialize one or more local runs:
+
+```bash
+uv run mentalmodel verify \
+  --entrypoint mentalmodel.examples.async_rl.demo:build_program \
+  --runs-dir /tmp/local-runs
+```
+
+4. Sync the local run into that stack:
+
+```bash
+uv run mentalmodel remote sync \
+  --server-url http://127.0.0.1:8765 \
+  --runs-dir /tmp/local-runs \
+  --project-id mentalmodel-examples \
+  --project-label "Mentalmodel Examples"
+```
+
+5. Inspect the synced run through the existing dashboard or `/api/runs` APIs.
+
+## Notes
+
+- `remote write-demo` is the current localhost bootstrap path for the remote MVP.
+- `--run-id` targets one specific run; omitting it syncs all matching runs.
+- `--graph-id` and `--invocation-name` narrow which local runs are selected.
+- project and catalog flags let one shared stack distinguish runs from multiple
+  sources such as `mentalmodel` demos and Pangramanizer training flows.

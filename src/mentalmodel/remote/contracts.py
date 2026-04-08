@@ -79,6 +79,27 @@ class RunTraceSummary:
             "trace_service_version": self.service_version,
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RunTraceSummary:
+        mode = payload.get("trace_mode")
+        service_name = payload.get("trace_service_name")
+        if not isinstance(mode, str):
+            raise RemoteContractError("RunTraceSummary.trace_mode must be a string.")
+        if not isinstance(service_name, str):
+            raise RemoteContractError("RunTraceSummary.trace_service_name must be a string.")
+        return cls(
+            mode=mode,
+            service_name=service_name,
+            otlp_endpoint=_optional_payload_str(payload, "trace_otlp_endpoint"),
+            mirror_to_disk=_required_payload_bool(payload, "trace_mirror_to_disk"),
+            capture_local_spans=_required_payload_bool(
+                payload, "trace_capture_local_spans"
+            ),
+            sink_configured=_required_payload_bool(payload, "trace_sink_configured"),
+            service_namespace=_optional_payload_str(payload, "trace_service_namespace"),
+            service_version=_optional_payload_str(payload, "trace_service_version"),
+        )
+
 
 @dataclass(slots=True, frozen=True)
 class ArtifactDescriptor:
@@ -124,6 +145,45 @@ class ArtifactDescriptor:
             "compression": self.compression,
             "required": self.required,
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> ArtifactDescriptor:
+        logical_name = payload.get("logical_name")
+        relative_path = payload.get("relative_path")
+        content_type = payload.get("content_type")
+        if not isinstance(logical_name, str):
+            raise RemoteContractError("ArtifactDescriptor.logical_name must be a string.")
+        if not isinstance(relative_path, str):
+            raise RemoteContractError("ArtifactDescriptor.relative_path must be a string.")
+        if not isinstance(content_type, str):
+            raise RemoteContractError("ArtifactDescriptor.content_type must be a string.")
+        byte_size = payload.get("byte_size")
+        checksum_sha256 = payload.get("checksum_sha256")
+        storage_uri = payload.get("storage_uri")
+        compression = payload.get("compression")
+        required = payload.get("required", True)
+        if byte_size is not None and not isinstance(byte_size, int):
+            raise RemoteContractError("ArtifactDescriptor.byte_size must be an integer.")
+        if checksum_sha256 is not None and not isinstance(checksum_sha256, str):
+            raise RemoteContractError(
+                "ArtifactDescriptor.checksum_sha256 must be a string when present."
+            )
+        if storage_uri is not None and not isinstance(storage_uri, str):
+            raise RemoteContractError("ArtifactDescriptor.storage_uri must be a string.")
+        if compression is not None and not isinstance(compression, str):
+            raise RemoteContractError("ArtifactDescriptor.compression must be a string.")
+        if not isinstance(required, bool):
+            raise RemoteContractError("ArtifactDescriptor.required must be a boolean.")
+        return cls(
+            logical_name=ArtifactName(logical_name),
+            relative_path=relative_path,
+            content_type=content_type,
+            byte_size=byte_size,
+            checksum_sha256=checksum_sha256,
+            storage_uri=storage_uri,
+            compression=compression,
+            required=required,
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -216,6 +276,73 @@ class RunManifest:
             "runtime_default_profile_name": self.runtime_default_profile_name,
             "runtime_profile_names": list(self.runtime_profile_names),
         }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RunManifest:
+        artifacts_payload = payload.get("artifacts")
+        trace_payload = payload.get("trace_summary")
+        runtime_profile_names = payload.get("runtime_profile_names", [])
+        if not isinstance(artifacts_payload, list):
+            raise RemoteContractError("RunManifest.artifacts must be a list.")
+        if not isinstance(trace_payload, dict):
+            raise RemoteContractError("RunManifest.trace_summary must be an object.")
+        if not isinstance(runtime_profile_names, list) or any(
+            not isinstance(item, str) for item in runtime_profile_names
+        ):
+            raise RemoteContractError(
+                "RunManifest.runtime_profile_names must be a list of strings."
+            )
+        run_id = payload.get("run_id")
+        graph_id = payload.get("graph_id")
+        created_at_ms = payload.get("created_at_ms")
+        completed_at_ms = payload.get("completed_at_ms")
+        status = payload.get("status")
+        success = payload.get("success")
+        run_schema_version = payload.get("run_schema_version")
+        record_schema_version = payload.get("record_schema_version")
+        if not isinstance(run_id, str):
+            raise RemoteContractError("RunManifest.run_id must be a string.")
+        if not isinstance(graph_id, str):
+            raise RemoteContractError("RunManifest.graph_id must be a string.")
+        if not isinstance(created_at_ms, int):
+            raise RemoteContractError("RunManifest.created_at_ms must be an integer.")
+        if completed_at_ms is not None and not isinstance(completed_at_ms, int):
+            raise RemoteContractError("RunManifest.completed_at_ms must be an integer.")
+        if not isinstance(status, str):
+            raise RemoteContractError("RunManifest.status must be a string.")
+        if success is not None and not isinstance(success, bool):
+            raise RemoteContractError("RunManifest.success must be a boolean when present.")
+        if not isinstance(run_schema_version, int):
+            raise RemoteContractError("RunManifest.run_schema_version must be an integer.")
+        if record_schema_version is not None and not isinstance(record_schema_version, int):
+            raise RemoteContractError(
+                "RunManifest.record_schema_version must be an integer when present."
+            )
+        return cls(
+            run_id=run_id,
+            graph_id=graph_id,
+            created_at_ms=created_at_ms,
+            completed_at_ms=completed_at_ms,
+            status=RunManifestStatus(status),
+            success=success,
+            run_schema_version=run_schema_version,
+            trace_summary=RunTraceSummary.from_dict(cast(dict[str, object], trace_payload)),
+            artifacts=tuple(
+                ArtifactDescriptor.from_dict(cast(dict[str, object], item))
+                for item in artifacts_payload
+            ),
+            invocation_name=_optional_payload_str(payload, "invocation_name"),
+            project_id=_optional_payload_str(payload, "project_id"),
+            project_label=_optional_payload_str(payload, "project_label"),
+            environment_name=_optional_payload_str(payload, "environment_name"),
+            catalog_entry_id=_optional_payload_str(payload, "catalog_entry_id"),
+            catalog_source=_optional_catalog_source(payload.get("catalog_source")),
+            runtime_default_profile_name=_optional_payload_str(
+                payload, "runtime_default_profile_name"
+            ),
+            runtime_profile_names=tuple(runtime_profile_names),
+            record_schema_version=record_schema_version,
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -337,3 +464,27 @@ def _require_identifier(value: str, field_name: str) -> None:
 def _require_non_negative(value: int, field_name: str) -> None:
     if value < 0:
         raise RemoteContractError(f"{field_name} cannot be negative.")
+
+
+def _optional_payload_str(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    raise RemoteContractError(f"{key!r} must be a string when present.")
+
+
+def _required_payload_bool(payload: dict[str, object], key: str) -> bool:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    raise RemoteContractError(f"{key!r} must be a boolean.")
+
+
+def _optional_catalog_source(value: object) -> CatalogSource | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RemoteContractError("catalog_source must be a string when present.")
+    return CatalogSource(value)

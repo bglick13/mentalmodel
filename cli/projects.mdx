@@ -1,0 +1,51 @@
+---
+title: mentalmodel projects
+description: Manage workspace project registrations for one shared dashboard stack.
+---
+
+`mentalmodel projects` manages the `workspace.toml` registry used by
+`mentalmodel ui --workspace-config ...`.
+
+## Commands
+
+```bash
+uv run mentalmodel projects add --workspace-config /tmp/mentalmodel-remote/workspace.toml ...
+uv run mentalmodel projects list --workspace-config /tmp/mentalmodel-remote/workspace.toml
+uv run mentalmodel projects inspect --workspace-config /tmp/mentalmodel-remote/workspace.toml --project-id pangramanizer-training
+```
+
+## Add a project
+
+```bash
+uv run mentalmodel projects add \
+  --workspace-config /tmp/mentalmodel-remote/workspace.toml \
+  --project-id pangramanizer-training \
+  --label "Pangramanizer Training" \
+  --root-dir /Users/ben/repos/pangramanizer \
+  --provider pangramanizer.mentalmodel_training.verification.spec_catalog:verification_spec_catalog
+```
+
+The provider can return:
+
+- a `ProjectCatalog`
+- one or more `DashboardCatalogEntry` values
+- a Pangramanizer-style spec catalog shape with `label`, `spec_path`,
+  `invocation_name`, `category`, and `description`
+
+That last shape is what lets one mentalmodel stack import Pangramanizer’s
+existing canonical verification catalog directly instead of forcing ad hoc
+per-spec path registration.
+
+## Inspect a workspace
+
+Use `list` to see the registered projects and `inspect` to resolve a project’s
+catalog and count its launchable entries:
+
+```bash
+uv run mentalmodel projects list \
+  --workspace-config /tmp/mentalmodel-remote/workspace.toml
+
+uv run mentalmodel projects inspect \
+  --workspace-config /tmp/mentalmodel-remote/workspace.toml \
+  --project-id mentalmodel-examples
+```

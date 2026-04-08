@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.remote import ProjectCatalog, ProjectRegistration, build_run_bundle_upload
 from mentalmodel.ui.api import create_dashboard_app
 from mentalmodel.ui.catalog import DashboardCatalogEntry, default_dashboard_catalog
+from mentalmodel.testing import run_verification
 
 
 class DashboardApiTest(unittest.TestCase):
@@ -192,3 +198,197 @@ class DashboardApiTest(unittest.TestCase):
             self.assertGreaterEqual(len(body["buckets"]), 1)
             self.assertLessEqual(len(body["buckets"]), 500)
             self.assertIn("records_per_sec", body["buckets"][0])
+
+    def test_remote_ingest_endpoint_persists_run_for_existing_read_api(self) -> None:
+        with tempfile.TemporaryDirectory() as local_tmp, tempfile.TemporaryDirectory() as remote_tmp:
+            local_root = Path(local_tmp)
+            remote_root = Path(remote_tmp)
+            report = run_verification(build_program(), runs_dir=local_root)
+            self.assertTrue(report.success)
+            upload = build_run_bundle_upload(
+                runs_dir=local_root,
+                graph_id="async_rl_demo",
+                run_id=report.runtime.run_id,
+                project_id="mentalmodel-examples",
+                project_label="Mentalmodel Examples",
+            )
+            client = TestClient(create_dashboard_app(runs_dir=remote_root, frontend_dist=None))
+            ingest = client.post("/api/remote/runs", json=upload.as_dict())
+            self.assertEqual(ingest.status_code, 200)
+            runs_response = client.get(
+                "/api/runs",
+                params={"graph_id": "async_rl_demo"},
+            )
+            self.assertEqual(runs_response.status_code, 200)
+            runs = runs_response.json()["runs"]
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["run_id"], report.runtime.run_id)
+
+    def test_external_project_catalog_graph_uses_subprocess_loader(self) -> None:
+        fixture_entry = default_dashboard_catalog()[0]
+        external_entry = DashboardCatalogEntry(
+            spec_id="pangram-real-verify3",
+            label="Pangram Real Verify3",
+            description="real verify3",
+            spec_path=fixture_entry.spec_path,
+            graph_id="pangramanizer_training_real_verify3",
+            invocation_name="pangram_real_verify3",
+        )
+        catalog = ProjectCatalog(
+            project=ProjectRegistration(
+                project_id="pangramanizer-training",
+                label="Pangramanizer Training",
+                root_dir=Path("/Users/ben/repos/pangramanizer"),
+            ),
+            entries=(external_entry,),
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                project_catalogs=(catalog,),
+            )
+        )
+        payload = {
+            "graph": {"graph_id": "pangramanizer_training_real_verify3", "nodes": [], "edges": []},
+            "analysis": {"error_count": 0, "warning_count": 0, "findings": []},
+        }
+        with patch("mentalmodel.ui.service.subprocess.run") as run_subprocess:
+            run_subprocess.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+            response = client.get("/api/catalog/pangram-real-verify3/graph")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["graph"]["graph_id"], "pangramanizer_training_real_verify3")
+        run_subprocess.assert_called_once()
+
+    def test_external_project_execution_uses_subprocess_runner(self) -> None:
+        fixture_entry = default_dashboard_catalog()[0]
+        external_entry = DashboardCatalogEntry(
+            spec_id="pangram-real-verify3",
+            label="Pangram Real Verify3",
+            description="real verify3",
+            spec_path=fixture_entry.spec_path,
+            graph_id="pangramanizer_training_real_verify3",
+            invocation_name="pangram_real_verify3",
+        )
+        catalog = ProjectCatalog(
+            project=ProjectRegistration(
+                project_id="pangramanizer-training",
+                label="Pangramanizer Training",
+                root_dir=Path("/Users/ben/repos/pangramanizer"),
+            ),
+            entries=(external_entry,),
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                project_catalogs=(catalog,),
+            )
+        )
+        payload = {
+            "success": True,
+            "runtime": {
+                "success": True,
+                "record_count": 0,
+                "output_count": 0,
+                "state_count": 0,
+                "run_id": None,
+                "run_artifacts_dir": None,
+                "invocation_name": "pangram_real_verify3",
+                "error": None,
+                "warning_invariant_failures": [],
+                "error_invariant_failures": [],
+            },
+            "analysis": {"error_count": 0, "warning_count": 0, "findings": []},
+            "property_checks": [],
+            "graph_id": "pangramanizer_training_real_verify3",
+        }
+        with patch("mentalmodel.ui.service.subprocess.run") as run_subprocess:
+            run_subprocess.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(payload),
+                stderr="",
+            )
+            launch = client.post("/api/executions", json={"spec_id": "pangram-real-verify3"})
+            self.assertEqual(launch.status_code, 200)
+            execution_id = launch.json()["execution_id"]
+            for _ in range(20):
+                execution = client.get(f"/api/executions/{execution_id}").json()
+                if execution["status"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+        self.assertEqual(execution["status"], "succeeded")
+        run_subprocess.assert_called_once()
+
+    def test_external_spec_path_registration_and_execution_use_subprocess(self) -> None:
+        fixture_entry = default_dashboard_catalog()[0]
+        external_spec_path = Path("/Users/ben/repos/pangramanizer/pangramanizer/mentalmodel_training/verification/real_smoke.toml")
+        catalog = ProjectCatalog(
+            project=ProjectRegistration(
+                project_id="pangramanizer-training",
+                label="Pangramanizer Training",
+                root_dir=Path("/Users/ben/repos/pangramanizer"),
+            ),
+            entries=(),
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                project_catalogs=(catalog,),
+            )
+        )
+        metadata = {"graph_id": "pangramanizer_training_real_smoke", "invocation_name": "pangram_real_smoke"}
+        verification_payload = {
+            "success": True,
+            "runtime": {
+                "success": True,
+                "record_count": 0,
+                "output_count": 0,
+                "state_count": 0,
+                "run_id": None,
+                "run_artifacts_dir": None,
+                "invocation_name": "pangram_real_smoke",
+                "error": None,
+                "warning_invariant_failures": [],
+                "error_invariant_failures": [],
+            },
+            "analysis": {"error_count": 0, "warning_count": 0, "findings": []},
+            "property_checks": [],
+            "graph_id": "pangramanizer_training_real_smoke",
+        }
+        with patch("mentalmodel.ui.service.subprocess.run") as run_subprocess:
+            run_subprocess.side_effect = [
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(metadata),
+                    stderr="",
+                ),
+                subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout=json.dumps(verification_payload),
+                    stderr="",
+                ),
+            ]
+            launch = client.post(
+                "/api/executions",
+                json={"spec_path": str(external_spec_path)},
+            )
+            self.assertEqual(launch.status_code, 200)
+            execution_id = launch.json()["execution_id"]
+            for _ in range(20):
+                execution = client.get(f"/api/executions/{execution_id}").json()
+                if execution["status"] in {"succeeded", "failed"}:
+                    break
+                time.sleep(0.01)
+        self.assertEqual(execution["status"], "succeeded")
+        self.assertEqual(run_subprocess.call_count, 2)

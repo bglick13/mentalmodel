@@ -17,6 +17,7 @@ Common flags:
 ```bash
 uv run mentalmodel ui --host 0.0.0.0 --port 8765
 uv run mentalmodel ui --runs-dir /tmp/mentalmodel-runs
+uv run mentalmodel ui --workspace-config /tmp/mentalmodel-remote/workspace.toml
 uv run mentalmodel ui --frontend-dist apps/dashboard/dist --open-browser
 uv run mentalmodel ui --frontend-dev-url http://127.0.0.1:5173
 uv run mentalmodel ui --catalog-entrypoint mypkg.dashboard:catalog
@@ -95,6 +96,33 @@ dashboard shell.
 
 Project-scoped catalogs are the preferred shape when one shared stack needs to
 host multiple projects cleanly.
+
+## Workspace configs
+
+`--workspace-config` is the preferred way to run one shared stack across
+multiple repos.
+
+The workspace TOML registers projects, their repo roots, and their provider
+entrypoints. `mentalmodel ui` resolves each enabled provider, including
+providers that live in sibling repos such as Pangramanizer, and exposes the
+combined catalog from one dashboard instance.
+
+Example:
+
+```bash
+uv run mentalmodel ui \
+  --runs-dir /tmp/mentalmodel-remote/data \
+  --workspace-config /tmp/mentalmodel-remote/workspace.toml \
+  --open-browser
+```
+
+For the generated localhost stack, use:
+
+```bash
+uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
+cd /tmp/mentalmodel-remote
+./run-dashboard.sh
+```
 
 ## What to look for
 
