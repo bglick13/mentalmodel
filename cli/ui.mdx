@@ -76,8 +76,10 @@ running on `http://127.0.0.1:8765`.
 
 ## Custom catalogs
 
-The dashboard is catalog-driven. A catalog provider is a Python entrypoint that
-returns one or more `DashboardCatalogEntry` values.
+The dashboard is catalog-driven. A provider entrypoint can return either:
+
+- one or more `DashboardCatalogEntry` values
+- one `ProjectCatalog` value for a project-scoped catalog
 
 Run a custom catalog with:
 
@@ -90,6 +92,9 @@ uv run mentalmodel ui \
 That lets downstream projects like Pangramanizer expose their own specs, metric
 groups, pinned nodes, and default loop drilldown behavior without forking the
 dashboard shell.
+
+Project-scoped catalogs are the preferred shape when one shared stack needs to
+host multiple projects cleanly.
 
 ## What to look for
 

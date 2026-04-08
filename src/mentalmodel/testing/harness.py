@@ -14,6 +14,11 @@ from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import write_json
 from mentalmodel.observability.tracing import RecordedSpan
+from mentalmodel.remote import (
+    CompletedRunSink,
+    ExecutionRecordSink,
+    record_listener_for_sink,
+)
 from mentalmodel.runtime import AsyncExecutor, ExecutionRecorder, ExecutionResult
 from mentalmodel.runtime.events import INVARIANT_CHECKED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
@@ -177,6 +182,8 @@ def run_verification(
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
     record_listeners: Sequence[RecordListener] = (),
+    record_sinks: Sequence[ExecutionRecordSink] = (),
+    completed_run_sink: CompletedRunSink | None = None,
 ) -> VerificationReport:
     """Run static analysis, runtime execution, and property checks."""
 
@@ -187,6 +194,7 @@ def run_verification(
         environment=environment,
         invocation_name=invocation_name,
         record_listeners=record_listeners,
+        record_sinks=record_sinks,
     )
     property_checks = (
         run_property_checks(module, program)
@@ -219,6 +227,11 @@ def run_verification(
         runtime_default_profile_name=runtime_capture.runtime_default_profile_name,
         runtime_profile_names=runtime_capture.runtime_profile_names,
     )
+    if completed_run_sink is not None:
+        completed_run_sink.publish(
+            manifest=artifacts.manifest,
+            run_dir=artifacts.run_dir,
+        )
     runtime = RuntimeVerificationResult(
         success=runtime_capture.result.success,
         record_count=runtime_capture.result.record_count,
@@ -247,8 +260,10 @@ def _capture_runtime(
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
     record_listeners: Sequence[RecordListener] = (),
+    record_sinks: Sequence[ExecutionRecordSink] = (),
 ) -> RuntimeExecutionCapture:
-    recorder = ExecutionRecorder(listeners=tuple(record_listeners))
+    sink_listeners = tuple(record_listener_for_sink(sink) for sink in record_sinks)
+    recorder = ExecutionRecorder(listeners=tuple(record_listeners) + sink_listeners)
     resolved_environment = environment or EMPTY_RUNTIME_ENVIRONMENT
     executor = AsyncExecutor(
         recorder=recorder,

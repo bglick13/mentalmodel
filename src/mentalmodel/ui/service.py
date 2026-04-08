@@ -35,6 +35,7 @@ from mentalmodel.runtime.runs import (
     resolve_run_summary,
 )
 from mentalmodel.testing import VerificationReport, run_verification
+from mentalmodel.remote import ProjectCatalog
 from mentalmodel.ui.catalog import (
     DashboardCatalogEntry,
     DashboardCatalogError,
@@ -42,6 +43,7 @@ from mentalmodel.ui.catalog import (
     default_dashboard_catalog,
     validate_dashboard_catalog,
 )
+from mentalmodel.ui.workspace import flatten_project_catalogs
 
 
 @dataclass(slots=True)
@@ -111,19 +113,46 @@ class DashboardService:
         *,
         runs_dir: Path | None = None,
         catalog_entries: Sequence[DashboardCatalogEntry] | None = None,
+        project_catalogs: Sequence[ProjectCatalog] | None = None,
     ) -> None:
         self.runs_dir = runs_dir
-        self._catalog = validate_dashboard_catalog(
+        self._project_catalogs = tuple(project_catalogs or ())
+        base_entries = (
             tuple(catalog_entries)
             if catalog_entries is not None
             else default_dashboard_catalog()
         )
+        project_entries = flatten_project_catalogs(self._project_catalogs)
+        self._catalog = validate_dashboard_catalog(base_entries + project_entries)
         self._dynamic_catalog: dict[str, DashboardCatalogEntry] = {}
         self._sessions: dict[str, DashboardExecutionSession] = {}
         self._lock = threading.Lock()
 
     def list_catalog(self) -> tuple[DashboardCatalogEntry, ...]:
         return tuple(self._catalog) + tuple(self._dynamic_catalog.values())
+
+    def list_projects(self) -> tuple[dict[str, JsonValue], ...]:
+        projects: list[dict[str, JsonValue]] = []
+        for project_catalog in self._project_catalogs:
+            projects.append(
+                {
+                    "project_id": project_catalog.project.project_id,
+                    "label": project_catalog.project.label,
+                    "root_dir": str(project_catalog.project.root_dir),
+                    "runs_dir": (
+                        None
+                        if project_catalog.project.runs_dir is None
+                        else str(project_catalog.project.runs_dir)
+                    ),
+                    "description": project_catalog.description
+                    or project_catalog.project.description,
+                    "catalog_entry_count": len(project_catalog.entries),
+                    "default_entry_id": project_catalog.default_entry_id,
+                    "tags": list(project_catalog.project.tags),
+                    "enabled": project_catalog.project.enabled,
+                }
+            )
+        return tuple(projects)
 
     def _resolve_entry(self, spec_id: str) -> DashboardCatalogEntry:
         for entry in self._catalog:

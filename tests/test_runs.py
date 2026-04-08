@@ -19,6 +19,7 @@ from mentalmodel.examples.runtime_environment.demo import (
     build_program as build_runtime_program,
 )
 from mentalmodel.observability.export import write_json, write_jsonl
+from mentalmodel.remote import ArtifactName
 from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
     RUN_SCHEMA_VERSION,
@@ -198,6 +199,18 @@ class RunsTest(unittest.TestCase):
             self.assertTrue(summary.trace_mirror_to_disk)
             self.assertIsNone(summary.runtime_default_profile_name)
             self.assertEqual(summary.runtime_profile_names, tuple())
+            manifest = report.run_artifacts
+            assert manifest is not None
+            self.assertEqual(manifest.manifest.graph_id, "async_rl_demo")
+            self.assertEqual(manifest.manifest.run_id, report.runtime.run_id)
+            self.assertEqual(
+                manifest.manifest.missing_required_artifacts(),
+                tuple(),
+            )
+            self.assertIn(
+                ArtifactName.RECORDS,
+                {artifact.logical_name for artifact in manifest.manifest.artifacts},
+            )
 
             verification = load_run_payload(
                 runs_dir=root,

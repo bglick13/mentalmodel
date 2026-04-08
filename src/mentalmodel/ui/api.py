@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from mentalmodel.core.interfaces import JsonValue
+from mentalmodel.remote import ProjectCatalog
 from mentalmodel.ui.catalog import DashboardCatalogEntry
 from mentalmodel.ui.service import DashboardService
 
@@ -18,10 +19,15 @@ def create_dashboard_app(
     runs_dir: Path | None = None,
     frontend_dist: Path | None = None,
     catalog_entries: tuple[DashboardCatalogEntry, ...] | None = None,
+    project_catalogs: tuple[ProjectCatalog, ...] | None = None,
 ) -> FastAPI:
     """Create the Phase 26 dashboard API and optional static frontend host."""
 
-    service = DashboardService(runs_dir=runs_dir, catalog_entries=catalog_entries)
+    service = DashboardService(
+        runs_dir=runs_dir,
+        catalog_entries=catalog_entries,
+        project_catalogs=project_catalogs,
+    )
     app = FastAPI(title="mentalmodel dashboard", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -37,6 +43,10 @@ def create_dashboard_app(
     @app.get("/api/catalog", response_model=None)
     def list_catalog() -> object:
         return {"entries": _catalog_entries_to_json(service.list_catalog())}
+
+    @app.get("/api/projects", response_model=None)
+    def list_projects() -> object:
+        return {"projects": list(service.list_projects())}
 
     @app.post("/api/catalog/from-path", response_model=None)
     def catalog_from_path(

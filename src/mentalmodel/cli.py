@@ -67,6 +67,7 @@ from mentalmodel.skills import build_install_plan, install_skills
 from mentalmodel.testing import execute_program, run_verification
 from mentalmodel.ui.api import create_dashboard_app
 from mentalmodel.ui.catalog import load_dashboard_catalog_subject
+from mentalmodel.ui.workspace import load_project_catalog_subject
 
 DEFAULT_VERIFY_ENTRYPOINT = "mentalmodel.examples.async_rl.demo:build_program"
 
@@ -277,8 +278,13 @@ def run_ui(
     import uvicorn
 
     catalog_entries = None
+    project_catalogs = None
     if catalog_entrypoint is not None:
-        _, catalog_entries = load_dashboard_catalog_subject(catalog_entrypoint)
+        try:
+            _, catalog_entries = load_dashboard_catalog_subject(catalog_entrypoint)
+        except EntrypointLoadError:
+            _, project_catalog = load_project_catalog_subject(catalog_entrypoint)
+            project_catalogs = (project_catalog,)
     dist_dir = frontend_dist
     if dist_dir is None and frontend_dev_url is None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -288,6 +294,7 @@ def run_ui(
         runs_dir=runs_dir,
         frontend_dist=dist_dir,
         catalog_entries=catalog_entries,
+        project_catalogs=project_catalogs,
     )
     url = f"http://{host}:{port}"
     if open_browser:

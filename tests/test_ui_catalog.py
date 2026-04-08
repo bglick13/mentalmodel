@@ -36,6 +36,7 @@ class DashboardCatalogTest(unittest.TestCase):
             spec_path=fixture_entry.spec_path,
             graph_id=fixture_entry.graph_id,
             invocation_name=fixture_entry.invocation_name,
+            project_id=fixture_entry.project_id,
         )
         with self.assertRaises(DashboardCatalogError):
             validate_dashboard_catalog((fixture_entry, duplicate))

@@ -63,6 +63,9 @@ class DashboardCatalogEntry:
     spec_path: Path
     graph_id: str
     invocation_name: str
+    project_id: str | None = None
+    project_label: str | None = None
+    catalog_source: str | None = None
     category: str = "default"
     tags: tuple[str, ...] = ()
     default_loop_node_id: str | None = None
@@ -77,6 +80,9 @@ class DashboardCatalogEntry:
             "spec_path": str(self.spec_path),
             "graph_id": self.graph_id,
             "invocation_name": self.invocation_name,
+            "project_id": self.project_id,
+            "project_label": self.project_label,
+            "catalog_source": self.catalog_source,
             "category": self.category,
             "tags": list(self.tags),
             "default_loop_node_id": self.default_loop_node_id,
@@ -122,6 +128,9 @@ def default_dashboard_catalog() -> tuple[DashboardCatalogEntry, ...]:
                 spec_path=fixture_path,
                 graph_id="review_workflow",
                 invocation_name="review_workflow_fixture",
+                project_id="mentalmodel-examples",
+                project_label="Mentalmodel Examples",
+                catalog_source="builtin",
                 category="examples",
                 tags=("fixture", "review"),
                 default_loop_node_id="ticket_review_loop",
@@ -138,6 +147,9 @@ def default_dashboard_catalog() -> tuple[DashboardCatalogEntry, ...]:
                 spec_path=strict_path,
                 graph_id="review_workflow",
                 invocation_name="review_workflow_strict",
+                project_id="mentalmodel-examples",
+                project_label="Mentalmodel Examples",
+                catalog_source="builtin",
                 category="examples",
                 tags=("strict", "review"),
                 default_loop_node_id="ticket_review_loop",
@@ -162,11 +174,11 @@ def validate_dashboard_catalog(
                 f"Duplicate dashboard spec_id {entry.spec_id!r}."
             )
         seen_spec_ids.add(entry.spec_id)
-        run_key = (entry.graph_id, entry.invocation_name)
+        run_key = (entry.project_id, entry.graph_id, entry.invocation_name)
         if run_key in seen_run_keys:
             raise DashboardCatalogError(
                 "Duplicate dashboard run key "
-                f"{entry.graph_id!r}/{entry.invocation_name!r}."
+                f"{entry.project_id!r}/{entry.graph_id!r}/{entry.invocation_name!r}."
             )
         seen_run_keys.add(run_key)
         if not entry.spec_path.is_file():
@@ -219,6 +231,7 @@ def catalog_entry_from_spec_path(spec_path: Path) -> DashboardCatalogEntry:
         spec_path=path,
         graph_id=graph.graph_id,
         invocation_name=inv_name,
+        catalog_source="spec-path",
         category="custom",
         tags=("spec-path",),
         default_loop_node_id=None,

@@ -4,6 +4,7 @@ import contextlib
 import importlib
 import io
 import json
+import sys
 import tempfile
 import types
 import unittest
@@ -31,9 +32,11 @@ from mentalmodel.examples.runtime_environment.demo import (
     build_program as build_runtime_environment_program,
 )
 from mentalmodel.observability.export import write_json, write_jsonl
+from mentalmodel.remote import ProjectCatalog, ProjectRegistration
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.skills import install_skills
 from mentalmodel.testing import run_verification
+from mentalmodel.ui.catalog import default_dashboard_catalog
 
 
 class CliNoOpHandler(ActorHandler[dict[str, object], object, str]):
@@ -256,6 +259,38 @@ class CliTest(unittest.TestCase):
         self.assertIsNone(create_app.call_args.kwargs["frontend_dist"])
         self.assertEqual(len(create_app.call_args.kwargs["catalog_entries"]), 2)
         open_browser.assert_called_once_with("http://127.0.0.1:5173")
+        run_server.assert_called_once()
+
+    def test_ui_command_accepts_project_catalog_provider(self) -> None:
+        fixture_entry = default_dashboard_catalog()[0]
+        module_name = "mentalmodel.tests.synthetic_project_catalog_cli"
+        module = types.ModuleType(module_name)
+        module.__dict__["project_catalog"] = lambda: ProjectCatalog(
+            project=ProjectRegistration(
+                project_id="pangramanizer-training",
+                label="Pangramanizer Training",
+                root_dir=Path("/Users/ben/repos/pangramanizer"),
+            ),
+            entries=(
+                fixture_entry,
+            ),
+        )
+        sys.modules[module_name] = module
+        try:
+            with patch("mentalmodel.cli.create_dashboard_app", return_value=object()) as create_app:
+                with patch("uvicorn.run") as run_server:
+                    exit_code = main(
+                        [
+                            "ui",
+                            "--catalog-entrypoint",
+                            f"{module_name}:project_catalog",
+                        ]
+                    )
+        finally:
+            sys.modules.pop(module_name, None)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(create_app.call_args.kwargs["catalog_entries"], None)
+        self.assertEqual(len(create_app.call_args.kwargs["project_catalogs"]), 1)
         run_server.assert_called_once()
 
     def test_doctor_command_outputs_json(self) -> None:

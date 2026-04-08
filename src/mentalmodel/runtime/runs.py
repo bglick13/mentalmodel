@@ -19,16 +19,26 @@ from mentalmodel.observability.export import (
     write_jsonl,
 )
 from mentalmodel.observability.tracing import RecordedSpan
+from mentalmodel.remote import (
+    ArtifactDescriptor,
+    ArtifactName,
+    CatalogSource,
+    RunManifest,
+    RunManifestStatus,
+    RunTraceSummary,
+)
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 
 RUNS_DIRNAME = ".runs"
 RUN_SCHEMA_VERSION = 7
+EXECUTION_RECORD_SCHEMA_VERSION = 1
 
 
 @dataclass(slots=True, frozen=True)
 class RunArtifacts:
     """Filesystem locations for one materialized run bundle."""
 
+    manifest: RunManifest
     run_dir: Path
     summary_path: Path
     graph_path: Path
@@ -142,6 +152,11 @@ def write_run_artifacts(
     invocation_name: str | None,
     runtime_default_profile_name: str | None,
     runtime_profile_names: tuple[str, ...],
+    project_id: str | None = None,
+    project_label: str | None = None,
+    environment_name: str | None = None,
+    catalog_entry_id: str | None = None,
+    catalog_source: CatalogSource | None = None,
 ) -> RunArtifacts:
     """Write one run bundle to disk."""
 
@@ -208,7 +223,31 @@ def write_run_artifacts(
         write_jsonl(spans_path, (recorded_span_to_json(span) for span in spans))
     if verification_path is not None and verification_payload is not None:
         write_json(verification_path, verification_payload)
+    manifest = build_run_manifest(
+        graph_id=graph.graph_id,
+        run_id=run_id,
+        created_at_ms=created_at_ms,
+        success=success,
+        summary_path=summary_path,
+        graph_path=graph_path,
+        records_path=records_path,
+        outputs_path=outputs_path,
+        state_path=state_path,
+        spans_path=spans_path,
+        verification_path=verification_path,
+        trace_summary=trace_summary,
+        invocation_name=invocation_name,
+        runtime_default_profile_name=runtime_default_profile_name,
+        runtime_profile_names=runtime_profile_names,
+        project_id=project_id,
+        project_label=project_label,
+        environment_name=environment_name,
+        catalog_entry_id=catalog_entry_id,
+        catalog_source=catalog_source,
+        completed_at_ms=_completed_at_ms(records=records, created_at_ms=created_at_ms),
+    )
     return RunArtifacts(
+        manifest=manifest,
         run_dir=run_dir,
         summary_path=summary_path,
         graph_path=graph_path,
@@ -217,6 +256,101 @@ def write_run_artifacts(
         state_path=state_path,
         spans_path=spans_path,
         verification_path=verification_path,
+    )
+
+
+def build_run_manifest(
+    *,
+    graph_id: str,
+    run_id: str,
+    created_at_ms: int,
+    completed_at_ms: int,
+    success: bool,
+    summary_path: Path,
+    graph_path: Path,
+    records_path: Path,
+    outputs_path: Path,
+    state_path: Path,
+    trace_summary: dict[str, str | bool | None],
+    invocation_name: str | None,
+    runtime_default_profile_name: str | None,
+    runtime_profile_names: tuple[str, ...],
+    spans_path: Path | None = None,
+    verification_path: Path | None = None,
+    project_id: str | None = None,
+    project_label: str | None = None,
+    environment_name: str | None = None,
+    catalog_entry_id: str | None = None,
+    catalog_source: CatalogSource | None = None,
+) -> RunManifest:
+    """Build the canonical run manifest for one local run bundle."""
+    artifacts: list[ArtifactDescriptor] = [
+        _artifact_descriptor(ArtifactName.SUMMARY, summary_path, "application/json"),
+        _artifact_descriptor(ArtifactName.GRAPH, graph_path, "application/json"),
+        _artifact_descriptor(
+            ArtifactName.RECORDS,
+            records_path,
+            "application/x-ndjson",
+        ),
+        _artifact_descriptor(ArtifactName.OUTPUTS, outputs_path, "application/json"),
+        _artifact_descriptor(ArtifactName.STATE, state_path, "application/json"),
+    ]
+    if verification_path is not None:
+        artifacts.append(
+            _artifact_descriptor(
+                ArtifactName.VERIFICATION,
+                verification_path,
+                "application/json",
+                required=False,
+            )
+        )
+    if spans_path is not None:
+        artifacts.append(
+            _artifact_descriptor(
+                ArtifactName.SPANS,
+                spans_path,
+                "application/x-ndjson",
+                required=False,
+            )
+        )
+    return RunManifest(
+        run_id=run_id,
+        graph_id=graph_id,
+        created_at_ms=created_at_ms,
+        completed_at_ms=completed_at_ms,
+        status=RunManifestStatus.SEALED,
+        success=success,
+        run_schema_version=RUN_SCHEMA_VERSION,
+        record_schema_version=EXECUTION_RECORD_SCHEMA_VERSION,
+        trace_summary=build_run_trace_summary(trace_summary=trace_summary),
+        artifacts=tuple(artifacts),
+        invocation_name=invocation_name,
+        project_id=project_id,
+        project_label=project_label,
+        environment_name=environment_name,
+        catalog_entry_id=catalog_entry_id,
+        catalog_source=catalog_source,
+        runtime_default_profile_name=runtime_default_profile_name,
+        runtime_profile_names=runtime_profile_names,
+    )
+
+
+def build_run_trace_summary(
+    trace_summary: dict[str, str | bool | None],
+) -> RunTraceSummary:
+    """Convert runtime trace summary payloads into the canonical manifest shape."""
+
+    return RunTraceSummary(
+        mode=_require_summary_str(trace_summary, "trace_mode"),
+        service_name=_require_summary_str(trace_summary, "trace_service_name"),
+        otlp_endpoint=_optional_summary_str(trace_summary, "trace_otlp_endpoint"),
+        mirror_to_disk=_require_summary_bool(trace_summary, "trace_mirror_to_disk"),
+        capture_local_spans=_require_summary_bool(
+            trace_summary, "trace_capture_local_spans"
+        ),
+        sink_configured=_require_summary_bool(trace_summary, "trace_sink_configured"),
+        service_namespace=_optional_summary_str(trace_summary, "trace_service_namespace"),
+        service_version=_optional_summary_str(trace_summary, "trace_service_version"),
     )
 
 
@@ -760,6 +894,31 @@ def _created_at_ms(*, records: tuple[ExecutionRecord, ...]) -> int:
     return int(time.time() * 1000)
 
 
+def _completed_at_ms(
+    *,
+    records: tuple[ExecutionRecord, ...],
+    created_at_ms: int,
+) -> int:
+    if records:
+        return max(record.timestamp_ms for record in records)
+    return created_at_ms
+
+
+def _artifact_descriptor(
+    logical_name: ArtifactName,
+    path: Path,
+    content_type: str,
+    *,
+    required: bool = True,
+) -> ArtifactDescriptor:
+    return ArtifactDescriptor(
+        logical_name=logical_name,
+        relative_path=path.name,
+        content_type=content_type,
+        required=required,
+    )
+
+
 def _resolve_created_at_ms(*, payload: dict[str, JsonValue], run_dir: Path) -> int:
     value = payload.get("created_at_ms")
     if isinstance(value, int) and not isinstance(value, bool):
@@ -903,6 +1062,17 @@ def _require_summary_str(summary: dict[str, str | bool | None], key: str) -> str
     if isinstance(value, str):
         return value
     raise RunInspectionError(f"Expected trace summary value {key!r} to be a string.")
+
+
+def _optional_summary_str(summary: dict[str, str | bool | None], key: str) -> str | None:
+    value = summary.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    raise RunInspectionError(
+        f"Expected trace summary value {key!r} to be a string when present."
+    )
 
 
 def _require_summary_bool(summary: dict[str, str | bool | None], key: str) -> bool:
