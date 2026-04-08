@@ -11,6 +11,7 @@ data plane.
 ```bash
 uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
 uv run mentalmodel remote doctor --workspace-config /tmp/mentalmodel-remote/workspace.toml
+uv run mentalmodel remote up --output-dir /tmp/mentalmodel-remote --open-browser
 uv run mentalmodel remote sync --server-url http://127.0.0.1:8765
 ```
 
@@ -30,8 +31,12 @@ uv run mentalmodel remote write-demo \
 
 The generated directory includes:
 
+- `docker-compose.remote-minimal.yml` for Postgres + MinIO
+- `mentalmodel.remote.env` with wired local credentials
 - `workspace.toml` with registered projects
 - `run-dashboard.sh` to launch the shared dashboard/API
+- `start-stack.sh` to start the backend services and launch the dashboard
+- `stop-stack.sh` to stop the backend services
 - `sync-local-runs.sh` to upload existing local `.runs`
 - `otel/` with the existing LGTM traces demo
 - `REMOTE-DEMO.md` with the local operator flow
@@ -43,6 +48,32 @@ Validate the generated workspace, catalog providers, and writable run storage:
 ```bash
 uv run mentalmodel remote doctor \
   --workspace-config /tmp/mentalmodel-remote/workspace.toml
+```
+
+`remote doctor` now also fails if an enabled project has no explicit `runs_dir`.
+That is a real launch-routing error for the shared stack, not just missing
+metadata.
+
+## `remote up`
+
+Start the generated backend services and then launch the dashboard in one step:
+
+```bash
+uv run mentalmodel remote up \
+  --output-dir /tmp/mentalmodel-remote \
+  --open-browser
+```
+
+This is the quickest Phase 3 local-stack path. It runs:
+
+- `docker compose -f docker-compose.remote-minimal.yml up -d`
+- `mentalmodel ui` with the generated workspace and `MENTALMODEL_REMOTE_*`
+  backend configuration
+
+Stop the backend services later with:
+
+```bash
+uv run mentalmodel remote down --output-dir /tmp/mentalmodel-remote
 ```
 
 ## `remote sync`
@@ -75,9 +106,13 @@ uv run mentalmodel remote sync \
 - returns the synced run manifests in table or JSON form
 
 The current remote backend is intentionally minimal and deterministic. The API
-stores uploaded artifacts in a remote `.runs` tree and persists the manifest in
-`.remote/manifests`, which keeps the historical inspection API working while the
-later Postgres and object-storage adapters are still being introduced.
+stores run manifests in Postgres and artifact blobs in S3-compatible object
+storage. The dashboard read path materializes remote bundles into a local cache
+so the existing historical inspection APIs can keep using the current run
+inspection helpers.
+
+For local development and deterministic tests, the older file-backed store still
+exists as a fallback. It is no longer the intended Phase 2 backend.
 
 ## How to use that
 
@@ -87,18 +122,19 @@ later Postgres and object-storage adapters are still being introduced.
 uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
 ```
 
-2. Start the shared dashboard/API:
+2. Start the shared stack:
 
 ```bash
-cd /tmp/mentalmodel-remote
-./run-dashboard.sh
+uv run mentalmodel remote up \
+  --output-dir /tmp/mentalmodel-remote \
+  --open-browser
 ```
 
 3. Materialize one or more local runs:
 
 ```bash
 uv run mentalmodel verify \
-  --entrypoint mentalmodel.examples.async_rl.demo:build_program \
+  --spec /Users/ben/repos/mentalmodel/src/mentalmodel/examples/review_workflow/review_workflow_fixture.toml \
   --runs-dir /tmp/local-runs
 ```
 
@@ -114,6 +150,33 @@ uv run mentalmodel remote sync \
 
 5. Inspect the synced run through the existing dashboard or `/api/runs` APIs.
 
+For project-routed launches, `mentalmodel verify` and dashboard launches should
+write directly into the shared stack without requiring `remote sync`.
+
+For the built-in dashboard proof path, use the `review_workflow_fixture.toml`
+spec above. The default built-in catalog is scoped to the review workflow
+entries, so syncing an unrelated graph such as `async_rl_demo` will not appear
+under the selected built-in catalog entry.
+
+## Running the UI Against The Durable Backend
+
+`mentalmodel ui` can point its historical read and ingest paths at the Phase 2
+remote backend directly:
+
+```bash
+uv run mentalmodel ui \
+  --remote-database-url postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel \
+  --remote-object-store-bucket mentalmodel-runs \
+  --remote-object-store-endpoint http://127.0.0.1:9000 \
+  --remote-object-store-access-key minio \
+  --remote-object-store-secret-key miniosecret \
+  --no-remote-object-store-secure
+```
+
+Those flags also respect the matching `MENTALMODEL_REMOTE_*` environment
+variables, which is the intended handoff point for the later self-hosted Phase
+3 stack templates.
+
 ## Notes
 
 - `remote write-demo` is the current localhost bootstrap path for the remote MVP.
@@ -121,3 +184,21 @@ uv run mentalmodel remote sync \
 - `--graph-id` and `--invocation-name` narrow which local runs are selected.
 - project and catalog flags let one shared stack distinguish runs from multiple
   sources such as `mentalmodel` demos and Pangramanizer training flows.
+
+## UI Acceptance
+
+Use the browser-backed acceptance harness when you want to prove that a UI
+launch actually turns into a historical run:
+
+```bash
+python /Users/ben/repos/mentalmodel/scripts/remote_ui_acceptance.py \
+  --server-url http://127.0.0.1:8765 \
+  --spec-id pangramanizer-training:real-smoke \
+  --project-id pangramanizer-training \
+  --graph-id pangramanizer_training_real_smoke \
+  --invocation-name pangram_real_smoke
+```
+
+The script uses `agent-browser` to launch from the dashboard UI, then polls
+`/api/runs` until it observes a new run or times out with a screenshot and JSON
+diagnostics.

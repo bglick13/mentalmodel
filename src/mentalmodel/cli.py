@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import subprocess
 import webbrowser
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -51,12 +52,21 @@ from mentalmodel.invocation import (
 )
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.observability import load_tracing_config, write_otel_demo
-from mentalmodel.remote import CatalogSource, sync_runs_to_server
+from mentalmodel.remote import (
+    CatalogSource,
+    RemoteBackendConfig,
+    RemoteCompletedRunSink,
+    RemoteRunStore,
+    find_project_registration,
+    load_workspace_config,
+    sync_runs_to_server,
+)
 from mentalmodel.remote.bootstrap import build_remote_doctor_report, write_remote_demo
 from mentalmodel.remote.contracts import ProjectRegistration, WorkspaceConfig
 from mentalmodel.remote.workspace import (
-    find_project_registration,
-    load_workspace_config,
+    ProjectRunTarget,
+    build_project_run_target,
+    find_project_registration_for_path,
     upsert_project_registration,
     write_workspace_config,
 )
@@ -282,6 +292,14 @@ def run_ui(
     frontend_dev_url: str | None = None,
     catalog_entrypoint: str | None = None,
     open_browser: bool = False,
+    remote_database_url: str | None = None,
+    remote_object_store_bucket: str | None = None,
+    remote_object_store_endpoint: str | None = None,
+    remote_object_store_region: str | None = None,
+    remote_object_store_access_key: str | None = None,
+    remote_object_store_secret_key: str | None = None,
+    remote_object_store_secure: bool | None = None,
+    remote_cache_dir: Path | None = None,
 ) -> int:
     """Launch the dashboard API and static frontend host."""
 
@@ -305,17 +323,79 @@ def run_ui(
         repo_root = Path(__file__).resolve().parents[2]
         candidate = repo_root / "apps" / "dashboard" / "dist"
         dist_dir = candidate if candidate.exists() else None
+    remote_backend_config = _resolve_remote_backend_config(
+        database_url=remote_database_url,
+        object_store_bucket=remote_object_store_bucket,
+        object_store_endpoint=remote_object_store_endpoint,
+        object_store_region=remote_object_store_region,
+        object_store_access_key=remote_object_store_access_key,
+        object_store_secret_key=remote_object_store_secret_key,
+        object_store_secure=remote_object_store_secure,
+        cache_dir=remote_cache_dir,
+    )
     app = create_dashboard_app(
         runs_dir=runs_dir,
         frontend_dist=dist_dir,
         catalog_entries=catalog_entries,
         project_catalogs=project_catalogs,
+        remote_backend_config=remote_backend_config,
     )
     url = f"http://{host}:{port}"
     if open_browser:
         webbrowser.open(frontend_dev_url or url)
     uvicorn.run(app, host=host, port=port)
     return 0
+
+
+def _resolve_remote_backend_config(
+    *,
+    database_url: str | None,
+    object_store_bucket: str | None,
+    object_store_endpoint: str | None,
+    object_store_region: str | None,
+    object_store_access_key: str | None,
+    object_store_secret_key: str | None,
+    object_store_secure: bool | None,
+    cache_dir: Path | None,
+    env_values: dict[str, str] | None = None,
+) -> RemoteBackendConfig | None:
+    if database_url is None and object_store_bucket is None:
+        return (
+            RemoteBackendConfig.from_mapping(env_values)
+            if env_values is not None
+            else RemoteBackendConfig.from_env()
+        )
+    if database_url is None or object_store_bucket is None:
+        raise MentalModelError(
+            "Both --remote-database-url and --remote-object-store-bucket are required together."
+        )
+    env_config = (
+        RemoteBackendConfig.from_mapping(env_values)
+        if env_values is not None
+        else RemoteBackendConfig.from_env()
+    )
+    return RemoteBackendConfig(
+        database_url=database_url,
+        object_store_bucket=object_store_bucket,
+        object_store_endpoint=object_store_endpoint or (
+            None if env_config is None else env_config.object_store_endpoint
+        ),
+        object_store_region=object_store_region or (
+            None if env_config is None else env_config.object_store_region
+        ),
+        object_store_access_key=object_store_access_key or (
+            None if env_config is None else env_config.object_store_access_key
+        ),
+        object_store_secret_key=object_store_secret_key or (
+            None if env_config is None else env_config.object_store_secret_key
+        ),
+        object_store_secure=(
+            object_store_secure
+            if object_store_secure is not None
+            else (True if env_config is None else env_config.object_store_secure)
+        ),
+        cache_dir=cache_dir or (None if env_config is None else env_config.cache_dir),
+    )
 
 
 def run_verify(
@@ -330,6 +410,17 @@ def run_verify(
     environment_params_file: Path | None = None,
     invocation_name: str | None = None,
     spec_path: Path | None = None,
+    workspace_config: Path | None = None,
+    project_id: str | None = None,
+    remote_database_url: str | None = None,
+    remote_object_store_bucket: str | None = None,
+    remote_object_store_endpoint: str | None = None,
+    remote_object_store_region: str | None = None,
+    remote_object_store_access_key: str | None = None,
+    remote_object_store_secret_key: str | None = None,
+    remote_object_store_secure: bool | None = None,
+    remote_cache_dir: Path | None = None,
+    remote_run_store: RemoteRunStore | None = None,
 ) -> int:
     """Run analysis, runtime verification, and property checks."""
 
@@ -344,21 +435,73 @@ def run_verify(
         runs_dir=runs_dir,
         spec_path=spec_path,
     )
-    module, program = load_workflow_subject(invocation.program)
-    environment = None
-    if invocation.environment is not None:
-        _, environment = load_runtime_environment_subject(invocation.environment)
-    report = run_verification(
-        program,
-        module=module,
-        runs_dir=invocation.runs_dir,
-        environment=environment,
-        invocation_name=invocation.invocation_name,
+    project = _resolve_verify_project_registration(
+        workspace_config=workspace_config,
+        project_id=project_id,
+        spec_path=spec_path,
     )
+    configured_remote_run_store = remote_run_store
+    if configured_remote_run_store is None:
+        remote_backend_config = _resolve_remote_backend_config(
+            database_url=remote_database_url,
+            object_store_bucket=remote_object_store_bucket,
+            object_store_endpoint=remote_object_store_endpoint,
+            object_store_region=remote_object_store_region,
+            object_store_access_key=remote_object_store_access_key,
+            object_store_secret_key=remote_object_store_secret_key,
+            object_store_secure=remote_object_store_secure,
+            cache_dir=remote_cache_dir,
+        )
+        configured_remote_run_store = (
+            None
+            if remote_backend_config is None
+            else RemoteRunStore.from_config(remote_backend_config)
+        )
+    fallback_runs_dir = invocation.runs_dir
+    if fallback_runs_dir is None and configured_remote_run_store is not None:
+        fallback_runs_dir = configured_remote_run_store.cache_dir
+    run_target = build_project_run_target(
+        project=project,
+        fallback_runs_dir=fallback_runs_dir,
+        catalog_source=CatalogSource.SPEC_PATH if spec_path is not None else None,
+    )
+    completed_run_sink = (
+        None
+        if configured_remote_run_store is None
+        else RemoteCompletedRunSink(
+            configured_remote_run_store,
+            project_id=run_target.project_id,
+            project_label=run_target.project_label,
+            environment_name=run_target.environment_name,
+            catalog_entry_id=run_target.catalog_entry_id,
+            catalog_source=run_target.catalog_source,
+        )
+    )
+    if _is_external_project_registration(project):
+        payload = _run_external_verify(
+            invocation=invocation,
+            project=cast(ProjectRegistration, project),
+            run_target=run_target,
+            completed_run_sink=completed_run_sink,
+        )
+    else:
+        module, program = load_workflow_subject(invocation.program)
+        environment = None
+        if invocation.environment is not None:
+            _, environment = load_runtime_environment_subject(invocation.environment)
+        report = run_verification(
+            program,
+            module=module,
+            runs_dir=run_target.runs_dir,
+            environment=environment,
+            invocation_name=invocation.invocation_name,
+            completed_run_sink=completed_run_sink,
+        )
+        payload = report.as_dict()
 
     if json_output:
-        print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
-        return 0 if report.success else 1
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload.get("success") is True else 1
 
     console = Console()
     summary = Table(title="mentalmodel verify summary")
@@ -368,13 +511,24 @@ def run_verify(
     summary.add_column("Runtime", justify="right")
     summary.add_column("Warning Invariants", justify="right")
     summary.add_column("Property Checks", justify="right")
+    analysis_payload = cast(dict[str, object], payload["analysis"])
+    runtime_payload = cast(dict[str, object], payload["runtime"])
+    property_checks_payload = cast(list[dict[str, object]], payload["property_checks"])
+    warning_invariant_failures = cast(
+        list[dict[str, object]],
+        runtime_payload.get("warning_invariant_failures", []),
+    )
+    error_invariant_failures = cast(
+        list[dict[str, object]],
+        runtime_payload.get("error_invariant_failures", []),
+    )
     summary.add_row(
-        report.analysis.graph.graph_id,
-        str(report.analysis.error_count),
-        str(report.analysis.warning_count),
-        "pass" if report.runtime.success else "fail",
-        str(len(report.runtime.warning_invariant_failures)),
-        str(len(report.property_checks)),
+        cast(str, payload["graph_id"]),
+        str(cast(int, analysis_payload["error_count"])),
+        str(cast(int, analysis_payload["warning_count"])),
+        "pass" if runtime_payload["success"] is True else "fail",
+        str(len(warning_invariant_failures)),
+        str(len(property_checks_payload)),
     )
     console.print(summary)
 
@@ -388,48 +542,135 @@ def run_verify(
     runtime_table.add_column("Run Artifacts")
     runtime_table.add_column("Error")
     runtime_table.add_row(
-        "yes" if report.runtime.success else "no",
-        str(report.runtime.record_count),
-        str(report.runtime.output_count),
-        str(report.runtime.state_count),
-        report.runtime.invocation_name or "",
-        str(len(report.runtime.warning_invariant_failures)),
-        report.runtime.run_artifacts_dir or "",
-        report.runtime.error or "",
+        "yes" if runtime_payload["success"] is True else "no",
+        str(cast(int, runtime_payload["record_count"])),
+        str(cast(int, runtime_payload["output_count"])),
+        str(cast(int, runtime_payload["state_count"])),
+        cast(str | None, runtime_payload.get("invocation_name")) or "",
+        str(len(warning_invariant_failures)),
+        cast(str | None, runtime_payload.get("run_artifacts_dir")) or "",
+        cast(str | None, runtime_payload.get("error")) or "",
     )
     console.print(runtime_table)
 
-    if report.runtime.invariant_failures:
+    invariant_failures = warning_invariant_failures + error_invariant_failures
+    if invariant_failures:
         invariant_table = Table(title="Invariant Outcomes")
         invariant_table.add_column("Node")
         invariant_table.add_column("Severity")
         invariant_table.add_column("Fatal")
-        for failure in report.runtime.invariant_failures:
+        for failure in invariant_failures:
+            severity = cast(str, failure["severity"])
             invariant_table.add_row(
-                failure.node_id,
-                failure.severity,
-                "yes" if failure.severity != "warning" else "no",
+                cast(str, failure["node_id"]),
+                severity,
+                "yes" if severity != "warning" else "no",
             )
         console.print(invariant_table)
 
-    if report.property_checks:
+    if property_checks_payload:
         checks = Table(title="Property Checks")
         checks.add_column("Name")
         checks.add_column("Hypothesis")
         checks.add_column("Success")
         checks.add_column("Error")
-        for result in report.property_checks:
+        for result in property_checks_payload:
             checks.add_row(
-                result.name,
-                "yes" if result.hypothesis_backed else "no",
-                "yes" if result.success else "no",
-                result.error or "",
+                cast(str, result["name"]),
+                "yes" if result["hypothesis_backed"] is True else "no",
+                "yes" if result["success"] is True else "no",
+                cast(str | None, result.get("error")) or "",
             )
         console.print(checks)
     else:
         console.print("[yellow]No property checks discovered.[/yellow]")
 
-    return 0 if report.success else 1
+    return 0 if payload.get("success") is True else 1
+
+
+def _resolve_verify_project_registration(
+    *,
+    workspace_config: Path | None,
+    project_id: str | None,
+    spec_path: Path | None,
+) -> ProjectRegistration | None:
+    if project_id is not None and workspace_config is None:
+        raise MentalModelError("--project-id requires --workspace-config.")
+    if workspace_config is None:
+        return None
+    workspace = load_workspace_config(workspace_config)
+    if project_id is not None:
+        return find_project_registration(workspace, project_id)
+    if spec_path is None:
+        return None
+    return find_project_registration_for_path(workspace.projects, spec_path)
+
+
+def _is_external_project_registration(project: ProjectRegistration | None) -> bool:
+    if project is None:
+        return False
+    current_root = Path(__file__).resolve().parents[2]
+    return project.root_dir.expanduser().resolve() != current_root.resolve()
+
+
+def _run_external_verify(
+    *,
+    invocation: VerifyInvocationSpec,
+    project: ProjectRegistration,
+    run_target: ProjectRunTarget,
+    completed_run_sink: RemoteCompletedRunSink | None,
+) -> dict[str, object]:
+    runs_dir = run_target.runs_dir or invocation.runs_dir
+    command = [
+        "uv",
+        "run",
+        "--directory",
+        str(project.root_dir),
+        "python",
+        "-c",
+        _EXTERNAL_VERIFY_INVOCATION_SCRIPT,
+        json.dumps(_verify_invocation_payload(invocation)),
+        "-" if runs_dir is None else str(runs_dir.expanduser().resolve()),
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip() or (
+            f"External project command failed with exit code {completed.returncode}."
+        )
+        raise MentalModelError(message)
+    decoded = json.loads(completed.stdout)
+    if not isinstance(decoded, dict):
+        raise MentalModelError("External verify helper must return a JSON object.")
+    if completed_run_sink is not None:
+        runtime_payload = decoded.get("runtime")
+        if isinstance(runtime_payload, dict):
+            run_artifacts_dir = runtime_payload.get("run_artifacts_dir")
+            if isinstance(run_artifacts_dir, str) and run_artifacts_dir:
+                completed_run_sink.publish_run_dir(Path(run_artifacts_dir))
+    return cast(dict[str, object], decoded)
+
+
+def _verify_invocation_payload(invocation: VerifyInvocationSpec) -> dict[str, object]:
+    return {
+        "program": {
+            "entrypoint": invocation.program.entrypoint,
+            "params": dict(invocation.program.params),
+        },
+        "environment": (
+            None
+            if invocation.environment is None
+            else {
+                "entrypoint": invocation.environment.entrypoint,
+                "params": dict(invocation.environment.params),
+            }
+        ),
+        "invocation_name": invocation.invocation_name,
+    }
 
 
 def run_replay(
@@ -709,6 +950,118 @@ def run_remote_doctor(
     return 0 if report.success else 1
 
 
+def run_remote_up(
+    *,
+    output_dir: Path,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    open_browser: bool = False,
+    frontend_dist: Path | None = None,
+    frontend_dev_url: str | None = None,
+) -> int:
+    """Start the generated remote backend services and launch the dashboard."""
+
+    resolved_output = output_dir.expanduser().resolve()
+    workspace_config = resolved_output / "workspace.toml"
+    compose_path = resolved_output / "docker-compose.remote-minimal.yml"
+    if not workspace_config.exists() or not compose_path.exists():
+        raise MentalModelError(
+            "Remote demo assets are missing. "
+            "Run `mentalmodel remote write-demo --output-dir ...` first."
+        )
+    completed = subprocess.run(
+        ["docker", "compose", "-f", str(compose_path), "up", "-d"],
+        cwd=resolved_output,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip() or (
+            f"docker compose failed with exit code {completed.returncode}."
+        )
+        raise MentalModelError(message)
+    env = _load_env_file(resolved_output / "mentalmodel.remote.env")
+    return run_ui(
+        runs_dir=Path(env["MENTALMODEL_REMOTE_RUNS_DIR"]),
+        workspace_config=workspace_config,
+        host=host,
+        port=port,
+        frontend_dist=frontend_dist,
+        frontend_dev_url=frontend_dev_url,
+        open_browser=open_browser,
+        remote_database_url=env.get("MENTALMODEL_REMOTE_DATABASE_URL"),
+        remote_object_store_bucket=env.get("MENTALMODEL_REMOTE_OBJECT_STORE_BUCKET"),
+        remote_object_store_endpoint=env.get("MENTALMODEL_REMOTE_OBJECT_STORE_ENDPOINT"),
+        remote_object_store_region=env.get("MENTALMODEL_REMOTE_OBJECT_STORE_REGION"),
+        remote_object_store_access_key=env.get("MENTALMODEL_REMOTE_OBJECT_STORE_ACCESS_KEY"),
+        remote_object_store_secret_key=env.get("MENTALMODEL_REMOTE_OBJECT_STORE_SECRET_KEY"),
+        remote_object_store_secure=_parse_bool_env(
+            env.get("MENTALMODEL_REMOTE_OBJECT_STORE_SECURE")
+        ),
+        remote_cache_dir=(
+            None
+            if env.get("MENTALMODEL_REMOTE_CACHE_DIR") is None
+            else Path(env["MENTALMODEL_REMOTE_CACHE_DIR"])
+        ),
+    )
+
+
+def run_remote_down(
+    *,
+    output_dir: Path,
+) -> int:
+    """Stop the generated remote backend services."""
+
+    resolved_output = output_dir.expanduser().resolve()
+    compose_path = resolved_output / "docker-compose.remote-minimal.yml"
+    if not compose_path.exists():
+        raise MentalModelError(
+            "Remote demo docker-compose file is missing. "
+            "Run `mentalmodel remote write-demo --output-dir ...` first."
+        )
+    completed = subprocess.run(
+        ["docker", "compose", "-f", str(compose_path), "down"],
+        cwd=resolved_output,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or completed.stdout.strip() or (
+            f"docker compose failed with exit code {completed.returncode}."
+        )
+        raise MentalModelError(message)
+    Console().print(f"[green]stopped[/green] {compose_path}")
+    return 0
+
+
+def _load_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        raise MentalModelError(f"Expected env file at {path}.")
+    env: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        env[key] = value
+    return env
+
+
+def _parse_bool_env(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise MentalModelError(f"Expected boolean env value, got {value!r}.")
+
+
 def run_projects_add(
     *,
     workspace_config: Path,
@@ -809,19 +1162,25 @@ def run_projects_inspect(
 
     workspace = load_workspace_config(workspace_config)
     project = find_project_registration(workspace, project_id)
-    catalog = None if not project.enabled or project.catalog_provider is None else workspace_project_catalogs(
-        WorkspaceConfig(
-            workspace_id=workspace.workspace_id,
-            label=workspace.label,
-            description=workspace.description,
-            projects=(project,),
-        )
-    )[0]
+    catalog = (
+        None
+        if not project.enabled or project.catalog_provider is None
+        else workspace_project_catalogs(
+            WorkspaceConfig(
+                workspace_id=workspace.workspace_id,
+                label=workspace.label,
+                description=workspace.description,
+                projects=(project,),
+            )
+        )[0]
+    )
     payload = {
         "workspace_id": workspace.workspace_id,
         "project": project.as_dict(),
         "catalog_entry_count": 0 if catalog is None else len(catalog.entries),
-        "catalog_entries": [] if catalog is None else [entry.as_dict() for entry in catalog.entries],
+        "catalog_entries": (
+            [] if catalog is None else [entry.as_dict() for entry in catalog.entries]
+        ),
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1831,6 +2190,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional TOML verify spec describing program, environment, and runtime invocation.",
     )
+    verify.add_argument("--workspace-config", type=Path)
+    verify.add_argument("--project-id")
+    verify.add_argument("--remote-database-url")
+    verify.add_argument("--remote-object-store-bucket")
+    verify.add_argument("--remote-object-store-endpoint")
+    verify.add_argument("--remote-object-store-region")
+    verify.add_argument("--remote-object-store-access-key")
+    verify.add_argument("--remote-object-store-secret-key")
+    verify.add_argument(
+        "--remote-object-store-secure",
+        dest="remote_object_store_secure",
+        action="store_true",
+        default=None,
+    )
+    verify.add_argument(
+        "--no-remote-object-store-secure",
+        dest="remote_object_store_secure",
+        action="store_false",
+    )
+    verify.add_argument("--remote-cache-dir", type=Path)
     verify.add_argument("--json", action="store_true", help="Emit JSON output.")
     replay = subparsers.add_parser("replay", help="Replay a recorded execution.")
     replay.add_argument("--runs-dir", type=Path)
@@ -1863,6 +2242,24 @@ def build_parser() -> argparse.ArgumentParser:
             "of entries directly."
         ),
     )
+    ui.add_argument("--remote-database-url")
+    ui.add_argument("--remote-object-store-bucket")
+    ui.add_argument("--remote-object-store-endpoint")
+    ui.add_argument("--remote-object-store-region")
+    ui.add_argument("--remote-object-store-access-key")
+    ui.add_argument("--remote-object-store-secret-key")
+    ui.add_argument(
+        "--remote-object-store-secure",
+        dest="remote_object_store_secure",
+        action="store_true",
+        default=None,
+    )
+    ui.add_argument(
+        "--no-remote-object-store-secure",
+        dest="remote_object_store_secure",
+        action="store_false",
+    )
+    ui.add_argument("--remote-cache-dir", type=Path)
     ui.add_argument("--open-browser", action="store_true")
 
     otel = subparsers.add_parser("otel", help="Inspect or materialize OTEL configuration.")
@@ -1922,6 +2319,23 @@ def build_parser() -> argparse.ArgumentParser:
     remote_doctor.add_argument("--workspace-config", type=Path, required=True)
     remote_doctor.add_argument("--runs-dir", type=Path)
     remote_doctor.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    remote_up = remote_subparsers.add_parser(
+        "up",
+        help="Start the generated remote backend services and launch the dashboard.",
+    )
+    remote_up.add_argument("--output-dir", type=Path, required=True)
+    remote_up.add_argument("--host", default="127.0.0.1")
+    remote_up.add_argument("--port", type=int, default=8765)
+    remote_up.add_argument("--frontend-dist", type=Path)
+    remote_up.add_argument("--frontend-dev-url")
+    remote_up.add_argument("--open-browser", action="store_true")
+
+    remote_down = remote_subparsers.add_parser(
+        "down",
+        help="Stop the generated remote backend services.",
+    )
+    remote_down.add_argument("--output-dir", type=Path, required=True)
 
     projects = subparsers.add_parser(
         "projects",
@@ -2104,6 +2518,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 environment_params_file=args.environment_params_file,
                 invocation_name=args.invocation_name,
                 spec_path=args.spec,
+                workspace_config=args.workspace_config,
+                project_id=args.project_id,
+                remote_database_url=args.remote_database_url,
+                remote_object_store_bucket=args.remote_object_store_bucket,
+                remote_object_store_endpoint=args.remote_object_store_endpoint,
+                remote_object_store_region=args.remote_object_store_region,
+                remote_object_store_access_key=args.remote_object_store_access_key,
+                remote_object_store_secret_key=args.remote_object_store_secret_key,
+                remote_object_store_secure=args.remote_object_store_secure,
+                remote_cache_dir=args.remote_cache_dir,
             )
         if args.command == "replay":
             return run_replay(
@@ -2126,6 +2550,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 frontend_dev_url=args.frontend_dev_url,
                 catalog_entrypoint=args.catalog_entrypoint,
                 open_browser=args.open_browser,
+                remote_database_url=args.remote_database_url,
+                remote_object_store_bucket=args.remote_object_store_bucket,
+                remote_object_store_endpoint=args.remote_object_store_endpoint,
+                remote_object_store_region=args.remote_object_store_region,
+                remote_object_store_access_key=args.remote_object_store_access_key,
+                remote_object_store_secret_key=args.remote_object_store_secret_key,
+                remote_object_store_secure=args.remote_object_store_secure,
+                remote_cache_dir=args.remote_cache_dir,
             )
         if args.command == "otel":
             if args.otel_command == "show-config":
@@ -2167,6 +2599,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runs_dir=args.runs_dir,
                     json_output=args.json,
                 )
+            if args.remote_command == "up":
+                return run_remote_up(
+                    output_dir=args.output_dir,
+                    host=args.host,
+                    port=args.port,
+                    frontend_dist=args.frontend_dist,
+                    frontend_dev_url=args.frontend_dev_url,
+                    open_browser=args.open_browser,
+                )
+            if args.remote_command == "down":
+                return run_remote_down(output_dir=args.output_dir)
         if args.command == "projects":
             if args.projects_command == "add":
                 return run_projects_add(
@@ -2350,6 +2793,51 @@ def _invariant_outcome_label(value: bool | None) -> str:
     if value is False:
         return "fail"
     return "unknown"
+
+
+_EXTERNAL_VERIFY_INVOCATION_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+from mentalmodel.invocation import InvocationFactorySpec, VerifyInvocationSpec
+from mentalmodel.invocation import load_runtime_environment_subject, load_workflow_subject
+from mentalmodel.testing import run_verification
+
+payload = json.loads(sys.argv[1])
+runs_dir_arg = sys.argv[2]
+runs_dir = None if runs_dir_arg == "-" else Path(runs_dir_arg)
+program_payload = payload["program"]
+environment_payload = payload.get("environment")
+invocation = VerifyInvocationSpec(
+    program=InvocationFactorySpec(
+        entrypoint=program_payload["entrypoint"],
+        params=program_payload.get("params", {}),
+    ),
+    environment=(
+        None
+        if environment_payload is None
+        else InvocationFactorySpec(
+            entrypoint=environment_payload["entrypoint"],
+            params=environment_payload.get("params", {}),
+        )
+    ),
+    invocation_name=payload.get("invocation_name"),
+    runs_dir=None,
+)
+module, program = load_workflow_subject(invocation.program)
+environment = None
+if invocation.environment is not None:
+    _, environment = load_runtime_environment_subject(invocation.environment)
+report = run_verification(
+    program,
+    module=module,
+    runs_dir=runs_dir,
+    environment=environment,
+    invocation_name=invocation.invocation_name,
+)
+print(json.dumps(report.as_dict()))
+""".strip()
 
 
 if __name__ == "__main__":

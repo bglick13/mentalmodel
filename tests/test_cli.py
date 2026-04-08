@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from mentalmodel.cli import build_parser, main
+from mentalmodel.cli import build_parser, main, run_verify
 from mentalmodel.core import (
     Actor,
     ActorHandler,
@@ -32,8 +32,18 @@ from mentalmodel.examples.runtime_environment.demo import (
     build_program as build_runtime_environment_program,
 )
 from mentalmodel.observability.export import write_json, write_jsonl
-from mentalmodel.remote import ProjectCatalog, ProjectRegistration
+from mentalmodel.remote import (
+    InMemoryArtifactStore,
+    InMemoryManifestIndex,
+    ProjectCatalog,
+    ProjectRegistration,
+    RemoteRunStore,
+    WorkspaceConfig,
+)
+from mentalmodel.remote.bootstrap import write_remote_demo
+from mentalmodel.remote.workspace import write_workspace_config
 from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.runtime.runs import list_run_summaries
 from mentalmodel.skills import install_skills
 from mentalmodel.testing import run_verification
 from mentalmodel.ui.catalog import default_dashboard_catalog
@@ -260,6 +270,254 @@ class CliTest(unittest.TestCase):
         self.assertEqual(len(create_app.call_args.kwargs["catalog_entries"]), 2)
         open_browser.assert_called_once_with("http://127.0.0.1:5173")
         run_server.assert_called_once()
+
+    def test_verify_routes_project_runs_and_indexes_remote_store(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace_tmp,
+            tempfile.TemporaryDirectory() as project_tmp,
+            tempfile.TemporaryDirectory() as shared_runs_tmp,
+            tempfile.TemporaryDirectory() as remote_cache_tmp,
+        ):
+            workspace_root = Path(workspace_tmp)
+            project_root = Path(project_tmp)
+            shared_runs_dir = Path(shared_runs_tmp)
+            remote_cache_dir = Path(remote_cache_tmp)
+            spec_path = project_root / "verification" / "workspace_async_rl.toml"
+            spec_path.parent.mkdir(parents=True, exist_ok=True)
+            spec_path.write_text(
+                "\n".join(
+                    (
+                        "[program]",
+                        'entrypoint = "mentalmodel.examples.async_rl.demo:build_program"',
+                        "",
+                        "[runtime]",
+                        'invocation_name = "workspace_async_rl"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            workspace = WorkspaceConfig(
+                workspace_id="workspace",
+                label="Workspace",
+                projects=(
+                    ProjectRegistration(
+                        project_id="workspace-project",
+                        label="Workspace Project",
+                        root_dir=project_root,
+                        runs_dir=shared_runs_dir,
+                    ),
+                ),
+            )
+            workspace_config_path = workspace_root / "workspace.toml"
+            write_workspace_config(workspace_config_path, workspace)
+            manifest_index = InMemoryManifestIndex()
+            remote_store = RemoteRunStore(
+                manifest_index=manifest_index,
+                artifact_store=InMemoryArtifactStore(),
+                cache_dir=remote_cache_dir,
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = run_verify(
+                    None,
+                    json_output=True,
+                    spec_path=spec_path,
+                    workspace_config=workspace_config_path,
+                    remote_run_store=remote_store,
+                )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            runtime = cast(dict[str, object], payload["runtime"])
+            run_id = cast(str, runtime["run_id"])
+            summaries = list_run_summaries(
+                runs_dir=shared_runs_dir,
+                graph_id="async_rl_demo",
+                invocation_name="workspace_async_rl",
+            )
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0].run_id, run_id)
+            self.assertTrue(
+                (
+                    remote_cache_dir / ".runs" / "async_rl_demo" / run_id / "summary.json"
+                ).exists()
+            )
+            indexed = manifest_index.get_run(graph_id="async_rl_demo", run_id=run_id)
+            self.assertEqual(indexed.manifest.project_id, "workspace-project")
+
+    def test_verify_uses_external_project_environment_for_registered_spec(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace_tmp,
+            tempfile.TemporaryDirectory() as project_tmp,
+            tempfile.TemporaryDirectory() as shared_runs_tmp,
+            tempfile.TemporaryDirectory() as remote_cache_tmp,
+        ):
+            workspace_root = Path(workspace_tmp)
+            project_root = Path(project_tmp)
+            shared_runs_dir = Path(shared_runs_tmp)
+            remote_cache_dir = Path(remote_cache_tmp)
+            spec_path = project_root / "verification" / "external_async_rl.toml"
+            spec_path.parent.mkdir(parents=True, exist_ok=True)
+            spec_path.write_text(
+                "\n".join(
+                    (
+                        "[program]",
+                        'entrypoint = "externalproj.demo:build_program"',
+                        "",
+                        "[runtime]",
+                        'invocation_name = "external_async_rl"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            workspace = WorkspaceConfig(
+                workspace_id="workspace",
+                label="Workspace",
+                projects=(
+                    ProjectRegistration(
+                        project_id="external-project",
+                        label="External Project",
+                        root_dir=project_root,
+                        runs_dir=shared_runs_dir,
+                    ),
+                ),
+            )
+            workspace_config_path = workspace_root / "workspace.toml"
+            write_workspace_config(workspace_config_path, workspace)
+            manifest_index = InMemoryManifestIndex()
+            remote_store = RemoteRunStore(
+                manifest_index=manifest_index,
+                artifact_store=InMemoryArtifactStore(),
+                cache_dir=remote_cache_dir,
+            )
+            persisted = run_verification(
+                build_program(),
+                runs_dir=shared_runs_dir,
+                invocation_name="external_async_rl",
+            )
+            payload = persisted.as_dict()
+            stdout = io.StringIO()
+            with patch("mentalmodel.cli.subprocess.run") as run_subprocess:
+                run_subprocess.return_value = types.SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps(payload),
+                    stderr="",
+                )
+                with contextlib.redirect_stdout(stdout):
+                    exit_code = run_verify(
+                        None,
+                        json_output=True,
+                        spec_path=spec_path,
+                        workspace_config=workspace_config_path,
+                        project_id="external-project",
+                        remote_run_store=remote_store,
+                    )
+            self.assertEqual(exit_code, 0)
+            returned = json.loads(stdout.getvalue())
+            self.assertEqual(returned["graph_id"], "async_rl_demo")
+            run_subprocess.assert_called_once()
+            command = run_subprocess.call_args.args[0]
+            self.assertEqual(command[:3], ["uv", "run", "--directory"])
+            self.assertEqual(Path(command[3]).resolve(), project_root.resolve())
+            indexed = manifest_index.get_run(
+                graph_id="async_rl_demo",
+                run_id=persisted.runtime.run_id,
+            )
+            self.assertEqual(indexed.manifest.project_id, "external-project")
+
+    def test_ui_command_accepts_remote_backend_flags(self) -> None:
+        with patch("mentalmodel.cli.create_dashboard_app", return_value=object()) as create_app:
+            with patch("uvicorn.run") as run_server:
+                exit_code = main(
+                    [
+                        "ui",
+                        "--remote-database-url",
+                        "postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel",
+                        "--remote-object-store-bucket",
+                        "mentalmodel-runs",
+                        "--remote-object-store-endpoint",
+                        "http://127.0.0.1:9000",
+                        "--remote-object-store-access-key",
+                        "minio",
+                        "--remote-object-store-secret-key",
+                        "miniosecret",
+                        "--no-remote-object-store-secure",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        remote_config = create_app.call_args.kwargs["remote_backend_config"]
+        self.assertEqual(remote_config.database_url, "postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel")
+        self.assertEqual(remote_config.object_store_bucket, "mentalmodel-runs")
+        self.assertEqual(remote_config.object_store_endpoint, "http://127.0.0.1:9000")
+        self.assertFalse(remote_config.object_store_secure)
+        run_server.assert_called_once()
+
+    def test_remote_up_starts_compose_and_launches_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "remote-demo"
+            write_remote_demo(
+                output_dir=output_dir,
+                profile="minimal",
+                mentalmodel_root=Path(__file__).resolve().parents[1],
+                pangramanizer_root=Path(tmpdir) / "missing-pangramanizer",
+            )
+            with patch("mentalmodel.cli.subprocess.run") as run_subprocess:
+                run_subprocess.return_value = types.SimpleNamespace(
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                )
+                with patch("mentalmodel.cli.run_ui", return_value=0) as run_dashboard:
+                    exit_code = main(
+                        [
+                            "remote",
+                            "up",
+                            "--output-dir",
+                            str(output_dir),
+                        ]
+                    )
+        self.assertEqual(exit_code, 0)
+        run_subprocess.assert_called_once()
+        run_dashboard.assert_called_once()
+        self.assertEqual(
+            run_dashboard.call_args.kwargs["workspace_config"].resolve(),
+            (output_dir / "workspace.toml").resolve(),
+        )
+        self.assertEqual(
+            run_dashboard.call_args.kwargs["runs_dir"].resolve(),
+            (output_dir / "data").resolve(),
+        )
+        self.assertEqual(
+            run_dashboard.call_args.kwargs["remote_database_url"],
+            "postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel",
+        )
+
+    def test_remote_down_stops_compose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "remote-demo"
+            write_remote_demo(
+                output_dir=output_dir,
+                profile="minimal",
+                mentalmodel_root=Path(__file__).resolve().parents[1],
+                pangramanizer_root=Path(tmpdir) / "missing-pangramanizer",
+            )
+            with patch("mentalmodel.cli.subprocess.run") as run_subprocess:
+                run_subprocess.return_value = types.SimpleNamespace(
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                )
+                exit_code = main(
+                    [
+                        "remote",
+                        "down",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        run_subprocess.assert_called_once()
 
     def test_ui_command_accepts_workspace_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

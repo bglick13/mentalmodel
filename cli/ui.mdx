@@ -21,6 +21,7 @@ uv run mentalmodel ui --workspace-config /tmp/mentalmodel-remote/workspace.toml
 uv run mentalmodel ui --frontend-dist apps/dashboard/dist --open-browser
 uv run mentalmodel ui --frontend-dev-url http://127.0.0.1:5173
 uv run mentalmodel ui --catalog-entrypoint mypkg.dashboard:catalog
+uv run mentalmodel ui --remote-database-url postgresql://... --remote-object-store-bucket mentalmodel-runs
 ```
 
 ## What it serves
@@ -120,9 +121,27 @@ For the generated localhost stack, use:
 
 ```bash
 uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
-cd /tmp/mentalmodel-remote
-./run-dashboard.sh
+uv run mentalmodel remote up --output-dir /tmp/mentalmodel-remote --open-browser
 ```
+
+## Remote backend flags
+
+For the durable Phase 2 history path, point the UI at Postgres plus an
+S3-compatible object store:
+
+```bash
+uv run mentalmodel ui \
+  --workspace-config /tmp/mentalmodel-remote/workspace.toml \
+  --remote-database-url postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel \
+  --remote-object-store-bucket mentalmodel-runs \
+  --remote-object-store-endpoint http://127.0.0.1:9000 \
+  --remote-object-store-access-key minio \
+  --remote-object-store-secret-key miniosecret \
+  --no-remote-object-store-secure
+```
+
+The same values can be supplied through `MENTALMODEL_REMOTE_*` environment
+variables.
 
 ## What to look for
 

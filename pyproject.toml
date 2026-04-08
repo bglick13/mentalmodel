@@ -5,12 +5,14 @@ description = "Semantic program modeling for recoverable topology, causality, an
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "boto3>=1.40.58,<2",
   "fastapi>=0.121.0,<0.122",
   "hypothesis>=6.142.5,<7",
   "opentelemetry-api>=1.38.0,<2",
   "opentelemetry-exporter-otlp-proto-grpc>=1.38.0,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.38.0,<2",
   "opentelemetry-sdk>=1.38.0,<2",
+  "psycopg[binary]>=3.2.10,<4",
   "rich>=14.2.0,<15",
   "uvicorn>=0.38.0,<0.39",
 ]

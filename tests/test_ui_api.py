@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import tempfile
@@ -11,10 +12,17 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from mentalmodel.examples.async_rl.demo import build_program
-from mentalmodel.remote import ProjectCatalog, ProjectRegistration, build_run_bundle_upload
+from mentalmodel.remote import (
+    InMemoryArtifactStore,
+    InMemoryManifestIndex,
+    ProjectCatalog,
+    ProjectRegistration,
+    RemoteRunStore,
+    build_run_bundle_upload,
+)
+from mentalmodel.testing import run_verification
 from mentalmodel.ui.api import create_dashboard_app
 from mentalmodel.ui.catalog import DashboardCatalogEntry, default_dashboard_catalog
-from mentalmodel.testing import run_verification
 
 
 class DashboardApiTest(unittest.TestCase):
@@ -200,7 +208,10 @@ class DashboardApiTest(unittest.TestCase):
             self.assertIn("records_per_sec", body["buckets"][0])
 
     def test_remote_ingest_endpoint_persists_run_for_existing_read_api(self) -> None:
-        with tempfile.TemporaryDirectory() as local_tmp, tempfile.TemporaryDirectory() as remote_tmp:
+        with (
+            tempfile.TemporaryDirectory() as local_tmp,
+            tempfile.TemporaryDirectory() as remote_tmp,
+        ):
             local_root = Path(local_tmp)
             remote_root = Path(remote_tmp)
             report = run_verification(build_program(), runs_dir=local_root)
@@ -212,7 +223,18 @@ class DashboardApiTest(unittest.TestCase):
                 project_id="mentalmodel-examples",
                 project_label="Mentalmodel Examples",
             )
-            client = TestClient(create_dashboard_app(runs_dir=remote_root, frontend_dist=None))
+            remote_store = RemoteRunStore(
+                manifest_index=InMemoryManifestIndex(),
+                artifact_store=InMemoryArtifactStore(),
+                cache_dir=remote_root,
+            )
+            client = TestClient(
+                create_dashboard_app(
+                    runs_dir=None,
+                    frontend_dist=None,
+                    remote_run_store=remote_store,
+                )
+            )
             ingest = client.post("/api/remote/runs", json=upload.as_dict())
             self.assertEqual(ingest.status_code, 200)
             runs_response = client.get(
@@ -223,6 +245,10 @@ class DashboardApiTest(unittest.TestCase):
             runs = runs_response.json()["runs"]
             self.assertEqual(len(runs), 1)
             self.assertEqual(runs[0]["run_id"], report.runtime.run_id)
+            overview = client.get(
+                f"/api/runs/async_rl_demo/{report.runtime.run_id}/overview"
+            )
+            self.assertEqual(overview.status_code, 200)
 
     def test_external_project_catalog_graph_uses_subprocess_loader(self) -> None:
         fixture_entry = default_dashboard_catalog()[0]
@@ -239,6 +265,7 @@ class DashboardApiTest(unittest.TestCase):
                 project_id="pangramanizer-training",
                 label="Pangramanizer Training",
                 root_dir=Path("/Users/ben/repos/pangramanizer"),
+                runs_dir=Path("/tmp/pangram-runs"),
             ),
             entries=(external_entry,),
         )
@@ -281,6 +308,7 @@ class DashboardApiTest(unittest.TestCase):
                 project_id="pangramanizer-training",
                 label="Pangramanizer Training",
                 root_dir=Path("/Users/ben/repos/pangramanizer"),
+                runs_dir=Path("/tmp/pangram-runs"),
             ),
             entries=(external_entry,),
         )
@@ -309,13 +337,17 @@ class DashboardApiTest(unittest.TestCase):
             "property_checks": [],
             "graph_id": "pangramanizer_training_real_verify3",
         }
-        with patch("mentalmodel.ui.service.subprocess.run") as run_subprocess:
-            run_subprocess.return_value = subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout=json.dumps(payload),
-                stderr="",
-            )
+        class FakePopen:
+            def __init__(self, args: list[str], **_: object) -> None:
+                self.args = args
+                self.stdout = io.StringIO("Your Tinker SDK version is outdated.\n")
+                self.stderr = io.StringIO("")
+
+            def wait(self) -> int:
+                Path(self.args[-1]).write_text(json.dumps(payload), encoding="utf-8")
+                return 0
+
+        with patch("mentalmodel.ui.service.subprocess.Popen", side_effect=FakePopen) as popen:
             launch = client.post("/api/executions", json={"spec_id": "pangram-real-verify3"})
             self.assertEqual(launch.status_code, 200)
             execution_id = launch.json()["execution_id"]
@@ -325,70 +357,156 @@ class DashboardApiTest(unittest.TestCase):
                     break
                 time.sleep(0.01)
         self.assertEqual(execution["status"], "succeeded")
-        run_subprocess.assert_called_once()
+        self.assertTrue(
+            any(
+                message["message"] == "Your Tinker SDK version is outdated."
+                for message in execution["messages"]
+            )
+        )
+        popen.assert_called_once()
 
     def test_external_spec_path_registration_and_execution_use_subprocess(self) -> None:
-        fixture_entry = default_dashboard_catalog()[0]
-        external_spec_path = Path("/Users/ben/repos/pangramanizer/pangramanizer/mentalmodel_training/verification/real_smoke.toml")
-        catalog = ProjectCatalog(
-            project=ProjectRegistration(
-                project_id="pangramanizer-training",
-                label="Pangramanizer Training",
-                root_dir=Path("/Users/ben/repos/pangramanizer"),
-            ),
-            entries=(),
-        )
-        client = TestClient(
-            create_dashboard_app(
-                runs_dir=None,
-                frontend_dist=None,
-                project_catalogs=(catalog,),
+        with (
+            tempfile.TemporaryDirectory() as project_tmp,
+            tempfile.TemporaryDirectory() as runs_tmp,
+            tempfile.TemporaryDirectory() as cache_tmp,
+        ):
+            project_root = Path(project_tmp)
+            external_spec_path = (
+                project_root
+                / "pangramanizer"
+                / "mentalmodel_training"
+                / "verification"
+                / "real_smoke.toml"
             )
-        )
-        metadata = {"graph_id": "pangramanizer_training_real_smoke", "invocation_name": "pangram_real_smoke"}
-        verification_payload = {
-            "success": True,
-            "runtime": {
-                "success": True,
-                "record_count": 0,
-                "output_count": 0,
-                "state_count": 0,
-                "run_id": None,
-                "run_artifacts_dir": None,
+            external_spec_path.parent.mkdir(parents=True, exist_ok=True)
+            external_spec_path.write_text(
+                "\n".join(
+                    (
+                        "[program]",
+                        "entrypoint = "
+                        '"pangramanizer.mentalmodel_training.verification.real_smoke:build_program"',
+                        "",
+                        "[runtime]",
+                        'invocation_name = "pangram_real_smoke"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            persisted = run_verification(
+                build_program(),
+                runs_dir=Path(runs_tmp),
+                invocation_name="pangram_real_smoke",
+            )
+            self.assertTrue(persisted.success)
+            manifest_index = InMemoryManifestIndex()
+            remote_store = RemoteRunStore(
+                manifest_index=manifest_index,
+                artifact_store=InMemoryArtifactStore(),
+                cache_dir=Path(cache_tmp),
+            )
+            catalog = ProjectCatalog(
+                project=ProjectRegistration(
+                    project_id="pangramanizer-training",
+                    label="Pangramanizer Training",
+                    root_dir=project_root,
+                    runs_dir=Path(runs_tmp),
+                ),
+                entries=(),
+            )
+            client = TestClient(
+                create_dashboard_app(
+                    runs_dir=None,
+                    frontend_dist=None,
+                    project_catalogs=(catalog,),
+                    remote_run_store=remote_store,
+                )
+            )
+            metadata = {
+                "graph_id": "async_rl_demo",
                 "invocation_name": "pangram_real_smoke",
-                "error": None,
-                "warning_invariant_failures": [],
-                "error_invariant_failures": [],
-            },
-            "analysis": {"error_count": 0, "warning_count": 0, "findings": []},
-            "property_checks": [],
-            "graph_id": "pangramanizer_training_real_smoke",
-        }
-        with patch("mentalmodel.ui.service.subprocess.run") as run_subprocess:
-            run_subprocess.side_effect = [
-                subprocess.CompletedProcess(
-                    args=[],
-                    returncode=0,
-                    stdout=json.dumps(metadata),
-                    stderr="",
-                ),
-                subprocess.CompletedProcess(
-                    args=[],
-                    returncode=0,
-                    stdout=json.dumps(verification_payload),
-                    stderr="",
-                ),
-            ]
-            launch = client.post(
-                "/api/executions",
-                json={"spec_path": str(external_spec_path)},
+            }
+            verification_payload = {
+                "success": True,
+                "runtime": {
+                    "success": True,
+                    "record_count": persisted.runtime.record_count,
+                    "output_count": persisted.runtime.output_count,
+                    "state_count": persisted.runtime.state_count,
+                    "run_id": persisted.runtime.run_id,
+                    "run_artifacts_dir": persisted.runtime.run_artifacts_dir,
+                    "invocation_name": "pangram_real_smoke",
+                    "error": None,
+                    "warning_invariant_failures": [],
+                    "error_invariant_failures": [],
+                },
+                "analysis": {"error_count": 0, "warning_count": 0, "findings": []},
+                "property_checks": [],
+                "graph_id": "async_rl_demo",
+            }
+            class FakePopen:
+                def __init__(self, args: list[str], **_: object) -> None:
+                    self.args = args
+                    self.stdout = io.StringIO("external verification is starting\n")
+                    self.stderr = io.StringIO("")
+
+                def wait(self) -> int:
+                    Path(self.args[-1]).write_text(
+                        json.dumps(verification_payload),
+                        encoding="utf-8",
+                    )
+                    return 0
+
+            with (
+                patch("mentalmodel.ui.service.subprocess.run") as run_subprocess,
+                patch("mentalmodel.ui.service.subprocess.Popen", side_effect=FakePopen),
+            ):
+                run_subprocess.side_effect = [
+                    subprocess.CompletedProcess(
+                        args=[],
+                        returncode=0,
+                        stdout=json.dumps(metadata),
+                        stderr="",
+                    ),
+                    subprocess.CompletedProcess(
+                        args=[],
+                        returncode=0,
+                        stdout=json.dumps(verification_payload),
+                        stderr="",
+                    ),
+                ]
+                launch = client.post(
+                    "/api/executions",
+                    json={"spec_path": str(external_spec_path)},
+                )
+                self.assertEqual(launch.status_code, 200)
+                execution_id = launch.json()["execution_id"]
+                for _ in range(20):
+                    execution = client.get(f"/api/executions/{execution_id}").json()
+                    if execution["status"] in {"succeeded", "failed"}:
+                        break
+                    time.sleep(0.01)
+            self.assertEqual(execution["status"], "succeeded")
+            self.assertEqual(run_subprocess.call_count, 1)
+            self.assertTrue(
+                any(
+                    message["message"] == "external verification is starting"
+                    for message in execution["messages"]
+                )
             )
-            self.assertEqual(launch.status_code, 200)
-            execution_id = launch.json()["execution_id"]
-            for _ in range(20):
-                execution = client.get(f"/api/executions/{execution_id}").json()
-                if execution["status"] in {"succeeded", "failed"}:
-                    break
-                time.sleep(0.01)
-        self.assertEqual(execution["status"], "succeeded")
-        self.assertEqual(run_subprocess.call_count, 2)
+            runs_response = client.get(
+                "/api/runs",
+                params={
+                    "graph_id": "async_rl_demo",
+                    "invocation_name": "pangram_real_smoke",
+                },
+            )
+            self.assertEqual(runs_response.status_code, 200)
+            runs = runs_response.json()["runs"]
+            self.assertEqual(len(runs), 1)
+            indexed = manifest_index.get_run(
+                graph_id="async_rl_demo",
+                run_id=persisted.runtime.run_id,
+            )
+            self.assertEqual(indexed.manifest.project_id, "pangramanizer-training")

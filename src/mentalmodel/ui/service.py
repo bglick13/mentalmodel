@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast
+from typing import TextIO, cast
 
 from mentalmodel.analysis import AnalysisReport, run_analysis
 from mentalmodel.core.interfaces import JsonValue
@@ -23,6 +24,12 @@ from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import execution_record_to_json
+from mentalmodel.remote import ProjectCatalog, RemoteCompletedRunSink, RemoteRunStore
+from mentalmodel.remote.workspace import (
+    ProjectRunTarget,
+    build_project_run_target,
+    find_project_registration_for_path,
+)
 from mentalmodel.runtime.replay import build_replay_report
 from mentalmodel.runtime.runs import (
     RunFrameScope,
@@ -35,10 +42,10 @@ from mentalmodel.runtime.runs import (
     load_run_payload,
     load_run_records,
     load_run_spans,
+    load_run_summary,
     resolve_run_summary,
 )
 from mentalmodel.testing import VerificationReport, run_verification
-from mentalmodel.remote import ProjectCatalog
 from mentalmodel.ui.catalog import (
     DashboardCatalogEntry,
     DashboardCatalogError,
@@ -62,12 +69,44 @@ class DashboardExecutionSession:
     run_id: str | None = None
     run_artifacts_dir: str | None = None
     records: list[dict[str, JsonValue]] = field(default_factory=list)
+    messages: list[dict[str, JsonValue]] = field(default_factory=list)
+    _next_sequence: int = field(default=1, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def on_record(self, record: ExecutionRecord) -> None:
         payload = execution_record_to_json(record)
         with self._lock:
+            sequence = _record_sequence(payload)
+            if sequence <= 0:
+                sequence = self._next_sequence
+                payload["sequence"] = sequence
+            self._next_sequence = max(self._next_sequence, sequence + 1)
             self.records.append(payload)
+            if self.status == "pending":
+                self.status = "running"
+
+    def add_message(
+        self,
+        *,
+        level: str,
+        message: str,
+        source: str = "external-process",
+    ) -> None:
+        with self._lock:
+            payload: dict[str, JsonValue] = {
+                "sequence": self._next_sequence,
+                "timestamp_ms": int(time.time() * 1000),
+                "level": level,
+                "message": message,
+                "source": source,
+            }
+            self._next_sequence += 1
+            self.messages.append(payload)
+            if self.status == "pending":
+                self.status = "running"
+
+    def mark_running(self) -> None:
+        with self._lock:
             if self.status == "pending":
                 self.status = "running"
 
@@ -111,7 +150,15 @@ class DashboardExecutionSession:
                 for record in self.records
                 if _record_sequence(record) > after_sequence
             ]
-            latest_sequence = max((_record_sequence(record) for record in self.records), default=0)
+            new_messages = [
+                message
+                for message in self.messages
+                if _message_sequence(message) > after_sequence
+            ]
+            latest_sequence = max(
+                max((_record_sequence(record) for record in self.records), default=0),
+                max((_message_sequence(message) for message in self.messages), default=0),
+            )
             return {
                 "execution_id": self.execution_id,
                 "spec": _as_json_object(self.spec.as_dict()),
@@ -123,6 +170,7 @@ class DashboardExecutionSession:
                 "run_artifacts_dir": self.run_artifacts_dir,
                 "latest_sequence": latest_sequence,
                 "records": _as_json_list(new_records),
+                "messages": _as_json_list(new_messages),
             }
 
 
@@ -135,8 +183,10 @@ class DashboardService:
         runs_dir: Path | None = None,
         catalog_entries: Sequence[DashboardCatalogEntry] | None = None,
         project_catalogs: Sequence[ProjectCatalog] | None = None,
+        remote_run_store: RemoteRunStore | None = None,
     ) -> None:
         self.runs_dir = runs_dir
+        self.remote_run_store = remote_run_store
         self._project_catalogs = tuple(project_catalogs or ())
         self._project_catalog_by_id = {
             catalog.project.project_id: catalog
@@ -220,7 +270,10 @@ class DashboardService:
             "analysis": _analysis_to_payload(analysis),
         }
 
-    def _start_execution_with_entry(self, entry: DashboardCatalogEntry) -> DashboardExecutionSession:
+    def _start_execution_with_entry(
+        self,
+        entry: DashboardCatalogEntry,
+    ) -> DashboardExecutionSession:
         session = DashboardExecutionSession(
             execution_id=f"exec-{uuid.uuid4().hex}",
             spec=entry,
@@ -244,10 +297,14 @@ class DashboardService:
         session = self._require_session(execution_id)
         snapshot = session.snapshot(after_sequence=after_sequence)
         if session.run_id is not None:
-            snapshot["run_summary"] = self.get_run_overview(
-                graph_id=session.spec.graph_id,
-                run_id=session.run_id,
-            )
+            if session.run_artifacts_dir is not None and Path(session.run_artifacts_dir).exists():
+                summary = load_run_summary(Path(session.run_artifacts_dir))
+                snapshot["run_summary"] = {"summary": _summary_to_payload(summary)}
+            else:
+                snapshot["run_summary"] = self.get_run_overview(
+                    graph_id=session.spec.graph_id,
+                    run_id=session.run_id,
+                )
         return snapshot
 
     def list_runs(
@@ -256,37 +313,47 @@ class DashboardService:
         graph_id: str | None = None,
         invocation_name: str | None = None,
     ) -> tuple[dict[str, JsonValue], ...]:
-        return tuple(
-            _summary_to_payload(summary)
-            for summary in list_run_summaries(
+        summaries = (
+            self.remote_run_store.list_run_summaries(
+                graph_id=graph_id,
+                invocation_name=invocation_name,
+            )
+            if self.remote_run_store is not None
+            else list_run_summaries(
                 runs_dir=self.runs_dir,
                 graph_id=graph_id,
                 invocation_name=invocation_name,
             )
         )
+        return tuple(
+            _summary_to_payload(summary)
+            for summary in summaries
+        )
 
     def get_run_graph(self, *, graph_id: str, run_id: str) -> dict[str, JsonValue]:
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         graph = load_run_graph(
-            runs_dir=self.runs_dir,
+            runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
         )
         return _graph_to_payload(graph)
 
     def get_run_overview(self, *, graph_id: str, run_id: str) -> dict[str, JsonValue]:
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         summary = resolve_run_summary(
-            runs_dir=self.runs_dir,
+            runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
         )
         verification = _safe_load_payload(
-            runs_dir=self.runs_dir,
+            runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
             filename="verification.json",
         )
         replay = build_replay_report(
-            runs_dir=self.runs_dir,
+            runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
         )
@@ -319,8 +386,9 @@ class DashboardService:
         run_id: str,
         node_id: str | None = None,
     ) -> tuple[dict[str, JsonValue], ...]:
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_records(
-            runs_dir=self.runs_dir,
+            runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
             node_id=node_id,
@@ -335,8 +403,9 @@ class DashboardService:
     ) -> tuple[dict[str, JsonValue], ...]:
         """Return OTel span rows from ``otel-spans.jsonl`` (optionally filtered by node)."""
 
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_spans(
-            runs_dir=self.runs_dir,
+            runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
             node_id=node_id,
@@ -349,8 +418,9 @@ class DashboardService:
         run_id: str,
         loop_node_id: str | None = None,
     ) -> dict[str, JsonValue]:
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         report = build_replay_report(
-            runs_dir=self.runs_dir,
+            runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
             loop_node_id=loop_node_id,
@@ -365,13 +435,14 @@ class DashboardService:
         node_id: str,
         frame_id: str | None = None,
     ) -> dict[str, JsonValue]:
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         detail: dict[str, JsonValue] = {
             "node_id": node_id,
             "frame_id": frame_id,
         }
         try:
             detail["inputs"] = load_run_node_inputs(
-                runs_dir=self.runs_dir,
+                runs_dir=history_runs_dir,
                 graph_id=graph_id,
                 run_id=run_id,
                 node_id=node_id,
@@ -381,7 +452,7 @@ class DashboardService:
             detail["inputs_error"] = str(exc)
         try:
             detail["output"] = load_run_node_output(
-                runs_dir=self.runs_dir,
+                runs_dir=history_runs_dir,
                 graph_id=graph_id,
                 run_id=run_id,
                 node_id=node_id,
@@ -391,7 +462,7 @@ class DashboardService:
             detail["output_error"] = str(exc)
         try:
             trace = load_run_node_trace(
-                runs_dir=self.runs_dir,
+                runs_dir=history_runs_dir,
                 graph_id=graph_id,
                 run_id=run_id,
                 node_id=node_id,
@@ -414,15 +485,26 @@ class DashboardService:
 
     def _run_session(self, session: DashboardExecutionSession) -> None:
         try:
+            invocation = read_verify_invocation_spec(session.spec.spec_path)
             external_project = self._external_project_for_entry(session.spec)
+            run_target = self._run_target_for_entry(
+                session.spec,
+                spec_runs_dir=invocation.runs_dir,
+            )
             if external_project is not None:
+                session.mark_running()
                 report = self._run_external_verification(
                     session.spec,
                     external_project.project.root_dir,
+                    session=session,
+                    run_target=run_target,
+                )
+                self._publish_completed_external_run(
+                    report,
+                    run_target=run_target,
                 )
                 session.mark_completed_from_payload(report)
                 return
-            invocation = read_verify_invocation_spec(session.spec.spec_path)
             module, program = load_workflow_subject(invocation.program)
             environment = None
             if invocation.environment is not None:
@@ -430,10 +512,11 @@ class DashboardService:
             report = run_verification(
                 program,
                 module=module,
-                runs_dir=self.runs_dir or invocation.runs_dir,
+                runs_dir=run_target.runs_dir,
                 environment=environment,
                 invocation_name=invocation.invocation_name,
                 record_listeners=(session.on_record,),
+                completed_run_sink=self._completed_run_sink(run_target),
             )
             session.mark_completed(report)
         except Exception as exc:  # pragma: no cover - guarded by API tests
@@ -451,15 +534,13 @@ class DashboardService:
         return project_catalog
 
     def _project_for_spec_path(self, spec_path: Path) -> ProjectCatalog | None:
-        resolved = spec_path.expanduser().resolve()
-        for project_catalog in self._project_catalogs:
-            root_dir = project_catalog.project.root_dir.expanduser().resolve()
-            try:
-                resolved.relative_to(root_dir)
-            except ValueError:
-                continue
-            return project_catalog
-        return None
+        project = find_project_registration_for_path(
+            tuple(project_catalog.project for project_catalog in self._project_catalogs),
+            spec_path,
+        )
+        if project is None:
+            return None
+        return self._project_catalog_by_id.get(project.project_id)
 
     def _catalog_entry_from_path(self, spec_path: Path) -> DashboardCatalogEntry:
         resolved = spec_path.expanduser().resolve()
@@ -481,7 +562,10 @@ class DashboardService:
         if external_project is None:
             entry = catalog_entry_from_spec_path(resolved)
         else:
-            metadata = self._load_external_spec_metadata(resolved, external_project.project.root_dir)
+            metadata = self._load_external_spec_metadata(
+                resolved,
+                external_project.project.root_dir,
+            )
             graph_id = metadata.get("graph_id")
             invocation_name = metadata.get("invocation_name")
             if not isinstance(graph_id, str):
@@ -534,17 +618,181 @@ class DashboardService:
         self,
         entry: DashboardCatalogEntry,
         root_dir: Path,
+        *,
+        session: DashboardExecutionSession,
+        run_target: ProjectRunTarget,
     ) -> dict[str, object]:
         runs_dir_arg = (
             "-"
-            if self.runs_dir is None
-            else str(self.runs_dir.expanduser().resolve())
+            if run_target.runs_dir is None
+            else str(run_target.runs_dir.expanduser().resolve())
         )
-        return self._run_external_python(
-            root_dir=root_dir,
-            script=_EXTERNAL_VERIFY_SCRIPT,
-            args=(str(entry.spec_path), runs_dir_arg),
+        result_file = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            delete=False,
         )
+        result_path = Path(result_file.name)
+        result_file.close()
+        session.add_message(
+            level="info",
+            message=f"Launching external verification in {root_dir}",
+        )
+        command = [
+            "uv",
+            "run",
+            "--directory",
+            str(root_dir),
+            "python",
+            "-c",
+            _EXTERNAL_VERIFY_SCRIPT,
+            str(entry.spec_path),
+            runs_dir_arg,
+            str(result_path),
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def _drain_pipe(
+            pipe: object,
+            *,
+            level: str,
+            collector: list[str],
+        ) -> None:
+            stream = cast(TextIO | None, pipe)
+            if stream is None:
+                return
+            try:
+                for raw_line in stream:
+                    line = raw_line.rstrip()
+                    if not line:
+                        continue
+                    collector.append(line)
+                    session.add_message(level=level, message=line)
+            finally:
+                stream.close()
+
+        stdout_thread = threading.Thread(
+            target=_drain_pipe,
+            kwargs={
+                "pipe": process.stdout,
+                "level": "info",
+                "collector": stdout_lines,
+            },
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_drain_pipe,
+            kwargs={
+                "pipe": process.stderr,
+                "level": "error",
+                "collector": stderr_lines,
+            },
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        returncode = process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
+        try:
+            if returncode != 0:
+                message = (
+                    "\n".join(stderr_lines[-10:])
+                    or "\n".join(stdout_lines[-10:])
+                    or f"External project command failed with exit code {returncode}."
+                )
+                raise DashboardCatalogError(message)
+            if not result_path.is_file():
+                raise DashboardCatalogError(
+                    "External verification did not produce a result payload."
+                )
+            decoded = json.loads(result_path.read_text(encoding="utf-8"))
+        finally:
+            result_path.unlink(missing_ok=True)
+        if not isinstance(decoded, dict):
+            raise DashboardCatalogError(
+                "External verification helper must return a JSON object."
+            )
+        return cast(dict[str, object], decoded)
+
+    def _run_target_for_entry(
+        self,
+        entry: DashboardCatalogEntry,
+        *,
+        spec_runs_dir: Path | None,
+    ) -> ProjectRunTarget:
+        project = (
+            None
+            if entry.project_id is None
+            else (
+                None
+                if entry.project_id not in self._project_catalog_by_id
+                else self._project_catalog_by_id[entry.project_id].project
+            )
+        )
+        fallback_runs_dir = self.runs_dir or spec_runs_dir
+        if fallback_runs_dir is None and self.remote_run_store is not None:
+            fallback_runs_dir = self.remote_run_store.cache_dir
+        return build_project_run_target(
+            project=project,
+            fallback_runs_dir=fallback_runs_dir,
+            catalog_entry_id=entry.spec_id,
+            catalog_source=entry.catalog_source,
+        )
+
+    def _run_target_for_spec_path(self, spec_path: Path) -> ProjectRunTarget:
+        project_catalog = self._project_for_spec_path(spec_path)
+        project = None if project_catalog is None else project_catalog.project
+        invocation = read_verify_invocation_spec(spec_path)
+        fallback_runs_dir = self.runs_dir or invocation.runs_dir
+        if fallback_runs_dir is None and self.remote_run_store is not None:
+            fallback_runs_dir = self.remote_run_store.cache_dir
+        return build_project_run_target(
+            project=project,
+            fallback_runs_dir=fallback_runs_dir,
+            catalog_source="spec-path",
+        )
+
+    def _completed_run_sink(
+        self,
+        run_target: ProjectRunTarget,
+    ) -> RemoteCompletedRunSink | None:
+        if self.remote_run_store is None:
+            return None
+        return RemoteCompletedRunSink(
+            self.remote_run_store,
+            project_id=run_target.project_id,
+            project_label=run_target.project_label,
+            environment_name=run_target.environment_name,
+            catalog_entry_id=run_target.catalog_entry_id,
+            catalog_source=run_target.catalog_source,
+        )
+
+    def _publish_completed_external_run(
+        self,
+        payload: dict[str, object],
+        *,
+        run_target: ProjectRunTarget,
+    ) -> None:
+        runtime = payload.get("runtime")
+        if not isinstance(runtime, dict):
+            return
+        run_artifacts_dir = runtime.get("run_artifacts_dir")
+        if not isinstance(run_artifacts_dir, str) or not run_artifacts_dir:
+            return
+        sink = self._completed_run_sink(run_target)
+        if sink is None:
+            return
+        sink.publish_run_dir(Path(run_artifacts_dir))
 
     def _load_external_spec_metadata(
         self,
@@ -597,7 +845,7 @@ class DashboardService:
         run_id: str,
     ) -> list[dict[str, JsonValue]]:
         outputs_payload = load_run_payload(
-            runs_dir=self.runs_dir,
+            runs_dir=self._history_runs_dir(graph_id=graph_id, run_id=run_id),
             graph_id=graph_id,
             run_id=run_id,
             filename="outputs.json",
@@ -656,7 +904,7 @@ class DashboardService:
         node_id: str,
     ) -> list[dict[str, JsonValue]]:
         replay = build_replay_report(
-            runs_dir=self.runs_dir,
+            runs_dir=self._history_runs_dir(graph_id=graph_id, run_id=run_id),
             graph_id=graph_id,
             run_id=run_id,
         )
@@ -694,7 +942,7 @@ class DashboardService:
         of new nodes; displayed as nodes active in that interval).
         """
 
-        if self.runs_dir is None:
+        if self.runs_dir is None and self.remote_run_store is None:
             return _empty_timeseries(
                 graph_id=graph_id,
                 invocation_name=invocation_name,
@@ -715,15 +963,23 @@ class DashboardService:
             num_buckets = min(num_buckets, max_buckets)
         rollup_ms = effective_rollup
 
-        summaries = list_run_summaries(
-            runs_dir=self.runs_dir,
-            graph_id=graph_id,
-            invocation_name=invocation_name,
+        summaries = (
+            self.remote_run_store.list_run_summaries(
+                graph_id=graph_id,
+                invocation_name=invocation_name,
+            )
+            if self.remote_run_store is not None
+            else list_run_summaries(
+                runs_dir=self.runs_dir,
+                graph_id=graph_id,
+                invocation_name=invocation_name,
+            )
         )
         if run_id is not None:
             summaries = tuple(s for s in summaries if s.run_id == run_id)
         else:
-            # Approximate which bundles may contain events in [since_ms, until_ms) by run start time.
+            # Approximate which bundles may contain events in [since_ms, until_ms)
+            # by run start time.
             windowed = tuple(
                 s for s in summaries if since_ms <= s.created_at_ms < until_ms
             )
@@ -737,6 +993,11 @@ class DashboardService:
         node_sets: list[set[str]] = [set() for _ in range(num_buckets)]
 
         for summary in summaries:
+            if self.remote_run_store is not None:
+                self.remote_run_store.materialize_run(
+                    graph_id=summary.graph_id,
+                    run_id=summary.run_id,
+                )
             records_path = summary.run_dir / "records.jsonl"
             if not records_path.is_file():
                 continue
@@ -805,6 +1066,12 @@ class DashboardService:
         if session is None:
             raise KeyError(execution_id)
         return session
+
+    def _history_runs_dir(self, *, graph_id: str, run_id: str) -> Path | None:
+        if self.remote_run_store is None:
+            return self.runs_dir
+        self.remote_run_store.materialize_run(graph_id=graph_id, run_id=run_id)
+        return self.remote_run_store.runs_root
 
 
 def _graph_to_payload(graph: IRGraph) -> dict[str, JsonValue]:
@@ -960,6 +1227,11 @@ def _record_sequence(record: dict[str, JsonValue]) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _message_sequence(message: dict[str, JsonValue]) -> int:
+    value = message.get("sequence")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def _as_json_object(value: object) -> dict[str, JsonValue]:
     json_value = _as_json_value(value)
     if not isinstance(json_value, dict):
@@ -1056,6 +1328,7 @@ from mentalmodel.testing import run_verification
 
 spec_path = Path(sys.argv[1])
 runs_dir_arg = sys.argv[2]
+runs_result_path = Path(sys.argv[3])
 runs_dir = None if runs_dir_arg == "-" else Path(runs_dir_arg)
 invocation = read_verify_invocation_spec(spec_path)
 module, program = load_workflow_subject(invocation.program)
@@ -1069,5 +1342,5 @@ report = run_verification(
     environment=environment,
     invocation_name=invocation.invocation_name,
 )
-print(json.dumps(report.as_dict()))
+runs_result_path.write_text(json.dumps(report.as_dict()), encoding="utf-8")
 """.strip()

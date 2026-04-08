@@ -9,7 +9,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from mentalmodel.core.interfaces import JsonValue
-from mentalmodel.remote import FileRemoteRunStore, ProjectCatalog, RunBundleUpload
+from mentalmodel.remote import (
+    FileRemoteRunStore,
+    ProjectCatalog,
+    RemoteBackendConfig,
+    RemoteRunStore,
+    RunBundleUpload,
+)
 from mentalmodel.ui.catalog import DashboardCatalogEntry
 from mentalmodel.ui.service import DashboardService
 
@@ -20,15 +26,31 @@ def create_dashboard_app(
     frontend_dist: Path | None = None,
     catalog_entries: tuple[DashboardCatalogEntry, ...] | None = None,
     project_catalogs: tuple[ProjectCatalog, ...] | None = None,
+    remote_backend_config: RemoteBackendConfig | None = None,
+    remote_run_store: RemoteRunStore | None = None,
 ) -> FastAPI:
     """Create the Phase 26 dashboard API and optional static frontend host."""
 
+    configured_remote_store = (
+        remote_run_store
+        if remote_run_store is not None
+        else (
+            None
+            if remote_backend_config is None
+            else RemoteRunStore.from_config(remote_backend_config)
+        )
+    )
     service = DashboardService(
         runs_dir=runs_dir,
         catalog_entries=catalog_entries,
         project_catalogs=project_catalogs,
+        remote_run_store=configured_remote_store,
     )
-    remote_store = None if runs_dir is None else FileRemoteRunStore(root_dir=runs_dir)
+    ingest_store = (
+        configured_remote_store
+        if configured_remote_store is not None
+        else (None if runs_dir is None else FileRemoteRunStore(root_dir=runs_dir))
+    )
     app = FastAPI(title="mentalmodel dashboard", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -53,14 +75,14 @@ def create_dashboard_app(
     def ingest_remote_run(
         payload: Annotated[dict[str, object], Body()],
     ) -> object:
-        if remote_store is None:
+        if ingest_store is None:
             raise HTTPException(
                 status_code=400,
                 detail="Remote ingest requires runs_dir to be configured on the server.",
             )
         try:
             upload = RunBundleUpload.from_dict(payload)
-            run_dir = remote_store.ingest(upload)
+            run_dir = ingest_store.ingest(upload)
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {

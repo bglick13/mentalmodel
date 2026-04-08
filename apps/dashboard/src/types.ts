@@ -122,6 +122,14 @@ export type ExecutionRecord = {
   payload: Record<string, unknown>;
 };
 
+export type ExecutionMessage = {
+  sequence: number;
+  timestamp_ms: number;
+  level: string;
+  message: string;
+  source: string;
+};
+
 export type ExecutionSession = {
   execution_id: string;
   spec: CatalogEntry;
@@ -133,6 +141,7 @@ export type ExecutionSession = {
   run_artifacts_dir: string | null;
   latest_sequence: number;
   records: ExecutionRecord[];
+  messages: ExecutionMessage[];
   run_summary?: RunOverview;
 };
 

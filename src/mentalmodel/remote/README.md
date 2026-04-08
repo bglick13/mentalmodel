@@ -15,14 +15,22 @@ primitives for remote-compatible run handling:
 - project-scoped catalog provider shape
 - canonical run bundle upload payloads
 - a deterministic file-backed remote ingest store
+- a Postgres-backed manifest index
+- an S3-compatible object-store backend for artifact blobs
+- a remote-backed run repository that materializes bundles into a local cache
 - a CLI/API sync path for uploading persisted local runs
 - workspace TOML load/write helpers for one shared stack
 - localhost bootstrap and doctor flows for the remote MVP
 
-The initial remote backend stays deliberately simple: local `.runs` bundles are
-repackaged as `RunBundleUpload` payloads and ingested into another `.runs`-style
-store plus a `.remote/manifests` index. That keeps the public model stable
-before Postgres/object storage adapters arrive.
+The durable Phase 2 backend stores:
+
+- manifest/index rows in Postgres
+- artifact bytes in S3-compatible object storage
+- a local read cache under `.runs` only as a materialization layer for the
+  existing inspection helpers
+
+The older file-backed store remains in-tree as a deterministic fallback for
+tests and local transition scenarios.
 
 ## Main entrypoints
 
@@ -35,6 +43,8 @@ before Postgres/object storage adapters arrive.
 - `ProjectCatalog`
 - `WorkspaceConfig`
 - `RunBundleUpload`
+- `RemoteBackendConfig`
+- `RemoteRunStore`
 - `FileRemoteRunStore`
 - `build_run_bundle_upload`
 - `sync_runs_to_server`
@@ -47,8 +57,9 @@ before Postgres/object storage adapters arrive.
 - Keep dashboard JSON shapes and storage-specific details at the edges.
 - Treat local `.runs` and future remote storage as two backends for the same
   manifest/artifact model.
-- Keep the current file-backed store deterministic so it can serve as a testable
-  stand-in for the later Postgres/object-store split.
+- Keep the read cache as an implementation detail, not the source of truth.
+- Keep the file-backed store deterministic so it can serve as a testable
+  fallback alongside the real backend.
 
 ## Current flow
 
@@ -56,11 +67,14 @@ before Postgres/object storage adapters arrive.
 2. `build_run_bundle_upload(...)` resolves that run and emits a canonical
    `RunManifest` plus base64-encoded artifact bodies.
 3. `POST /api/remote/runs` accepts the upload payload and validates it.
-4. `FileRemoteRunStore.ingest(...)` writes the artifacts into a remote `.runs`
-   tree and stores the manifest under `.remote/manifests/<graph_id>/<run_id>.json`.
-5. The existing dashboard read APIs continue to inspect the ingested run through
-   the same historical run surfaces.
-6. `mentalmodel remote write-demo` generates a workspace registry plus helper
+4. `RemoteRunStore.ingest(...)` uploads artifact blobs to S3-compatible object
+   storage, stores the indexed manifest/read-model row in Postgres, and
+   materializes the bundle into a local cache.
+5. The dashboard read APIs inspect the indexed remote run through the same
+   historical run surfaces by materializing bundles from the remote backend into
+   the cache on demand.
+6. `FileRemoteRunStore.ingest(...)` remains available as a deterministic fallback.
+7. `mentalmodel remote write-demo` generates a workspace registry plus helper
    scripts for one local multi-project stack.
 
 ## Verification

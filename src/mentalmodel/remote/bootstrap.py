@@ -7,7 +7,7 @@ from mentalmodel.doctor import DoctorCheck, DoctorReport, DoctorStatus
 from mentalmodel.observability import write_otel_demo
 from mentalmodel.remote.contracts import ProjectRegistration, WorkspaceConfig
 from mentalmodel.remote.workspace import load_workspace_config, write_workspace_config
-from mentalmodel.ui.workspace import resolve_project_catalog, workspace_project_catalogs
+from mentalmodel.ui.workspace import workspace_project_catalogs
 
 
 def write_remote_demo(
@@ -31,6 +31,7 @@ def write_remote_demo(
         label=workspace_label,
         description="Generated localhost stack for the remote runs MVP.",
         projects=_default_projects(
+            shared_runs_dir=resolved_output / "data",
             mentalmodel_root=mentalmodel_root,
             pangramanizer_root=pangramanizer_root,
         ),
@@ -56,6 +57,23 @@ def write_remote_demo(
     )
     dashboard_script.chmod(0o755)
 
+    compose_path = resolved_output / "docker-compose.remote-minimal.yml"
+    compose_path.write_text(_remote_compose(), encoding="utf-8")
+
+    start_script = resolved_output / "start-stack.sh"
+    start_script.write_text(
+        _start_stack_script(),
+        encoding="utf-8",
+    )
+    start_script.chmod(0o755)
+
+    stop_script = resolved_output / "stop-stack.sh"
+    stop_script.write_text(
+        _stop_stack_script(),
+        encoding="utf-8",
+    )
+    stop_script.chmod(0o755)
+
     sync_script = resolved_output / "sync-local-runs.sh"
     sync_script.write_text(
         _sync_script(
@@ -79,7 +97,10 @@ def write_remote_demo(
     return (
         workspace_path,
         env_path,
+        compose_path,
         dashboard_script,
+        start_script,
+        stop_script,
         sync_script,
         readme_path,
         *otel_paths,
@@ -98,6 +119,7 @@ def build_remote_doctor_report(
     checks = (
         _check_workspace_file(workspace_path),
         _check_project_catalogs(workspace_path),
+        _check_project_output_routes(workspace_path),
         _check_runs_dir(resolved_runs_dir),
         _check_demo_assets(workspace_path.parent),
     )
@@ -106,6 +128,7 @@ def build_remote_doctor_report(
 
 def _default_projects(
     *,
+    shared_runs_dir: Path,
     mentalmodel_root: Path | None,
     pangramanizer_root: Path | None,
 ) -> tuple[ProjectRegistration, ...]:
@@ -116,6 +139,7 @@ def _default_projects(
             label="Mentalmodel Examples",
             root_dir=repo_root,
             catalog_provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+            runs_dir=shared_runs_dir,
             description="Built-in mentalmodel dashboard examples and fixtures.",
             tags=("builtin", "examples"),
             default_environment="localhost",
@@ -135,11 +159,12 @@ def _default_projects(
                 "pangramanizer.mentalmodel_training.verification.spec_catalog:"
                 "verification_spec_catalog"
             ),
+            runs_dir=shared_runs_dir,
             description="Real and fixture Pangramanizer verification specs.",
             tags=("external", "training"),
             default_environment="localhost",
         )
-        projects.append(_project_with_resolution_status(pangram_project))
+        projects.append(pangram_project)
     return tuple(projects)
 
 
@@ -193,6 +218,51 @@ def _check_project_catalogs(workspace_path: Path) -> DoctorCheck:
     )
 
 
+def _check_project_output_routes(workspace_path: Path) -> DoctorCheck:
+    try:
+        workspace = load_workspace_config(workspace_path)
+    except Exception as exc:
+        return DoctorCheck(
+            name="project_routes",
+            status=DoctorStatus.FAIL,
+            message=str(exc),
+            details={"workspace_config": str(workspace_path)},
+        )
+    missing = [
+        project.project_id
+        for project in workspace.projects
+        if project.enabled and project.runs_dir is None
+    ]
+    if missing:
+        return DoctorCheck(
+            name="project_routes",
+            status=DoctorStatus.FAIL,
+            message=(
+                "Enabled projects must declare runs_dir for shared-stack launches."
+            ),
+            details={
+                "workspace_config": str(workspace_path),
+                "missing_runs_dir_projects": missing,
+            },
+        )
+    return DoctorCheck(
+        name="project_routes",
+        status=DoctorStatus.PASS,
+        message="Enabled projects declare explicit output routing.",
+        details={
+            "workspace_config": str(workspace_path),
+            "projects": [
+                {
+                    "project_id": project.project_id,
+                    "runs_dir": str(project.runs_dir),
+                }
+                for project in workspace.projects
+                if project.enabled
+            ],
+        },
+    )
+
+
 def _check_runs_dir(runs_dir: Path) -> DoctorCheck:
     runs_dir.parent.mkdir(parents=True, exist_ok=True)
     if runs_dir.exists() and not runs_dir.is_dir():
@@ -225,7 +295,10 @@ def _check_runs_dir(runs_dir: Path) -> DoctorCheck:
 def _check_demo_assets(output_dir: Path) -> DoctorCheck:
     expected = (
         output_dir / "workspace.toml",
+        output_dir / "docker-compose.remote-minimal.yml",
         output_dir / "run-dashboard.sh",
+        output_dir / "start-stack.sh",
+        output_dir / "stop-stack.sh",
         output_dir / "sync-local-runs.sh",
         output_dir / "REMOTE-DEMO.md",
         output_dir / "otel" / "docker-compose.otel-lgtm.yml",
@@ -250,10 +323,18 @@ def _remote_env(*, workspace_path: Path, repo_root: Path) -> str:
     output_dir = workspace_path.parent
     return "\n".join(
         (
-            f"MENTALMODEL_REMOTE_SERVER_URL=http://127.0.0.1:8765",
+            "MENTALMODEL_REMOTE_SERVER_URL=http://127.0.0.1:8765",
             f"MENTALMODEL_REMOTE_RUNS_DIR={output_dir / 'data'}",
+            f"MENTALMODEL_REMOTE_CACHE_DIR={output_dir / 'data'}",
             f"MENTALMODEL_REMOTE_WORKSPACE_CONFIG={workspace_path}",
             f"MENTALMODEL_REMOTE_REPO_ROOT={repo_root}",
+            "MENTALMODEL_REMOTE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel",
+            "MENTALMODEL_REMOTE_OBJECT_STORE_BUCKET=mentalmodel-runs",
+            "MENTALMODEL_REMOTE_OBJECT_STORE_ENDPOINT=http://127.0.0.1:9000",
+            "MENTALMODEL_REMOTE_OBJECT_STORE_REGION=us-east-1",
+            "MENTALMODEL_REMOTE_OBJECT_STORE_ACCESS_KEY=minio",
+            "MENTALMODEL_REMOTE_OBJECT_STORE_SECRET_KEY=miniosecret",
+            "MENTALMODEL_REMOTE_OBJECT_STORE_SECURE=false",
             "",
         )
     )
@@ -265,11 +346,79 @@ def _dashboard_script(*, workspace_path: Path, runs_dir: Path, repo_root: Path) 
             "#!/usr/bin/env bash",
             "set -euo pipefail",
             'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'if [[ -f "$SCRIPT_DIR/mentalmodel.remote.env" ]]; then',
+            "  set -a",
+            '  source "$SCRIPT_DIR/mentalmodel.remote.env"',
+            "  set +a",
+            "fi",
             'RUNS_DIR="${MENTALMODEL_REMOTE_RUNS_DIR:-$SCRIPT_DIR/data}"',
             'WORKSPACE_CONFIG="${MENTALMODEL_REMOTE_WORKSPACE_CONFIG:-$SCRIPT_DIR/workspace.toml}"',
             f'REPO_ROOT="${{MENTALMODEL_REMOTE_REPO_ROOT:-{json.dumps(str(repo_root))}}}"',
             'uv run --directory "$REPO_ROOT" mentalmodel ui --host 127.0.0.1 --port 8765 '
             '--runs-dir "$RUNS_DIR" --workspace-config "$WORKSPACE_CONFIG" --open-browser "$@"',
+            "",
+        )
+    )
+
+
+def _remote_compose() -> str:
+    return """services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mentalmodel
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mentalmodel"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  postgres-data:
+  minio-data:
+"""
+
+
+def _start_stack_script() -> str:
+    return "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'docker compose -f "$SCRIPT_DIR/docker-compose.remote-minimal.yml" up -d',
+            'exec "$SCRIPT_DIR/run-dashboard.sh" "$@"',
+            "",
+        )
+    )
+
+
+def _stop_stack_script() -> str:
+    return "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'docker compose -f "$SCRIPT_DIR/docker-compose.remote-minimal.yml" down "$@"',
             "",
         )
     )
@@ -282,7 +431,8 @@ def _sync_script(*, server_url: str, repo_root: Path) -> str:
             "set -euo pipefail",
             'LOCAL_RUNS_DIR="${1:-$PWD/.runs}"',
             f'REPO_ROOT="${{MENTALMODEL_REMOTE_REPO_ROOT:-{json.dumps(str(repo_root))}}}"',
-            f'uv run --directory "$REPO_ROOT" mentalmodel remote sync --server-url "{server_url}" --runs-dir "$LOCAL_RUNS_DIR" "${{@:2}}"',
+            'uv run --directory "$REPO_ROOT" mentalmodel remote sync '
+            f'--server-url "{server_url}" --runs-dir "$LOCAL_RUNS_DIR" "${{@:2}}"',
             "",
         )
     )
@@ -294,6 +444,12 @@ def _remote_demo_readme(
     workspace_path: Path,
     output_dir: Path,
 ) -> str:
+    review_fixture_path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "review_workflow"
+        / "review_workflow_fixture.toml"
+    )
     project_lines = "\n".join(
         f"- `{project.project_id}` via `{project.catalog_provider}`"
         for project in workspace.projects
@@ -304,8 +460,12 @@ This directory bootstraps the current remote-runs MVP for one local stack.
 
 ## What is here
 
+- `docker-compose.remote-minimal.yml`: local Postgres + MinIO backend services
 - `workspace.toml`: project registry for the shared dashboard stack
+- `mentalmodel.remote.env`: wired backend credentials and dashboard config
 - `run-dashboard.sh`: launches `mentalmodel ui` against the generated workspace
+- `start-stack.sh`: starts the backend services and then launches the dashboard
+- `stop-stack.sh`: stops the backend services
 - `sync-local-runs.sh`: uploads local `.runs` bundles into the shared stack
 - `otel/`: optional LGTM trace demo generated from `mentalmodel otel write-demo`
 
@@ -315,31 +475,39 @@ Registered projects:
 
 ## Start the stack
 
-1. Optional traces UI:
+1. Start the remote backend services and dashboard:
+
+```bash
+cd {output_dir}
+./start-stack.sh
+```
+
+That launches the backend services from:
+
+```bash
+docker compose -f {output_dir / "docker-compose.remote-minimal.yml"} up -d
+```
+
+and then starts the shared dashboard/API with:
+
+```bash
+uv run mentalmodel ui --runs-dir {output_dir / "data"} --workspace-config {workspace_path}
+```
+
+2. Optional traces UI:
 
 ```bash
 cd {output_dir / "otel"}
 docker compose -f docker-compose.otel-lgtm.yml up -d
 ```
 
-2. Start the shared dashboard/API:
-
-```bash
-cd {output_dir}
-./run-dashboard.sh
-```
-
-That launches:
-
-```bash
-uv run mentalmodel ui --runs-dir {output_dir / "data"} --workspace-config {workspace_path}
-```
-
 3. Materialize and sync runs from any registered project:
 
 ```bash
-uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_program
-./sync-local-runs.sh /path/to/local/runs
+uv run mentalmodel verify \
+  --spec {review_fixture_path} \
+  --runs-dir {output_dir / "demo-local-runs"}
+./sync-local-runs.sh {output_dir / "demo-local-runs"}
 ```
 
 If Pangramanizer is registered, its canonical verification catalog will also be
@@ -354,22 +522,3 @@ def _repo_root(mentalmodel_root: Path | None) -> Path:
         if mentalmodel_root is not None
         else Path(__file__).resolve().parents[3]
     )
-
-
-def _project_with_resolution_status(project: ProjectRegistration) -> ProjectRegistration:
-    try:
-        resolve_project_catalog(project)
-    except Exception as exc:
-        reason = f"Disabled by generated demo because the provider did not resolve: {exc}"
-        return ProjectRegistration(
-            project_id=project.project_id,
-            label=project.label,
-            root_dir=project.root_dir,
-            catalog_provider=project.catalog_provider,
-            runs_dir=project.runs_dir,
-            description=reason,
-            tags=project.tags,
-            default_environment=project.default_environment,
-            enabled=False,
-        )
-    return project

@@ -54,6 +54,31 @@ def build_run_bundle_upload(
     return RunBundleUpload(manifest=manifest, artifacts=tuple(artifacts))
 
 
+def build_run_bundle_upload_from_run_dir(
+    *,
+    run_dir: Path,
+    project_id: str | None = None,
+    project_label: str | None = None,
+    environment_name: str | None = None,
+    catalog_entry_id: str | None = None,
+    catalog_source: CatalogSource | None = None,
+) -> RunBundleUpload:
+    """Build an upload payload from one concrete persisted run directory."""
+
+    resolved = run_dir.expanduser().resolve()
+    runs_root = resolved.parent.parent
+    return build_run_bundle_upload(
+        runs_dir=runs_root,
+        graph_id=resolved.parent.name,
+        run_id=resolved.name,
+        project_id=project_id,
+        project_label=project_label,
+        environment_name=environment_name,
+        catalog_entry_id=catalog_entry_id,
+        catalog_source=catalog_source,
+    )
+
+
 def sync_runs_to_server(
     *,
     server_url: str,

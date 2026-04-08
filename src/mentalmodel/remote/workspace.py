@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import tomllib
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from mentalmodel.remote.contracts import (
+    CatalogSource,
     ProjectRegistration,
     RemoteContractError,
     WorkspaceConfig,
@@ -80,6 +83,79 @@ def find_project_registration(
         if project.project_id == project_id:
             return project
     raise RemoteContractError(f"Unknown workspace project {project_id!r}.")
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectRunTarget:
+    """Resolved output routing for one launched run."""
+
+    runs_dir: Path | None
+    project_id: str | None = None
+    project_label: str | None = None
+    environment_name: str | None = None
+    catalog_entry_id: str | None = None
+    catalog_source: CatalogSource | None = None
+
+
+def find_project_registration_for_path(
+    projects: Sequence[ProjectRegistration],
+    spec_path: Path,
+) -> ProjectRegistration | None:
+    """Resolve the owning project for one verify spec path."""
+
+    resolved = spec_path.expanduser().resolve()
+    for project in projects:
+        root_dir = project.root_dir.expanduser().resolve()
+        try:
+            resolved.relative_to(root_dir)
+        except ValueError:
+            continue
+        return project
+    return None
+
+
+def build_project_run_target(
+    *,
+    project: ProjectRegistration | None,
+    fallback_runs_dir: Path | None,
+    catalog_entry_id: str | None = None,
+    catalog_source: CatalogSource | str | None = None,
+) -> ProjectRunTarget:
+    """Build output-routing metadata for one project-scoped or ad hoc launch."""
+
+    resolved_source = (
+        None
+        if catalog_source in (None, "")
+        else (
+            catalog_source
+            if isinstance(catalog_source, CatalogSource)
+            else CatalogSource(catalog_source)
+        )
+    )
+    if project is None:
+        return ProjectRunTarget(
+            runs_dir=(
+                None
+                if fallback_runs_dir is None
+                else fallback_runs_dir.expanduser().resolve()
+            ),
+            catalog_entry_id=catalog_entry_id,
+            catalog_source=resolved_source,
+        )
+    if project.runs_dir is None:
+        raise RemoteContractError(
+            f"Project {project.project_id!r} must declare runs_dir for shared-stack launches."
+        )
+    return ProjectRunTarget(
+        runs_dir=(
+            project.runs_dir.expanduser().resolve()
+        ),
+        project_id=project.project_id,
+        project_label=project.label,
+        environment_name=project.default_environment,
+        catalog_entry_id=catalog_entry_id,
+        catalog_source=resolved_source,
+    )
 
 
 def _project_from_payload(payload: object) -> ProjectRegistration:

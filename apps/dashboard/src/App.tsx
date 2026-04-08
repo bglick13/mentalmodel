@@ -325,13 +325,25 @@ function App() {
         null
       );
     });
+    setError(null);
   }, []);
+
+  const refreshRuns = useCallback(
+    async (entry: CatalogEntry): Promise<RunSummary[]> => {
+      const nextRuns = await fetchRuns(entry.graph_id, entry.invocation_name);
+      setRuns(nextRuns);
+      setError(null);
+      return nextRuns;
+    },
+    [],
+  );
 
   useEffect(() => {
     void (async () => {
       try {
         const entries = await fetchCatalog();
         setCatalog(entries);
+        setError(null);
         const parsed = parseExplorerQuery(window.location.search);
         const specFromUrl =
           parsed.specId &&
@@ -387,11 +399,11 @@ function App() {
       try {
         const [catalogGraph, runData] = await Promise.all([
           fetchCatalogGraph(selectedCatalog.spec_id),
-          fetchRuns(selectedCatalog.graph_id, selectedCatalog.invocation_name),
+          refreshRuns(selectedCatalog),
         ]);
         setGraphPreview(catalogGraph.graph);
         setGraphFindings(catalogGraph.analysis.findings);
-        setRuns(runData);
+        setError(null);
         if (runData.length === 0) {
           setSelectedNodeId(
             selectedCatalog.pinned_nodes[0]?.node_id ??
@@ -403,7 +415,19 @@ function App() {
         setError(String(fetchError));
       }
     })();
-  }, [selectedCatalog]);
+  }, [selectedCatalog, refreshRuns]);
+
+  useEffect(() => {
+    if (!selectedCatalog) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshRuns(selectedCatalog).catch((fetchError: unknown) => {
+        setError(String(fetchError));
+      });
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [selectedCatalog, refreshRuns]);
 
   useEffect(() => {
     if (
@@ -449,6 +473,7 @@ function App() {
       .then((records) => {
         if (!cancelled) {
           setActiveRecords(records);
+          setError(null);
         }
       })
       .catch((recordsError: unknown) => {
@@ -628,15 +653,13 @@ function App() {
           return {
             ...next,
             records: [...current.records, ...next.records],
+            messages: [...current.messages, ...next.messages],
           };
         });
+        setError(null);
         if (next.run_id && selectedCatalog) {
           setExploreRunId(next.run_id);
-          const refreshedRuns = await fetchRuns(
-            selectedCatalog.graph_id,
-            selectedCatalog.invocation_name,
-          );
-          setRuns(refreshedRuns);
+          await refreshRuns(selectedCatalog);
         }
       })().catch((pollError: unknown) => {
         setError(String(pollError));
@@ -644,7 +667,7 @@ function App() {
     }, 750);
 
     return () => window.clearInterval(timer);
-  }, [activeExecution, selectedCatalog]);
+  }, [activeExecution, refreshRuns, selectedCatalog]);
 
   useEffect(() => {
     if (!activeRun || !selectedNodeId) {
@@ -660,6 +683,7 @@ function App() {
           selectedFrameId,
         );
         setNodeDetail(detail);
+        setError(null);
       } catch (detailError) {
         setError(String(detailError));
       }
@@ -736,6 +760,7 @@ function App() {
     return runsInExploreWindow.reduce((sum, r) => sum + r.record_count, 0);
   }, [exploreRunId, recordsInTimeWindow, runsInExploreWindow]);
   const liveRecords = activeExecution?.records ?? [];
+  const liveMessages = activeExecution?.messages ?? [];
   const recentRunSuccessLabel = useMemo(
     () => formatSuccessRateForRuns(runsInExploreWindow),
     [runsInExploreWindow],
@@ -1393,13 +1418,29 @@ function OverviewView({
                     </div>
                   </button>
                 ))}
+                {liveMessages.length > 0 ? (
+                  liveMessages.slice(-5).map((message) => (
+                    <div
+                      key={`${message.sequence}:${message.timestamp_ms}`}
+                      className="list-card"
+                    >
+                      <div className="list-card-head">
+                        <span>{message.source}</span>
+                        <span className="event-pill">{message.level}</span>
+                      </div>
+                      <div className="list-card-copy">{message.message}</div>
+                    </div>
+                  ))
+                ) : null}
                 {liveRecords.length === 0 &&
+                liveMessages.length === 0 &&
                 activeExecution.spec.project_id &&
                 activeExecution.spec.project_id !== "mentalmodel-examples" ? (
                   <div className="empty-state">
                     External project executions do not stream live semantic
-                    records into the dashboard yet. Output data appears after
-                    the run finishes and its persisted bundle is loaded.
+                    records into the dashboard yet. While the run initializes,
+                    this panel stays empty until subprocess output or the
+                    completed bundle arrives.
                   </div>
                 ) : null}
               </div>
