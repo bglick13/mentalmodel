@@ -11,6 +11,7 @@ from typing import cast
 from mentalmodel.errors import EntrypointLoadError, MentalModelError
 from mentalmodel.invocation import load_workflow_subject, read_verify_invocation_spec
 from mentalmodel.ir.lowering import lower_program
+from mentalmodel.ui.custom_views import DashboardCustomView
 
 
 class DashboardCatalogError(MentalModelError):
@@ -71,6 +72,7 @@ class DashboardCatalogEntry:
     default_loop_node_id: str | None = None
     metric_groups: tuple[DashboardMetricGroup, ...] = ()
     pinned_nodes: tuple[DashboardPinnedNode, ...] = ()
+    custom_views: tuple[DashboardCustomView, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -88,6 +90,7 @@ class DashboardCatalogEntry:
             "default_loop_node_id": self.default_loop_node_id,
             "metric_groups": [group.as_dict() for group in self.metric_groups],
             "pinned_nodes": [node.as_dict() for node in self.pinned_nodes],
+            "custom_views": [view.as_dict() for view in self.custom_views],
         }
 
 
@@ -136,6 +139,7 @@ def default_dashboard_catalog() -> tuple[DashboardCatalogEntry, ...]:
                 default_loop_node_id="ticket_review_loop",
                 metric_groups=(queue_metrics,),
                 pinned_nodes=review_nodes,
+                custom_views=(),
             ),
             DashboardCatalogEntry(
                 spec_id="review-workflow-strict",
@@ -155,6 +159,7 @@ def default_dashboard_catalog() -> tuple[DashboardCatalogEntry, ...]:
                 default_loop_node_id="ticket_review_loop",
                 metric_groups=(queue_metrics,),
                 pinned_nodes=review_nodes,
+                custom_views=(),
             ),
         )
     )
@@ -188,9 +193,11 @@ def validate_dashboard_catalog(
         if not entry.label:
             raise DashboardCatalogError("Dashboard catalog entries require a label.")
         if not entry.metric_groups and not entry.pinned_nodes:
+            _validate_custom_views(entry)
             normalized.append(entry)
             continue
         _validate_metric_groups(entry)
+        _validate_custom_views(entry)
         normalized.append(entry)
     return tuple(normalized)
 
@@ -237,6 +244,7 @@ def catalog_entry_from_spec_path(spec_path: Path) -> DashboardCatalogEntry:
         default_loop_node_id=None,
         metric_groups=(),
         pinned_nodes=(),
+        custom_views=(),
     )
 
 
@@ -303,3 +311,66 @@ def _validate_metric_groups(entry: DashboardCatalogEntry) -> None:
             raise DashboardCatalogError(
                 f"Dashboard metric group {group.group_id!r} max_items must be positive."
             )
+
+
+def _validate_custom_views(entry: DashboardCatalogEntry) -> None:
+    seen_view_ids: set[str] = set()
+    for view in entry.custom_views:
+        if not view.view_id:
+            raise DashboardCatalogError(
+                f"Dashboard custom view ids cannot be empty for {entry.spec_id!r}."
+            )
+        if view.view_id in seen_view_ids:
+            raise DashboardCatalogError(
+                f"Duplicate dashboard custom view id {view.view_id!r} for {entry.spec_id!r}."
+            )
+        seen_view_ids.add(view.view_id)
+        if view.kind != "table":
+            raise DashboardCatalogError(
+                f"Unsupported dashboard custom view kind {view.kind!r} for {entry.spec_id!r}."
+            )
+        if view.row_source.kind != "node_output_items":
+            raise DashboardCatalogError(
+                "Dashboard custom table row sources currently support only "
+                f"'node_output_items' for {entry.spec_id!r}."
+            )
+        if not view.row_source.node_id:
+            raise DashboardCatalogError(
+                f"Dashboard custom view {view.view_id!r} requires row_source.node_id."
+            )
+        if not view.row_source.items_path:
+            raise DashboardCatalogError(
+                f"Dashboard custom view {view.view_id!r} requires row_source.items_path."
+            )
+        if not view.columns:
+            raise DashboardCatalogError(
+                f"Dashboard custom view {view.view_id!r} must declare at least one column."
+            )
+        seen_column_ids: set[str] = set()
+        for column in view.columns:
+            if not column.column_id:
+                raise DashboardCatalogError(
+                    f"Dashboard custom view {view.view_id!r} has a column with empty id."
+                )
+            if column.column_id in seen_column_ids:
+                raise DashboardCatalogError(
+                    f"Dashboard custom view {view.view_id!r} has duplicate column id "
+                    f"{column.column_id!r}."
+                )
+            seen_column_ids.add(column.column_id)
+            if column.selector.kind not in {
+                "row_item",
+                "scope",
+                "node_output",
+                "node_input",
+                "record_payload",
+            }:
+                raise DashboardCatalogError(
+                    f"Unsupported selector kind {column.selector.kind!r} for "
+                    f"{entry.spec_id!r}/{view.view_id!r}/{column.column_id!r}."
+                )
+            if column.selector.kind in {"node_output", "node_input", "record_payload"}:
+                if not column.selector.node_id:
+                    raise DashboardCatalogError(
+                        f"Selector {column.column_id!r} must declare node_id."
+                    )

@@ -17,8 +17,16 @@ from mentalmodel.errors import EntrypointLoadError
 from mentalmodel.remote import ProjectCatalog, ProjectRegistration, WorkspaceConfig
 from mentalmodel.ui.catalog import (
     DashboardCatalogEntry,
+    DashboardMetricGroup,
+    DashboardPinnedNode,
     catalog_entry_from_spec_path,
     validate_dashboard_catalog,
+)
+from mentalmodel.ui.custom_views import (
+    DashboardCustomView,
+    DashboardTableColumn,
+    DashboardTableRowSource,
+    DashboardValueSelector,
 )
 
 
@@ -170,21 +178,37 @@ def _catalog_entry_from_spec_object(
 ) -> DashboardCatalogEntry:
     label = _required_object_str(payload, "label")
     spec_path = Path(_required_object_str(payload, "spec_path")).expanduser().resolve()
+    graph_id = _optional_object_str(payload, "graph_id")
     category = _optional_object_str(payload, "category") or "custom"
     description = _optional_object_str(payload, "description") or str(spec_path)
     invocation_name = _optional_object_str(payload, "invocation_name")
-    try:
-        entry = catalog_entry_from_spec_path(spec_path)
-    except Exception as exc:
-        entry = _catalog_entry_from_external_spec(
-            project=project,
+    default_loop_node_id = _optional_object_str(payload, "default_loop_node_id")
+    tags = _optional_object_str_sequence(payload, "tags") or (category,)
+    metric_groups = _optional_metric_groups(payload)
+    pinned_nodes = _optional_pinned_nodes(payload)
+    custom_views = _optional_custom_views(payload)
+    spec_id = f"{project.project_id}:{_slugify(label)}"
+    if graph_id is not None:
+        entry = _catalog_entry_from_declared_spec(
+            spec_id=spec_id,
             spec_path=spec_path,
+            graph_id=graph_id,
             invocation_name=invocation_name,
             category=category,
             description=description,
-            cause=exc,
         )
-    spec_id = f"{project.project_id}:{_slugify(label)}"
+    else:
+        try:
+            entry = catalog_entry_from_spec_path(spec_path)
+        except Exception as exc:
+            entry = _catalog_entry_from_external_spec(
+                project=project,
+                spec_path=spec_path,
+                invocation_name=invocation_name,
+                category=category,
+                description=description,
+                cause=exc,
+            )
     return replace(
         entry,
         spec_id=spec_id,
@@ -192,7 +216,11 @@ def _catalog_entry_from_spec_object(
         description=description,
         invocation_name=invocation_name or entry.invocation_name,
         category=category,
-        tags=(category,),
+        tags=tags,
+        default_loop_node_id=default_loop_node_id,
+        metric_groups=metric_groups,
+        pinned_nodes=pinned_nodes,
+        custom_views=custom_views,
     )
 
 
@@ -262,6 +290,158 @@ def _optional_object_str(payload: object, field_name: str) -> str | None:
     )
 
 
+def _optional_object_str_sequence(
+    payload: object,
+    field_name: str,
+) -> tuple[str, ...] | None:
+    if isinstance(payload, dict):
+        value = payload.get(field_name)
+    else:
+        value = getattr(payload, field_name, None)
+    if value is None:
+        return None
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+        raise EntrypointLoadError(
+            f"Project catalog spec entry field {field_name!r} must be a sequence of strings."
+        )
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise EntrypointLoadError(
+                f"Project catalog spec entry field {field_name!r} must contain only strings."
+            )
+        items.append(item)
+    return tuple(items)
+
+
+def _optional_metric_groups(payload: object) -> tuple[DashboardMetricGroup, ...]:
+    raw_groups = _optional_object_sequence(payload, "metric_groups")
+    if raw_groups is None:
+        return ()
+    groups: list[DashboardMetricGroup] = []
+    for group in raw_groups:
+        group_id = _required_object_str(group, "group_id")
+        title = _required_object_str(group, "title")
+        metric_path_prefixes = _optional_object_str_sequence(group, "metric_path_prefixes")
+        if not metric_path_prefixes:
+            raise EntrypointLoadError(
+                "Project catalog metric_groups entries require metric_path_prefixes."
+            )
+        description = _optional_object_str(group, "description") or ""
+        max_items = _optional_object_int(group, "max_items") or 8
+        groups.append(
+            DashboardMetricGroup(
+                group_id=group_id,
+                title=title,
+                description=description,
+                metric_path_prefixes=metric_path_prefixes,
+                max_items=max_items,
+            )
+        )
+    return tuple(groups)
+
+
+def _optional_pinned_nodes(payload: object) -> tuple[DashboardPinnedNode, ...]:
+    raw_nodes = _optional_object_sequence(payload, "pinned_nodes")
+    if raw_nodes is None:
+        return ()
+    nodes: list[DashboardPinnedNode] = []
+    for node in raw_nodes:
+        nodes.append(
+            DashboardPinnedNode(
+                node_id=_required_object_str(node, "node_id"),
+                title=_required_object_str(node, "title"),
+                description=_optional_object_str(node, "description") or "",
+            )
+        )
+    return tuple(nodes)
+
+
+def _optional_custom_views(payload: object) -> tuple[DashboardCustomView, ...]:
+    raw_views = _optional_object_sequence(payload, "custom_views")
+    if raw_views is None:
+        return ()
+    views: list[DashboardCustomView] = []
+    for view in raw_views:
+        kind = _required_object_str(view, "kind")
+        row_source = _required_object(view, "row_source")
+        raw_columns = _optional_object_sequence(view, "columns")
+        if not raw_columns:
+            raise EntrypointLoadError("Project catalog custom views require columns.")
+        columns: list[DashboardTableColumn] = []
+        for column in raw_columns:
+            selector_payload = _required_object(column, "selector")
+            columns.append(
+                DashboardTableColumn(
+                    column_id=_required_object_str(column, "column_id"),
+                    title=_required_object_str(column, "title"),
+                    description=_optional_object_str(column, "description") or "",
+                    selector=DashboardValueSelector(
+                        kind=_required_object_str(selector_payload, "kind"),
+                        path=_optional_object_str(selector_payload, "path"),
+                        node_id=_optional_object_str(selector_payload, "node_id"),
+                        event_type=_optional_object_str(selector_payload, "event_type"),
+                    ),
+                )
+            )
+        views.append(
+            DashboardCustomView(
+                view_id=_required_object_str(view, "view_id"),
+                title=_required_object_str(view, "title"),
+                description=_optional_object_str(view, "description") or "",
+                kind=kind,
+                row_source=DashboardTableRowSource(
+                    kind=_required_object_str(row_source, "kind"),
+                    node_id=_required_object_str(row_source, "node_id"),
+                    items_path=_required_object_str(row_source, "items_path"),
+                    loop_node_id=_optional_object_str(row_source, "loop_node_id"),
+                ),
+                columns=tuple(columns),
+            )
+        )
+    return tuple(views)
+
+
+def _optional_object_sequence(payload: object, field_name: str) -> tuple[object, ...] | None:
+    if isinstance(payload, dict):
+        value = payload.get(field_name)
+    else:
+        value = getattr(payload, field_name, None)
+    if value is None:
+        return None
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+        raise EntrypointLoadError(
+            f"Project catalog spec entry field {field_name!r} must be a sequence."
+        )
+    return tuple(cast(object, item) for item in value)
+
+
+def _required_object(payload: object, field_name: str) -> object:
+    if isinstance(payload, dict):
+        value = payload.get(field_name)
+    else:
+        value = getattr(payload, field_name, None)
+    if value is None:
+        raise EntrypointLoadError(
+            f"Project catalog spec entry is missing required field {field_name!r}."
+        )
+    return cast(object, value)
+
+
+def _optional_object_int(payload: object, field_name: str) -> int | None:
+    if isinstance(payload, dict):
+        value = payload.get(field_name)
+    else:
+        value = getattr(payload, field_name, None)
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    raise EntrypointLoadError(
+        f"Project catalog spec entry field {field_name!r} must be an integer."
+    )
+
+
 def _slugify(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return normalized or "entry"
@@ -292,6 +472,34 @@ def _catalog_entry_from_external_spec(
         spec_path=spec_path,
         graph_id=graph_id,
         invocation_name=invocation_name or resolved_invocation_name or "verify",
+        catalog_source="module-provider",
+        category=category,
+        tags=(category,),
+    )
+
+
+def _catalog_entry_from_declared_spec(
+    *,
+    spec_id: str,
+    spec_path: Path,
+    graph_id: str,
+    invocation_name: str | None,
+    category: str,
+    description: str,
+) -> DashboardCatalogEntry:
+    if not spec_path.is_file():
+        raise EntrypointLoadError(f"Spec file not found: {spec_path}")
+    if invocation_name is None:
+        raise EntrypointLoadError(
+            "Project catalog spec entries that declare graph_id must also declare invocation_name."
+        )
+    return DashboardCatalogEntry(
+        spec_id=spec_id,
+        label=spec_path.stem,
+        description=description,
+        spec_path=spec_path,
+        graph_id=graph_id,
+        invocation_name=invocation_name,
         catalog_source="module-provider",
         category=category,
         tags=(category,),

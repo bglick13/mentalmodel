@@ -566,6 +566,12 @@ pre,
   align-items: start;
 }
 
+/* Custom Views: main table is primary; view picker is a slim rail (overview-layout defaults put 1fr first). */
+.custom-views-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+  align-items: start;
+}
+
 .launch-hint {
   margin: 0 0 12px;
   font-size: 0.82rem;
@@ -2067,4 +2073,121 @@ button.trace-row-card.active {
 .exec-detail-io-block .exec-detail-pre-nested {
   max-height: min(36vh, 280px);
   overflow: auto;
+}
+
+.panel-copy {
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.custom-view-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.custom-view-table-hint {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.custom-view-table-wrap {
+  max-height: min(72vh, 720px);
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(12, 14, 22, 0.35);
+  overflow: auto;
+}
+
+.custom-view-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.custom-view-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgba(18, 21, 32, 0.92);
+  backdrop-filter: blur(8px);
+}
+
+.custom-view-table th {
+  padding: 10px 12px;
+  font-size: 0.65rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+}
+
+.custom-view-table th.custom-view-col.numeric {
+  text-align: right;
+}
+
+.custom-view-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.custom-view-table tbody tr.custom-view-row {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.custom-view-table tbody tr.custom-view-row:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.custom-view-table tbody tr.custom-view-row:hover {
+  background: rgba(120, 160, 255, 0.07);
+}
+
+.custom-view-table tbody tr.custom-view-row:focus-visible {
+  outline: 2px solid rgba(120, 160, 255, 0.55);
+  outline-offset: -2px;
+}
+
+.custom-view-table tbody tr.custom-view-row.selected {
+  background: rgba(120, 160, 255, 0.11);
+  box-shadow: inset 3px 0 0 0 rgba(120, 170, 255, 0.85);
+}
+
+.custom-view-table th,
+.custom-view-table td {
+  vertical-align: top;
+}
+
+.custom-view-col.narrative {
+  width: 36%;
+}
+
+.custom-view-col.numeric {
+  width: 7rem;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.custom-view-cell {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+  overflow: hidden;
+}
+
+.custom-view-cell.text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.custom-view-cell.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }

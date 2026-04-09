@@ -200,6 +200,21 @@ def create_dashboard_app(
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/api/catalog/{spec_id}/runs/{run_id}/views/{view_id}", response_model=None)
+    def run_custom_view(
+        spec_id: str,
+        run_id: str,
+        view_id: str,
+    ) -> object:
+        try:
+            return service.get_run_custom_view(
+                spec_id=spec_id,
+                run_id=run_id,
+                view_id=view_id,
+            )
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/api/runs/{graph_id}/{run_id}/graph", response_model=None)
     def run_graph(graph_id: str, run_id: str) -> object:
         try:

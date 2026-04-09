@@ -12,6 +12,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.remote import (
     InMemoryArtifactStore,
     InMemoryManifestIndex,
@@ -20,12 +21,79 @@ from mentalmodel.remote import (
     RemoteRunStore,
     build_run_bundle_upload,
 )
+from mentalmodel.runtime.runs import RUN_SCHEMA_VERSION
 from mentalmodel.testing import run_verification
 from mentalmodel.ui.api import create_dashboard_app
 from mentalmodel.ui.catalog import DashboardCatalogEntry, default_dashboard_catalog
+from mentalmodel.ui.custom_views import (
+    DashboardCustomView,
+    DashboardTableColumn,
+    DashboardTableRowSource,
+    DashboardValueSelector,
+)
+from mentalmodel.ui.execution_worker import WORKER_EVENT_PREFIX
 
 
 class DashboardApiTest(unittest.TestCase):
+    def _materialize_custom_view_run(
+        self,
+        root: Path,
+    ) -> tuple[str, str]:
+        graph_id = "custom_view_graph"
+        run_id = "run-custom-view"
+        run_dir = root / ".runs" / graph_id / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_json(
+            run_dir / "summary.json",
+            {
+                "schema_version": RUN_SCHEMA_VERSION,
+                "graph_id": graph_id,
+                "run_id": run_id,
+                "created_at_ms": 1000,
+                "success": True,
+                "node_count": 2,
+                "edge_count": 0,
+                "record_count": 1,
+                "output_count": 2,
+                "state_count": 0,
+                "trace_sink_configured": False,
+                "trace_mode": "disk",
+                "trace_mirror_to_disk": True,
+                "trace_capture_local_spans": True,
+                "trace_service_name": "mentalmodel",
+                "runtime_default_profile_name": None,
+                "runtime_profile_names": [],
+            },
+        )
+        write_jsonl(run_dir / "records.jsonl", [])
+        write_json(
+            run_dir / "outputs.json",
+            {
+                "outputs": {
+                    "sample_rows": {
+                        "rows": [
+                            {
+                                "prompt_text": "Prompt A",
+                                "completion_text": "Sample A",
+                                "reward": {"pangram": 0.9, "total": 1.1},
+                            },
+                            {
+                                "prompt_text": "Prompt B",
+                                "completion_text": "Sample B",
+                                "reward": {"pangram": 0.7, "total": 0.8},
+                            },
+                        ]
+                    },
+                    "summary_node": {
+                        "run_label": "synthetic",
+                    },
+                },
+                "framed_outputs": [],
+            },
+        )
+        write_json(run_dir / "state.json", {"state": {}, "framed_state": []})
+        return graph_id, run_id
+
     def test_dashboard_api_accepts_custom_catalog_entries(self) -> None:
         fixture_entry = default_dashboard_catalog()[0]
         custom_entry = DashboardCatalogEntry(
@@ -145,6 +213,80 @@ class DashboardApiTest(unittest.TestCase):
             self.assertEqual(records_response.status_code, 200)
             records = records_response.json()["records"]
             self.assertGreater(len(records), 0)
+
+    def test_dashboard_custom_view_endpoint_evaluates_table_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs_dir = Path(tmpdir)
+            graph_id, run_id = self._materialize_custom_view_run(runs_dir)
+            fixture_entry = default_dashboard_catalog()[0]
+            custom_entry = DashboardCatalogEntry(
+                spec_id="custom-view-entry",
+                label="Custom View Entry",
+                description="Synthetic custom table view entry.",
+                spec_path=fixture_entry.spec_path,
+                graph_id=graph_id,
+                invocation_name="custom_view_invocation",
+                category="integration",
+                custom_views=(
+                    DashboardCustomView(
+                        view_id="sample-quality",
+                        title="Sample Quality",
+                        description="Prompt and reward table.",
+                        kind="table",
+                        row_source=DashboardTableRowSource(
+                            kind="node_output_items",
+                            node_id="sample_rows",
+                            items_path="rows",
+                        ),
+                        columns=(
+                            DashboardTableColumn(
+                                column_id="prompt_text",
+                                title="Prompt",
+                                selector=DashboardValueSelector(
+                                    kind="row_item",
+                                    path="prompt_text",
+                                ),
+                            ),
+                            DashboardTableColumn(
+                                column_id="pangram_score",
+                                title="Pangram",
+                                selector=DashboardValueSelector(
+                                    kind="row_item",
+                                    path="reward.pangram",
+                                ),
+                            ),
+                            DashboardTableColumn(
+                                column_id="run_label",
+                                title="Run Label",
+                                selector=DashboardValueSelector(
+                                    kind="node_output",
+                                    node_id="summary_node",
+                                    path="run_label",
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            client = TestClient(
+                create_dashboard_app(
+                    runs_dir=runs_dir,
+                    frontend_dist=None,
+                    catalog_entries=(custom_entry,),
+                )
+            )
+
+            response = client.get(
+                f"/api/catalog/{custom_entry.spec_id}/runs/{run_id}/views/sample-quality"
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["view"]["view_id"], "sample-quality")
+            self.assertEqual(payload["row_count"], 2)
+            self.assertEqual(payload["rows"][0]["values"]["prompt_text"], "Prompt A")
+            self.assertEqual(payload["rows"][0]["values"]["pangram_score"], 0.9)
+            self.assertEqual(payload["rows"][1]["values"]["run_label"], "synthetic")
+            self.assertEqual(payload["warnings"], [])
 
     def test_dashboard_registers_spec_from_absolute_path(self) -> None:
         fixture_path = Path(__file__).resolve().parents[1] / Path(
@@ -323,7 +465,7 @@ class DashboardApiTest(unittest.TestCase):
             "success": True,
             "runtime": {
                 "success": True,
-                "record_count": 0,
+                "record_count": 1,
                 "output_count": 0,
                 "state_count": 0,
                 "run_id": None,
@@ -337,17 +479,47 @@ class DashboardApiTest(unittest.TestCase):
             "property_checks": [],
             "graph_id": "pangramanizer_training_real_verify3",
         }
+        live_record = {
+            "timestamp_ms": 1234,
+            "node_id": "rollout_join",
+            "frame_id": "root",
+            "event": "node_completed",
+        }
+
         class FakePopen:
             def __init__(self, args: list[str], **_: object) -> None:
                 self.args = args
-                self.stdout = io.StringIO("Your Tinker SDK version is outdated.\n")
+                self.stdout = io.StringIO(
+                    "\n".join(
+                        (
+                            "Your Tinker SDK version is outdated.",
+                            WORKER_EVENT_PREFIX
+                            + json.dumps(
+                                {
+                                    "kind": "record",
+                                    "payload": live_record,
+                                }
+                            ),
+                            WORKER_EVENT_PREFIX
+                            + json.dumps(
+                                {
+                                    "kind": "completion",
+                                    "payload": payload,
+                                }
+                            ),
+                        )
+                    )
+                    + "\n"
+                )
                 self.stderr = io.StringIO("")
 
             def wait(self) -> int:
-                Path(self.args[-1]).write_text(json.dumps(payload), encoding="utf-8")
                 return 0
 
-        with patch("mentalmodel.ui.service.subprocess.Popen", side_effect=FakePopen) as popen:
+        with patch(
+            "mentalmodel.ui.execution_worker.subprocess.Popen",
+            side_effect=FakePopen,
+        ) as popen:
             launch = client.post("/api/executions", json={"spec_id": "pangram-real-verify3"})
             self.assertEqual(launch.status_code, 200)
             execution_id = launch.json()["execution_id"]
@@ -363,6 +535,8 @@ class DashboardApiTest(unittest.TestCase):
                 for message in execution["messages"]
             )
         )
+        self.assertEqual(len(execution["records"]), 1)
+        self.assertEqual(execution["records"][0]["node_id"], "rollout_join")
         popen.assert_called_once()
 
     def test_external_spec_path_registration_and_execution_use_subprocess(self) -> None:
@@ -448,31 +622,50 @@ class DashboardApiTest(unittest.TestCase):
             class FakePopen:
                 def __init__(self, args: list[str], **_: object) -> None:
                     self.args = args
-                    self.stdout = io.StringIO("external verification is starting\n")
+                    self.stdout = io.StringIO(
+                        "\n".join(
+                            (
+                                "external verification is starting",
+                                WORKER_EVENT_PREFIX
+                                + json.dumps(
+                                    {
+                                        "kind": "record",
+                                        "payload": {
+                                            "timestamp_ms": 999,
+                                            "node_id": "rollout_join",
+                                            "frame_id": "root",
+                                            "event": "node_completed",
+                                        },
+                                    }
+                                ),
+                                WORKER_EVENT_PREFIX
+                                + json.dumps(
+                                    {
+                                        "kind": "completion",
+                                        "payload": verification_payload,
+                                    }
+                                ),
+                            )
+                        )
+                        + "\n"
+                    )
                     self.stderr = io.StringIO("")
 
                 def wait(self) -> int:
-                    Path(self.args[-1]).write_text(
-                        json.dumps(verification_payload),
-                        encoding="utf-8",
-                    )
                     return 0
 
             with (
                 patch("mentalmodel.ui.service.subprocess.run") as run_subprocess,
-                patch("mentalmodel.ui.service.subprocess.Popen", side_effect=FakePopen),
+                patch(
+                    "mentalmodel.ui.execution_worker.subprocess.Popen",
+                    side_effect=FakePopen,
+                ),
             ):
                 run_subprocess.side_effect = [
                     subprocess.CompletedProcess(
                         args=[],
                         returncode=0,
                         stdout=json.dumps(metadata),
-                        stderr="",
-                    ),
-                    subprocess.CompletedProcess(
-                        args=[],
-                        returncode=0,
-                        stdout=json.dumps(verification_payload),
                         stderr="",
                     ),
                 ]
@@ -495,6 +688,7 @@ class DashboardApiTest(unittest.TestCase):
                     for message in execution["messages"]
                 )
             )
+            self.assertEqual(len(execution["records"]), 1)
             runs_response = client.get(
                 "/api/runs",
                 params={

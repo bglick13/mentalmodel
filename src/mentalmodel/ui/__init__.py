@@ -7,6 +7,12 @@ from mentalmodel.ui.catalog import (
     load_dashboard_catalog_subject,
     validate_dashboard_catalog,
 )
+from mentalmodel.ui.custom_views import (
+    DashboardCustomView,
+    DashboardTableColumn,
+    DashboardTableRowSource,
+    DashboardValueSelector,
+)
 from mentalmodel.ui.service import DashboardExecutionSession, DashboardService
 from mentalmodel.ui.workspace import (
     flatten_project_catalogs,
@@ -16,8 +22,12 @@ from mentalmodel.ui.workspace import (
 
 __all__ = [
     "DashboardCatalogEntry",
+    "DashboardCustomView",
     "DashboardMetricGroup",
     "DashboardPinnedNode",
+    "DashboardTableColumn",
+    "DashboardTableRowSource",
+    "DashboardValueSelector",
     "DashboardExecutionSession",
     "DashboardService",
     "create_dashboard_app",

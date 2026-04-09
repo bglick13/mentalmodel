@@ -12,6 +12,36 @@ export type PinnedNode = {
   description: string;
 };
 
+export type TableRowSource = {
+  kind: string;
+  node_id: string;
+  items_path: string;
+  loop_node_id: string | null;
+};
+
+export type ValueSelector = {
+  kind: string;
+  path: string | null;
+  node_id: string | null;
+  event_type: string | null;
+};
+
+export type TableColumn = {
+  column_id: string;
+  title: string;
+  description: string;
+  selector: ValueSelector;
+};
+
+export type CustomView = {
+  view_id: string;
+  title: string;
+  description: string;
+  kind: string;
+  row_source: TableRowSource;
+  columns: TableColumn[];
+};
+
 export type CatalogEntry = {
   spec_id: string;
   label: string;
@@ -27,6 +57,7 @@ export type CatalogEntry = {
   default_loop_node_id: string | null;
   metric_groups: MetricGroup[];
   pinned_nodes: PinnedNode[];
+  custom_views: CustomView[];
 };
 
 export type AnalysisFinding = {
@@ -196,6 +227,21 @@ export type RunOverview = {
   graph: GraphPayload;
   metrics: NumericMetric[];
   invariants: InvariantOverview[];
+};
+
+export type EvaluatedCustomViewRow = {
+  row_id: string;
+  frame_id: string | null;
+  loop_node_id: string | null;
+  iteration_index: number | null;
+  values: Record<string, unknown>;
+};
+
+export type EvaluatedCustomView = {
+  view: CustomView;
+  row_count: number;
+  rows: EvaluatedCustomViewRow[];
+  warnings: string[];
 };
 
 /** Coarse bucket for span coloring / icons (from ``mentalmodel.node.kind``). */

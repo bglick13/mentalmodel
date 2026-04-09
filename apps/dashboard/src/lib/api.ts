@@ -1,6 +1,7 @@
 import type {
   CatalogGraphPayload,
   CatalogEntry,
+  EvaluatedCustomView,
   ExecutionSession,
   NodeDetail,
   ReplayReport,
@@ -137,6 +138,16 @@ export async function fetchRunOverview(
   runId: string,
 ): Promise<RunOverview> {
   return request(`/api/runs/${graphId}/${runId}/overview`);
+}
+
+export async function fetchRunCustomView(
+  specId: string,
+  runId: string,
+  viewId: string,
+): Promise<EvaluatedCustomView> {
+  return request(
+    `/api/catalog/${encodeURIComponent(specId)}/runs/${encodeURIComponent(runId)}/views/${encodeURIComponent(viewId)}`,
+  );
 }
 
 export async function fetchRunReplay(

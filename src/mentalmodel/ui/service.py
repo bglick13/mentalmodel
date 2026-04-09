@@ -3,14 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TextIO, cast
+from typing import cast
 
 from mentalmodel.analysis import AnalysisReport, run_analysis
 from mentalmodel.core.interfaces import JsonValue
@@ -53,6 +52,12 @@ from mentalmodel.ui.catalog import (
     default_dashboard_catalog,
     validate_dashboard_catalog,
 )
+from mentalmodel.ui.custom_views import DashboardCustomView, evaluate_custom_view
+from mentalmodel.ui.execution_worker import (
+    ProjectExecutionWorker,
+    SubprocessProjectExecutionWorker,
+    WorkerExecutionEvent,
+)
 from mentalmodel.ui.workspace import flatten_project_catalogs
 
 
@@ -75,13 +80,17 @@ class DashboardExecutionSession:
 
     def on_record(self, record: ExecutionRecord) -> None:
         payload = execution_record_to_json(record)
+        self.on_record_payload(payload)
+
+    def on_record_payload(self, payload: dict[str, JsonValue]) -> None:
+        record_payload = dict(payload)
         with self._lock:
-            sequence = _record_sequence(payload)
+            sequence = _record_sequence(record_payload)
             if sequence <= 0:
                 sequence = self._next_sequence
-                payload["sequence"] = sequence
+                record_payload["sequence"] = sequence
             self._next_sequence = max(self._next_sequence, sequence + 1)
-            self.records.append(payload)
+            self.records.append(record_payload)
             if self.status == "pending":
                 self.status = "running"
 
@@ -184,9 +193,15 @@ class DashboardService:
         catalog_entries: Sequence[DashboardCatalogEntry] | None = None,
         project_catalogs: Sequence[ProjectCatalog] | None = None,
         remote_run_store: RemoteRunStore | None = None,
+        project_execution_worker: ProjectExecutionWorker | None = None,
     ) -> None:
         self.runs_dir = runs_dir
         self.remote_run_store = remote_run_store
+        self._project_execution_worker = (
+            project_execution_worker
+            if project_execution_worker is not None
+            else SubprocessProjectExecutionWorker()
+        )
         self._project_catalogs = tuple(project_catalogs or ())
         self._project_catalog_by_id = {
             catalog.project.project_id: catalog
@@ -378,6 +393,24 @@ class DashboardService:
                 if node.invariant_status is not None
             ]),
         }
+
+    def get_run_custom_view(
+        self,
+        *,
+        spec_id: str,
+        run_id: str,
+        view_id: str,
+    ) -> dict[str, JsonValue]:
+        entry = self._resolve_entry(spec_id)
+        view = _resolve_custom_view(entry, view_id)
+        history_runs_dir = self._history_runs_dir(graph_id=entry.graph_id, run_id=run_id)
+        evaluated = evaluate_custom_view(
+            runs_dir=history_runs_dir,
+            graph_id=entry.graph_id,
+            run_id=run_id,
+            view=view,
+        )
+        return _as_json_object(evaluated.as_dict())
 
     def get_run_records(
         self,
@@ -622,107 +655,20 @@ class DashboardService:
         session: DashboardExecutionSession,
         run_target: ProjectRunTarget,
     ) -> dict[str, object]:
-        runs_dir_arg = (
-            "-"
-            if run_target.runs_dir is None
-            else str(run_target.runs_dir.expanduser().resolve())
-        )
-        result_file = tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            suffix=".json",
-            delete=False,
-        )
-        result_path = Path(result_file.name)
-        result_file.close()
         session.add_message(
             level="info",
             message=f"Launching external verification in {root_dir}",
         )
-        command = [
-            "uv",
-            "run",
-            "--directory",
-            str(root_dir),
-            "python",
-            "-c",
-            _EXTERNAL_VERIFY_SCRIPT,
-            str(entry.spec_path),
-            runs_dir_arg,
-            str(result_path),
-        ]
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+        result = self._project_execution_worker.execute(
+            spec_path=entry.spec_path,
+            root_dir=root_dir,
+            run_target=run_target,
+            on_event=lambda event: self._apply_worker_event(
+                session=session,
+                event=event,
+            ),
         )
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-
-        def _drain_pipe(
-            pipe: object,
-            *,
-            level: str,
-            collector: list[str],
-        ) -> None:
-            stream = cast(TextIO | None, pipe)
-            if stream is None:
-                return
-            try:
-                for raw_line in stream:
-                    line = raw_line.rstrip()
-                    if not line:
-                        continue
-                    collector.append(line)
-                    session.add_message(level=level, message=line)
-            finally:
-                stream.close()
-
-        stdout_thread = threading.Thread(
-            target=_drain_pipe,
-            kwargs={
-                "pipe": process.stdout,
-                "level": "info",
-                "collector": stdout_lines,
-            },
-            daemon=True,
-        )
-        stderr_thread = threading.Thread(
-            target=_drain_pipe,
-            kwargs={
-                "pipe": process.stderr,
-                "level": "error",
-                "collector": stderr_lines,
-            },
-            daemon=True,
-        )
-        stdout_thread.start()
-        stderr_thread.start()
-        returncode = process.wait()
-        stdout_thread.join()
-        stderr_thread.join()
-        try:
-            if returncode != 0:
-                message = (
-                    "\n".join(stderr_lines[-10:])
-                    or "\n".join(stdout_lines[-10:])
-                    or f"External project command failed with exit code {returncode}."
-                )
-                raise DashboardCatalogError(message)
-            if not result_path.is_file():
-                raise DashboardCatalogError(
-                    "External verification did not produce a result payload."
-                )
-            decoded = json.loads(result_path.read_text(encoding="utf-8"))
-        finally:
-            result_path.unlink(missing_ok=True)
-        if not isinstance(decoded, dict):
-            raise DashboardCatalogError(
-                "External verification helper must return a JSON object."
-            )
-        return cast(dict[str, object], decoded)
+        return cast(dict[str, object], result.payload)
 
     def _run_target_for_entry(
         self,
@@ -895,6 +841,37 @@ class DashboardService:
                     )
                 )
         return metrics
+
+    def _apply_worker_event(
+        self,
+        *,
+        session: DashboardExecutionSession,
+        event: WorkerExecutionEvent,
+    ) -> None:
+        if event.kind == "record":
+            session.on_record_payload(event.payload)
+            return
+        if event.kind == "message":
+            message = event.payload.get("message")
+            if not isinstance(message, str) or not message:
+                return
+            level = event.payload.get("level")
+            source = event.payload.get("source")
+            session.add_message(
+                level=level if isinstance(level, str) else "info",
+                message=message,
+                source=source if isinstance(source, str) else "project-worker",
+            )
+            return
+        if event.kind == "lifecycle":
+            status = event.payload.get("status")
+            if isinstance(status, str) and status:
+                session.add_message(
+                    level="info",
+                    message=f"External run status: {status}",
+                    source="project-worker",
+                )
+            return
 
     def _available_frames(
         self,
@@ -1232,6 +1209,18 @@ def _message_sequence(message: dict[str, JsonValue]) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _resolve_custom_view(
+    entry: DashboardCatalogEntry,
+    view_id: str,
+) -> DashboardCustomView:
+    for view in entry.custom_views:
+        if view.view_id == view_id:
+            return view
+    raise DashboardCatalogError(
+        f"Unknown custom view {view_id!r} for dashboard entry {entry.spec_id!r}."
+    )
+
+
 def _as_json_object(value: object) -> dict[str, JsonValue]:
     json_value = _as_json_value(value)
     if not isinstance(json_value, dict):
@@ -1311,36 +1300,4 @@ print(
         }
     )
 )
-""".strip()
-
-
-_EXTERNAL_VERIFY_SCRIPT = """
-import json
-import sys
-from pathlib import Path
-
-from mentalmodel.invocation import (
-    load_runtime_environment_subject,
-    load_workflow_subject,
-    read_verify_invocation_spec,
-)
-from mentalmodel.testing import run_verification
-
-spec_path = Path(sys.argv[1])
-runs_dir_arg = sys.argv[2]
-runs_result_path = Path(sys.argv[3])
-runs_dir = None if runs_dir_arg == "-" else Path(runs_dir_arg)
-invocation = read_verify_invocation_spec(spec_path)
-module, program = load_workflow_subject(invocation.program)
-environment = None
-if invocation.environment is not None:
-    _, environment = load_runtime_environment_subject(invocation.environment)
-report = run_verification(
-    program,
-    module=module,
-    runs_dir=runs_dir or invocation.runs_dir,
-    environment=environment,
-    invocation_name=invocation.invocation_name,
-)
-runs_result_path.write_text(json.dumps(report.as_dict()), encoding="utf-8")
 """.strip()

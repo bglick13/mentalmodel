@@ -20,6 +20,7 @@ import {
   fetchCatalogGraph,
   fetchExecution,
   fetchNodeDetail,
+  fetchRunCustomView,
   fetchRunOverview,
   fetchRunRecords,
   fetchRunReplay,
@@ -45,6 +46,9 @@ import { buildSpanViews } from "./lib/traceSpan";
 import type {
   AnalysisFinding,
   CatalogEntry,
+  EvaluatedCustomView,
+  EvaluatedCustomViewRow,
+  ExecutionMessage,
   ExecutionRecord,
   ExecutionSession,
   GenericSpan,
@@ -57,6 +61,7 @@ import type {
   ReplayReport,
   RunOverview,
   RunSummary,
+  TableColumn,
   TimeseriesResponse,
 } from "./types";
 
@@ -71,6 +76,7 @@ type MetricGroupView = {
 
 type ViewId =
   | "overview"
+  | "views"
   | "graph"
   | "node"
   | "spans"
@@ -86,6 +92,7 @@ const VIEWS: Array<{
   label: string;
 }> = [
   { id: "overview", label: "Overview" },
+  { id: "views", label: "Views" },
   { id: "graph", label: "Graph" },
   { id: "node", label: "Node" },
   { id: "spans", label: "Records" },
@@ -211,6 +218,13 @@ function App() {
   const [activeExecution, setActiveExecution] = useState<ExecutionSession | null>(
     null,
   );
+  const [activeCustomView, setActiveCustomView] =
+    useState<EvaluatedCustomView | null>(null);
+  const [selectedCustomViewId, setSelectedCustomViewId] = useState<string | null>(
+    null,
+  );
+  const [customViewLoading, setCustomViewLoading] = useState(false);
+  const [customViewError, setCustomViewError] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedFrameId, setSelectedFrameId] = useState<string | null>(null);
   const [nodeDetail, setNodeDetail] = useState<NodeDetail | null>(null);
@@ -273,6 +287,10 @@ function App() {
     }
     setCustomSpecPath(selectedCatalog.spec_path);
   }, [selectedCatalog?.spec_id, selectedCatalog?.spec_path]);
+
+  useEffect(() => {
+    setSelectedCustomViewId(selectedCatalog?.custom_views[0]?.view_id ?? null);
+  }, [selectedCatalog?.spec_id, selectedCatalog?.custom_views]);
 
   const exploreNodeIdRef = useRef(exploreNodeId);
   exploreNodeIdRef.current = exploreNodeId;
@@ -509,6 +527,55 @@ function App() {
       cancelled = true;
     };
   }, [selectedCatalog, activeRun?.summary.run_id, exploreRunId]);
+
+  useEffect(() => {
+    if (
+      !selectedCatalog ||
+      !activeRun ||
+      exploreRunId == null ||
+      selectedCustomViewId == null
+    ) {
+      setActiveCustomView(null);
+      setCustomViewError(null);
+      setCustomViewLoading(false);
+      return;
+    }
+    if (activeRun.summary.run_id !== exploreRunId) {
+      return;
+    }
+    let cancelled = false;
+    setCustomViewLoading(true);
+    void fetchRunCustomView(
+      selectedCatalog.spec_id,
+      activeRun.summary.run_id,
+      selectedCustomViewId,
+    )
+      .then((payload) => {
+        if (!cancelled) {
+          setActiveCustomView(payload);
+          setCustomViewError(null);
+        }
+      })
+      .catch((customViewFetchError: unknown) => {
+        if (!cancelled) {
+          setActiveCustomView(null);
+          setCustomViewError(String(customViewFetchError));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCustomViewLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedCatalog,
+    activeRun?.summary.run_id,
+    exploreRunId,
+    selectedCustomViewId,
+  ]);
 
   useEffect(() => {
     if (!explorerUrlHydratedRef.current || catalog.length === 0) {
@@ -980,6 +1047,7 @@ function App() {
 
         {        renderCurrentView({
           activeExecution,
+          activeCustomView,
           activeRun,
           activeReplay,
           activeView,
@@ -991,6 +1059,9 @@ function App() {
           graphFindings,
           handleRun,
           handleRunFromPath,
+          customViewError,
+          customViewLoading,
+          liveMessages,
           liveRecords,
           metricGroups,
           nodeDetail,
@@ -1000,6 +1071,7 @@ function App() {
           runsForExplorerList: runsForExplorerDropdown,
           selectNodeAndExplorer,
           selectedCatalog,
+          selectedCustomViewId,
           selectedFrameId,
           selectedNodeEdges,
           selectedNodeId,
@@ -1008,6 +1080,7 @@ function App() {
           selectedNodeSummary,
           setActiveView,
           setCatalog,
+          setSelectedCustomViewId,
           setExploreRunId,
           setSelectedFrameId,
           setSelectedNodeId,
@@ -1030,6 +1103,7 @@ function App() {
 
 function renderCurrentView({
   activeExecution,
+  activeCustomView,
   activeRun,
   activeReplay,
   activeView,
@@ -1041,6 +1115,9 @@ function renderCurrentView({
   graphFindings,
   handleRun,
   handleRunFromPath,
+  customViewError,
+  customViewLoading,
+  liveMessages,
   liveRecords,
   metricGroups,
   nodeDetail,
@@ -1050,6 +1127,7 @@ function renderCurrentView({
   runsForExplorerList,
   selectNodeAndExplorer,
   selectedCatalog,
+  selectedCustomViewId,
   selectedFrameId,
   selectedNodeEdges,
   selectedNodeId,
@@ -1058,6 +1136,7 @@ function renderCurrentView({
   selectedNodeSummary,
   setActiveView,
   setCatalog,
+  setSelectedCustomViewId,
   setExploreRunId,
   setSelectedFrameId,
   setSelectedNodeId,
@@ -1074,6 +1153,7 @@ function renderCurrentView({
   timeseriesLoading,
 }: {
   activeExecution: ExecutionSession | null;
+  activeCustomView: EvaluatedCustomView | null;
   activeRun: RunOverview | null;
   activeReplay: ReplayReport | null;
   activeView: ViewId;
@@ -1085,6 +1165,9 @@ function renderCurrentView({
   graphFindings: AnalysisFinding[];
   handleRun: (specId: string) => Promise<void>;
   handleRunFromPath: (specPath: string) => Promise<void>;
+  customViewError: string | null;
+  customViewLoading: boolean;
+  liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
   metricGroups: MetricGroupView[];
   nodeDetail: NodeDetail | null;
@@ -1094,6 +1177,7 @@ function renderCurrentView({
   runsForExplorerList: RunSummary[];
   selectNodeAndExplorer: (nodeId: string, frameId?: string | null) => void;
   selectedCatalog: CatalogEntry | null;
+  selectedCustomViewId: string | null;
   selectedFrameId: string | null;
   selectedNodeEdges: { upstream: GraphEdge[]; downstream: GraphEdge[] };
   selectedNodeId: string | null;
@@ -1102,6 +1186,7 @@ function renderCurrentView({
   selectedNodeSummary: ReplayNodeSummary | null;
   setActiveView: (view: ViewId) => void;
   setCatalog: (entries: CatalogEntry[]) => void;
+  setSelectedCustomViewId: (viewId: string | null) => void;
   setExploreRunId: (runId: string | null) => void;
   setSelectedFrameId: (frameId: string | null) => void;
   setSelectedNodeId: (nodeId: string | null) => void;
@@ -1127,6 +1212,7 @@ function renderCurrentView({
           explorerRecordsInWindowCount={explorerRecordsInWindowCount}
           graphFindings={graphFindings}
           handleRun={handleRun}
+          liveMessages={liveMessages}
           liveRecords={liveRecords}
           metricGroups={metricGroups}
           recentRunSuccessLabel={recentRunSuccessLabel}
@@ -1141,6 +1227,19 @@ function renderCurrentView({
           timeseriesError={timeseriesError}
           timeseriesLoading={timeseriesLoading}
           warningInvariantCount={warningInvariantCount}
+        />
+      );
+    case "views":
+      return (
+        <CustomViewsView
+          activeCustomView={activeCustomView}
+          activeRun={activeRun}
+          customViewError={customViewError}
+          customViewLoading={customViewLoading}
+          runContext={runContext}
+          selectedCatalog={selectedCatalog}
+          selectedCustomViewId={selectedCustomViewId}
+          setSelectedCustomViewId={setSelectedCustomViewId}
         />
       );
     case "graph":
@@ -1217,6 +1316,7 @@ function OverviewView({
   explorerRecordsInWindowCount,
   graphFindings,
   handleRun,
+  liveMessages,
   liveRecords,
   metricGroups,
   recentRunSuccessLabel,
@@ -1238,6 +1338,7 @@ function OverviewView({
   explorerRecordsInWindowCount: number;
   graphFindings: AnalysisFinding[];
   handleRun: (specId: string) => Promise<void>;
+  liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
   metricGroups: MetricGroupView[];
   recentRunSuccessLabel: string;
@@ -1472,6 +1573,190 @@ function OverviewView({
           )}
         </Panel>
       </section>
+    </>
+  );
+}
+
+function CustomViewsView({
+  activeCustomView,
+  activeRun,
+  customViewError,
+  customViewLoading,
+  runContext,
+  selectedCatalog,
+  selectedCustomViewId,
+  setSelectedCustomViewId,
+}: {
+  activeCustomView: EvaluatedCustomView | null;
+  activeRun: RunOverview | null;
+  customViewError: string | null;
+  customViewLoading: boolean;
+  runContext: ScopeToken[];
+  selectedCatalog: CatalogEntry | null;
+  selectedCustomViewId: string | null;
+  setSelectedCustomViewId: (viewId: string | null) => void;
+}) {
+  const availableViews = selectedCatalog?.custom_views ?? [];
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedRowId(null);
+  }, [activeCustomView?.view.view_id, activeRun?.summary.run_id]);
+
+  const selectedRow = useMemo(() => {
+    if (!activeCustomView || !selectedRowId) {
+      return null;
+    }
+    return activeCustomView.rows.find((r) => r.row_id === selectedRowId) ?? null;
+  }, [activeCustomView, selectedRowId]);
+
+  const selectedRowIndex =
+    selectedRow && activeCustomView
+      ? activeCustomView.rows.findIndex((r) => r.row_id === selectedRow.row_id)
+      : -1;
+
+  return (
+    <>
+      <RunContextStrip tokens={runContext} />
+      <section className="overview-layout custom-views-layout">
+        <div className="stack wide">
+          <Panel
+            title={activeCustomView?.view.title ?? "Custom View"}
+            aside={
+              activeRun ? (
+                <StatusChip label={activeRun.summary.run_id.slice(0, 12)} tone="accent" />
+              ) : null
+            }
+          >
+            {customViewError ? (
+              <EmptyState copy={customViewError} />
+            ) : customViewLoading ? (
+              <EmptyState copy="Loading evaluated run view…" />
+            ) : !activeRun ? (
+              <EmptyState copy="Pick a persisted run in Explorer to evaluate a custom view." />
+            ) : activeCustomView ? (
+              <div className="custom-view-stack">
+                {activeCustomView.view.description ? (
+                  <div className="panel-copy">{activeCustomView.view.description}</div>
+                ) : null}
+                {activeCustomView.warnings.length > 0 ? (
+                  <div className="analysis-stack">
+                    {activeCustomView.warnings.slice(0, 4).map((warning) => (
+                      <div key={warning} className="analysis-card warning">
+                        <div className="analysis-card-title">view warning</div>
+                        <div className="analysis-card-copy">{warning}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <p className="custom-view-table-hint">
+                  Click a row for the full prompt, generated text, and metrics in the side panel.
+                </p>
+                <div className="records-table-wrap custom-view-table-wrap">
+                  <table className="records-table custom-view-table">
+                    <thead>
+                      <tr>
+                        {activeCustomView.view.columns.map((column) => (
+                          <th
+                            key={column.column_id}
+                            className={customViewColumnClassName(column)}
+                          >
+                            {column.title}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {activeCustomView.rows.map((row) => (
+                        <tr
+                          key={row.row_id}
+                          className={`custom-view-row ${
+                            selectedRowId === row.row_id ? "selected" : ""
+                          }`}
+                          aria-selected={selectedRowId === row.row_id}
+                          tabIndex={0}
+                          onClick={() => setSelectedRowId(row.row_id)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              setSelectedRowId(row.row_id);
+                            }
+                          }}
+                        >
+                          {activeCustomView.view.columns.map((column) => (
+                            <td
+                              key={`${row.row_id}:${column.column_id}`}
+                              className={customViewColumnClassName(column)}
+                            >
+                              <div
+                                className={`custom-view-cell ${customViewCellTone(
+                                  row.values[column.column_id],
+                                )}`}
+                              >
+                                {formatCustomViewCellPreview(
+                                  row.values[column.column_id],
+                                  column,
+                                )}
+                              </div>
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <EmptyState copy="Select a custom view to render it for the current run." />
+            )}
+          </Panel>
+        </div>
+
+        <div className="stack narrow custom-views-rail">
+          <Panel title="Available Views">
+            {availableViews.length > 0 ? (
+              <div className="interactive-list">
+                {availableViews.map((view) => (
+                  <button
+                    key={view.view_id}
+                    className={`list-card ${
+                      selectedCustomViewId === view.view_id ? "active" : ""
+                    }`}
+                    onClick={() => setSelectedCustomViewId(view.view_id)}
+                  >
+                    <div className="list-card-head">
+                      <span>{view.title}</span>
+                      <StatusChip label={view.kind} tone="accent" />
+                    </div>
+                    <div className="list-card-copy">
+                      {view.description || "Provider-defined custom run view."}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <EmptyState copy="This spec does not declare any custom views yet." />
+            )}
+          </Panel>
+        </div>
+      </section>
+
+      {selectedRow && activeCustomView ? (
+        <ExecutionDetailDrawer
+          badge={activeCustomView.view.title}
+          heading={
+            selectedRowIndex >= 0
+              ? `${activeCustomView.view.title} · row ${selectedRowIndex + 1}`
+              : `${activeCustomView.view.title} · sample`
+          }
+          onClose={() => setSelectedRowId(null)}
+          open
+          rawJson={JSON.stringify(selectedRow, null, 2)}
+          rawTitle="Row JSON"
+          rows={customViewRowToDetailRows(selectedRow, activeCustomView.view.columns)}
+          subheading={customViewRowSubheading(selectedRow)}
+        />
+      ) : null}
     </>
   );
 }
@@ -2802,6 +3087,133 @@ function formatMetricValue(value: number) {
     return String(value);
   }
   return value.toFixed(2);
+}
+
+function normalizeCustomViewString(value: string, columnId: string): string {
+  const stripped = value
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/\*\*/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (columnId.includes("prompt") || columnId.includes("completion")) {
+    return stripped;
+  }
+  return stripped.replace(/\s+/g, " ");
+}
+
+function truncateCustomViewString(
+  compact: string,
+  columnId: string,
+  limits: { narrative: number; other: number },
+): string {
+  const limit = columnId.includes("prompt") || columnId.includes("completion")
+    ? limits.narrative
+    : limits.other;
+  if (compact.length <= limit) {
+    return compact;
+  }
+  return `${compact.slice(0, limit).trimEnd()}…`;
+}
+
+function formatCustomViewValueFull(
+  value: unknown,
+  column: { column_id: string },
+): string {
+  if (value == null) {
+    return "—";
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(4);
+  }
+  if (typeof value === "string") {
+    return normalizeCustomViewString(value, column.column_id);
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return normalizeCustomViewString(JSON.stringify(value), column.column_id);
+}
+
+/** Compact text for the table; full strings live in the row detail drawer. */
+function formatCustomViewCellPreview(
+  value: unknown,
+  column: { column_id: string },
+): string {
+  if (value == null) {
+    return "—";
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toFixed(4);
+  }
+  if (typeof value === "string") {
+    const normalized = normalizeCustomViewString(value, column.column_id);
+    return truncateCustomViewString(normalized, column.column_id, {
+      narrative: 220,
+      other: 72,
+    });
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  return truncateCustomViewString(
+    normalizeCustomViewString(JSON.stringify(value), column.column_id),
+    column.column_id,
+    { narrative: 160, other: 72 },
+  );
+}
+
+function customViewRowToDetailRows(
+  row: EvaluatedCustomViewRow,
+  columns: TableColumn[],
+): Array<[string, string]> {
+  const meta: Array<[string, string]> = [];
+  if (row.frame_id != null) {
+    meta.push(["Frame", row.frame_id]);
+  }
+  if (row.loop_node_id != null) {
+    meta.push(["Loop node", row.loop_node_id]);
+  }
+  if (row.iteration_index != null) {
+    meta.push(["Iteration", String(row.iteration_index)]);
+  }
+  meta.push(["Row id", row.row_id]);
+  return [...meta, ...columns.map((col) => [col.title, formatCustomViewValueFull(row.values[col.column_id], col)] as [string, string])];
+}
+
+function customViewRowSubheading(row: EvaluatedCustomViewRow): string | undefined {
+  const parts: string[] = [];
+  if (row.frame_id) {
+    parts.push(`frame ${row.frame_id}`);
+  }
+  if (row.loop_node_id) {
+    parts.push(`loop ${row.loop_node_id}`);
+  }
+  if (row.iteration_index != null) {
+    parts.push(`iteration ${row.iteration_index}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function customViewCellTone(value: unknown) {
+  return typeof value === "number" ? "numeric" : "text";
+}
+
+function customViewColumnClassName(column: { column_id: string; title: string }) {
+  const label = `${column.column_id} ${column.title}`.toLowerCase();
+  if (
+    label.includes("score") ||
+    label.includes("reward") ||
+    label.includes("metric") ||
+    label.includes("loss") ||
+    label.includes("rate")
+  ) {
+    return "custom-view-col numeric";
+  }
+  if (label.includes("prompt") || label.includes("sample") || label.includes("text")) {
+    return "custom-view-col narrative";
+  }
+  return "custom-view-col";
 }
 
 function dedupeMetrics(metrics: NumericMetric[]) {

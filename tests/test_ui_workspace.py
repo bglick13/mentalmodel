@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import tempfile
-import sys
 import json
 import subprocess
+import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -12,9 +12,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from mentalmodel.remote import ProjectCatalog, ProjectRegistration, WorkspaceConfig
+from mentalmodel.remote.workspace import load_workspace_config, write_workspace_config
 from mentalmodel.ui.api import create_dashboard_app
 from mentalmodel.ui.catalog import DashboardCatalogEntry, default_dashboard_catalog
-from mentalmodel.remote.workspace import load_workspace_config, write_workspace_config
 from mentalmodel.ui.workspace import (
     flatten_project_catalogs,
     load_project_catalog_subject,
@@ -138,15 +138,119 @@ class UiWorkspaceTest(unittest.TestCase):
                         "from dataclasses import dataclass",
                         "",
                         "@dataclass(slots=True, frozen=True)",
+                        "class VerificationRowSource:",
+                        "    kind: str",
+                        "    node_id: str",
+                        "    items_path: str",
+                        "    loop_node_id: str | None = None",
+                        "",
+                        "@dataclass(slots=True, frozen=True)",
+                        "class VerificationValueSelector:",
+                        "    kind: str",
+                        "    path: str | None = None",
+                        "    node_id: str | None = None",
+                        "    event_type: str | None = None",
+                        "",
+                        "@dataclass(slots=True, frozen=True)",
+                        "class VerificationTableColumn:",
+                        "    column_id: str",
+                        "    title: str",
+                        "    selector: VerificationValueSelector",
+                        "    description: str = ''",
+                        "",
+                        "@dataclass(slots=True, frozen=True)",
+                        "class VerificationCustomView:",
+                        "    view_id: str",
+                        "    title: str",
+                        "    description: str",
+                        "    kind: str",
+                        "    row_source: VerificationRowSource",
+                        "    columns: tuple[VerificationTableColumn, ...]",
+                        "",
+                        "@dataclass(slots=True, frozen=True)",
+                        "class VerificationMetricGroup:",
+                        "    group_id: str",
+                        "    title: str",
+                        "    metric_path_prefixes: tuple[str, ...]",
+                        "    description: str = ''",
+                        "    max_items: int = 8",
+                        "",
+                        "@dataclass(slots=True, frozen=True)",
+                        "class VerificationPinnedNode:",
+                        "    node_id: str",
+                        "    title: str",
+                        "    description: str = ''",
+                        "",
+                        "@dataclass(slots=True, frozen=True)",
                         "class VerificationSpecEntry:",
                         "    label: str",
                         "    spec_path: str",
+                        "    graph_id: str",
                         "    invocation_name: str",
                         "    category: str",
                         "    description: str",
+                        "    default_loop_node_id: str | None = None",
+                        "    metric_groups: tuple[VerificationMetricGroup, ...] = ()",
+                        "    pinned_nodes: tuple[VerificationPinnedNode, ...] = ()",
+                        "    tags: tuple[str, ...] = ()",
+                        "    custom_views: tuple[VerificationCustomView, ...] = ()",
                         "",
                         "def verification_spec_catalog():",
-                        f"    return (VerificationSpecEntry(label='real_smoke', spec_path={str(spec_path)!r}, invocation_name='external_async_rl', category='real', description='External project smoke'),)",
+                        "    return (",
+                        "        VerificationSpecEntry(",
+                        "            label='real_smoke',",
+                        f"            spec_path={str(spec_path)!r},",
+                        "            graph_id='external_async_rl_graph',",
+                        "            invocation_name='external_async_rl',",
+                        "            category='real',",
+                        "            description='External project smoke',",
+                        "            default_loop_node_id='training_loop',",
+                        "            metric_groups=(",
+                        "                VerificationMetricGroup(",
+                        "                    group_id='reward',",
+                        "                    title='Reward Metrics',",
+                        "                    metric_path_prefixes=('metrics.reward/',),",
+                        "                ),",
+                        "            ),",
+                        "            pinned_nodes=(",
+                        "                VerificationPinnedNode(",
+                        (
+                            "                    "
+                            "node_id='training_loop.training_step.rollout.reward_join',"
+                        ),
+                        "                    title='Reward Join',",
+                        "                ),",
+                        "            ),",
+                        "            tags=('real', 'operator'),",
+                        "            custom_views=(",
+                        "                VerificationCustomView(",
+                        "                    view_id='sample-quality',",
+                        "                    title='Sample Quality',",
+                        "                    description='Prompt and score table',",
+                        "                    kind='table',",
+                        "                    row_source=VerificationRowSource(",
+                        "                        kind='node_output_items',",
+                        (
+                            "                        "
+                            "node_id='training_loop.training_step.rollout.rollout_join',"
+                        ),
+                        "                        items_path='artifacts.rollout_batch.samples',",
+                        "                        loop_node_id='training_loop',",
+                        "                    ),",
+                        "                    columns=(",
+                        "                        VerificationTableColumn(",
+                        "                            column_id='prompt_text',",
+                        "                            title='Prompt',",
+                        "                            selector=VerificationValueSelector(",
+                        "                                kind='row_item',",
+                        "                                path='prompt_text',",
+                        "                            ),",
+                        "                        ),",
+                        "                    ),",
+                        "                ),",
+                        "            ),",
+                        "        ),",
+                        "    )",
                         "",
                     )
                 ),
@@ -168,6 +272,19 @@ class UiWorkspaceTest(unittest.TestCase):
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0].project_id, "external-training")
             self.assertEqual(entries[0].label, "real_smoke")
+            self.assertEqual(entries[0].graph_id, "external_async_rl_graph")
+            self.assertEqual(entries[0].default_loop_node_id, "training_loop")
+            self.assertEqual(entries[0].metric_groups[0].group_id, "reward")
+            self.assertEqual(
+                entries[0].pinned_nodes[0].node_id,
+                "training_loop.training_step.rollout.reward_join",
+            )
+            self.assertEqual(entries[0].tags, ("real", "operator"))
+            self.assertEqual(entries[0].custom_views[0].view_id, "sample-quality")
+            self.assertEqual(
+                entries[0].custom_views[0].row_source.items_path,
+                "artifacts.rollout_batch.samples",
+            )
             catalogs = workspace_project_catalogs(workspace)
             self.assertEqual(catalogs[0].project.project_id, "external-training")
 
@@ -177,7 +294,10 @@ class UiWorkspaceTest(unittest.TestCase):
             package_dir = root / "externalproj"
             verification_dir = package_dir / "verification"
             verification_dir.mkdir(parents=True)
-            (package_dir / "__init__.py").write_text("import missing_dependency\n", encoding="utf-8")
+            (package_dir / "__init__.py").write_text(
+                "import missing_dependency\n",
+                encoding="utf-8",
+            )
             (verification_dir / "__init__.py").write_text("", encoding="utf-8")
             spec_path = root / "external_async_rl.toml"
             spec_path.write_text(
@@ -202,12 +322,22 @@ class UiWorkspaceTest(unittest.TestCase):
                         "class VerificationSpecEntry:",
                         "    label: str",
                         "    spec_path: str",
+                        "    graph_id: str",
                         "    invocation_name: str",
                         "    category: str",
                         "    description: str",
                         "",
                         "def verification_spec_catalog():",
-                        f"    return (VerificationSpecEntry(label='real_verify3', spec_path={str(spec_path)!r}, invocation_name='external_async_rl', category='real', description='External project smoke'),)",
+                        "    return (",
+                        "        VerificationSpecEntry(",
+                        "            label='real_verify3',",
+                        f"            spec_path={str(spec_path)!r},",
+                        "            graph_id='external_async_rl_graph',",
+                        "            invocation_name='external_async_rl',",
+                        "            category='real',",
+                        "            description='External project smoke',",
+                        "        ),",
+                        "    )",
                         "",
                     )
                 ),
@@ -260,12 +390,22 @@ class UiWorkspaceTest(unittest.TestCase):
                         "class VerificationSpecEntry:",
                         "    label: str",
                         "    spec_path: str",
+                        "    graph_id: str",
                         "    invocation_name: str",
                         "    category: str",
                         "    description: str",
                         "",
                         "def verification_spec_catalog():",
-                        f"    return (VerificationSpecEntry(label='real_verify1', spec_path={str(spec_path)!r}, invocation_name='external_async_rl', category='real', description='External verify1'),)",
+                        "    return (",
+                        "        VerificationSpecEntry(",
+                        "            label='real_verify1',",
+                        f"            spec_path={str(spec_path)!r},",
+                        "            graph_id='external_graph_from_provider',",
+                        "            invocation_name='external_async_rl',",
+                        "            category='real',",
+                        "            description='External verify1',",
+                        "        ),",
+                        "    )",
                         "",
                     )
                 ),
@@ -293,8 +433,9 @@ class UiWorkspaceTest(unittest.TestCase):
                 )
                 entries = workspace_catalog_entries(workspace)
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0].graph_id, "external_graph")
+            self.assertEqual(entries[0].graph_id, "external_graph_from_provider")
             self.assertEqual(entries[0].spec_id, "external-training:real-verify1")
+            run_subprocess.assert_not_called()
 
     def test_workspace_config_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
