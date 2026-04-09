@@ -7,6 +7,7 @@
     "dev": "vite",
     "dev:backend": "cd ../.. && uv run mentalmodel ui --frontend-dev-url http://127.0.0.1:5173",
     "dev:stack": "concurrently -k -n frontend,backend -c cyan,magenta \"npm run dev\" \"npm run dev:backend\"",
+    "dev:remote": "cd ../.. && uv run mentalmodel remote up --output-dir /tmp/mentalmodel-remote --port 8765 --frontend-dev-url http://127.0.0.1:5173",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"

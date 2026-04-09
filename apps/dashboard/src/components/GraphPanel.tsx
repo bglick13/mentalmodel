@@ -154,9 +154,10 @@ export function GraphPanel({
     <div className="panel graph-panel">
       <div className="panel-header">
         <div>
-          <div className="panel-title">Graph Explorer</div>
+          <div className="panel-title">Execution graph</div>
           <div className="panel-subtitle">
-            Click any node to inspect its inputs, outputs, and invariant trace.
+            DAG for this spec — select a node for I/O, frames, and invariants in
+            the rail.
           </div>
         </div>
       </div>

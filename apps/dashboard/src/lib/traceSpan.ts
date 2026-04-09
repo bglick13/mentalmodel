@@ -277,6 +277,15 @@ function spanToView(span: Record<string, unknown>): GenericSpan {
   const latencyMs =
     latencyNsForMs != null ? latencyNsForMs / 1_000_000 : durationMs;
 
+  const startNs = readNumericField(span, ["start_time_ns"]);
+  const endNs = readNumericField(span, ["end_time_ns"]);
+  const startTimeMs = startNs != null ? startNs / 1_000_000 : null;
+  let endTimeMs: number | null =
+    endNs != null ? endNs / 1_000_000 : null;
+  if (endTimeMs == null && startTimeMs != null && latencyMs > 0) {
+    endTimeMs = startTimeMs + latencyMs;
+  }
+
   const latencyLabel =
     latencyNsForMs != null && latencyNsForMs > 0
       ? formatDurationNs(latencyNsForMs)
@@ -337,6 +346,8 @@ function spanToView(span: Record<string, unknown>): GenericSpan {
     kindHue,
     latencyLabel,
     latencyMs: Math.max(0, latencyMs),
+    startTimeMs,
+    endTimeMs,
     statusLabel,
     traceIdDisplay,
     summaryLine,

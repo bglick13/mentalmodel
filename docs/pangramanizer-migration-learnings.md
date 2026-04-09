@@ -173,6 +173,41 @@ Practical takeaway:
 - timing and identity metrics are still useful, but they belong in a separate
   comparison bucket from reward, control-plane, and core optimizer semantics
 
+### 13. Serious dashboards want summary-shaped workflow outputs, not UI-side inference
+
+The Pangramanizer dashboard push became much cleaner once the workflow started
+emitting:
+
+- stable per-step operator summaries
+- root reporting nodes that aggregate loop history into tables and run-level
+  summaries
+
+Trying to drive the dashboard directly from large raw rollout/update outputs or
+from UI-side metric guessing would have been much less legible.
+
+Practical takeaway:
+
+- serious applications should author dashboard-friendly summaries inside the
+  workflow
+- raw outputs should still be preserved for drill-down, but the primary
+  operator surface should come from stable reporting nodes
+
+### 14. Project catalogs are the right extension point for app dashboards
+
+Pangramanizer originally mirrored dashboard catalog concepts in app-local
+dataclasses. That duplicated framework concepts and made the UI integration feel
+more provisional than it needed to be.
+
+Switching to `mentalmodel`'s real `ProjectCatalog` and `DashboardCatalogEntry`
+types made the integration cleaner and more honest.
+
+Practical takeaway:
+
+- applications should extend the dashboard through the framework's project
+  catalog API instead of parallel app-local schema layers
+- catalog metadata should be treated as part of the durable operator contract,
+  not as incidental demo wiring
+
 ## How To Use This Doc
 
 Add a new item when:

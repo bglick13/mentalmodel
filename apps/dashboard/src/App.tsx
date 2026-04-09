@@ -14,7 +14,9 @@ import {
   frameIdForNodeDetailApi,
   InspectorNodeIo,
 } from "./components/InspectorNodeIo";
+import { ExplorerTimeseriesChart } from "./components/ExplorerTimeseriesChart";
 import { GraphPanel } from "./components/GraphPanel";
+import { SpanFlamegraph } from "./components/SpanFlamegraph";
 import {
   fetchCatalog,
   fetchCatalogGraph,
@@ -31,6 +33,7 @@ import {
   registerCatalogFromPath,
 } from "./lib/api";
 import {
+  buildExplorerUrl,
   isExplorerWindowParam,
   parseExplorerQuery,
   pushUrlWithExplorerState,
@@ -90,13 +93,31 @@ type ScopeToken = {
 const VIEWS: Array<{
   id: ViewId;
   label: string;
+  title: string;
 }> = [
-  { id: "overview", label: "Overview" },
-  { id: "views", label: "Views" },
-  { id: "graph", label: "Graph" },
-  { id: "node", label: "Node" },
-  { id: "spans", label: "Records" },
-  { id: "launch", label: "Launch" },
+  {
+    id: "overview",
+    label: "Overview",
+    title: "Health, throughput chart, recent runs, and metrics rails",
+  },
+  {
+    id: "views",
+    label: "Tables",
+    title: "Spec-defined metric / narrative tables for the selected run",
+  },
+  { id: "graph", label: "Graph", title: "Execution DAG — click nodes to sync explorer scope" },
+  {
+    id: "node",
+    label: "Node",
+    title: "Resolved I/O, frames, invariants, and cadence for the selected node",
+  },
+  {
+    id: "spans",
+    label: "Traces",
+    title:
+      "Trace timeline (wall-clock), OTel span list, and semantic record stream",
+  },
+  { id: "launch", label: "Launch", title: "Start runs and watch live semantic stream" },
 ];
 
 const SPEC_PATH_STORAGE_KEY = "mentalmodel.dashboard.specPath";
@@ -239,10 +260,12 @@ function App() {
   const [exploreNodeId, setExploreNodeId] = useState<string | null>(null);
   const [timeseries, setTimeseries] = useState<TimeseriesResponse | null>(null);
   const [timeseriesLoading, setTimeseriesLoading] = useState(false);
+  const [timeseriesPollBusy, setTimeseriesPollBusy] = useState(false);
   const [timeseriesError, setTimeseriesError] = useState<string | null>(null);
   const [runSpans, setRunSpans] = useState<Record<string, unknown>[] | null>(
     null,
   );
+  const [runSpansLoading, setRunSpansLoading] = useState(false);
   const explorerUrlHydratedRef = useRef(false);
   const prevExplorerSpecIdRef = useRef<string | null>(null);
   /** After popstate/back-forward: sync URL with React state using replace, do not push. */
@@ -258,6 +281,7 @@ function App() {
   const [spansInspector, setSpansInspector] = useState<SpansInspector | null>(
     null,
   );
+  const [shareCopied, setShareCopied] = useState(false);
 
   useEffect(() => {
     try {
@@ -534,12 +558,14 @@ function App() {
 
   useEffect(() => {
     if (!selectedCatalog || !activeRun || exploreRunId == null) {
+      setRunSpansLoading(false);
       return;
     }
     if (activeRun.summary.run_id !== exploreRunId) {
       return;
     }
     let cancelled = false;
+    setRunSpansLoading(true);
     void fetchRunSpans(selectedCatalog.graph_id, activeRun.summary.run_id)
       .then((payload) => {
         if (!cancelled) {
@@ -549,6 +575,11 @@ function App() {
       .catch(() => {
         if (!cancelled) {
           setRunSpans([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setRunSpansLoading(false);
         }
       });
     return () => {
@@ -683,40 +714,61 @@ function App() {
     if (!selectedCatalog) {
       return;
     }
-    const { sinceMs, untilMs, rollupMs } = computeExploreWindow(
-      exploreTimePreset,
-      runs,
-    );
     let cancelled = false;
-    setTimeseriesLoading(true);
-    setTimeseriesError(null);
-    void fetchTimeseries({
-      graphId: selectedCatalog.graph_id,
-      invocationName: selectedCatalog.invocation_name,
-      sinceMs,
-      untilMs,
-      rollupMs,
-      runId: exploreRunId,
-      nodeId: exploreNodeId,
-    })
-      .then((data) => {
-        if (!cancelled) {
-          setTimeseries(data);
-        }
+
+    const pull = (isPoll: boolean) => {
+      const { sinceMs, untilMs, rollupMs } = computeExploreWindow(
+        exploreTimePreset,
+        runs,
+      );
+      if (!isPoll) {
+        setTimeseriesLoading(true);
+        setTimeseriesError(null);
+      } else {
+        setTimeseriesPollBusy(true);
+      }
+      void fetchTimeseries({
+        graphId: selectedCatalog.graph_id,
+        invocationName: selectedCatalog.invocation_name,
+        sinceMs,
+        untilMs,
+        rollupMs,
+        runId: exploreRunId,
+        nodeId: exploreNodeId,
       })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setTimeseriesError(String(err));
-          setTimeseries(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setTimeseriesLoading(false);
-        }
-      });
+        .then((data) => {
+          if (!cancelled) {
+            setTimeseries(data);
+          }
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) {
+            setTimeseriesError(String(err));
+            setTimeseries(null);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            if (!isPoll) {
+              setTimeseriesLoading(false);
+            } else {
+              setTimeseriesPollBusy(false);
+            }
+          }
+        });
+    };
+
+    pull(false);
+    const intervalMs = 15_000;
+    const timer = window.setInterval(() => {
+      if (cancelled || document.visibilityState !== "visible") {
+        return;
+      }
+      pull(true);
+    }, intervalMs);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
   }, [
     selectedCatalog,
@@ -935,61 +987,102 @@ function App() {
     }
   }, [activeView, spanItems]);
 
-  const runContext = useMemo<ScopeToken[]>(
-    () => {
-      const windowLabel = EXPLORE_PRESET_LABEL[exploreTimePreset];
-      const base: ScopeToken[] = activeRun
-        ? [
-            { label: "spec", value: selectedCatalog?.spec_id ?? "n/a" },
-            { label: "graph", value: activeRun.summary.graph_id },
-            { label: "run", value: activeRun.summary.run_id },
-            {
-              label: "invocation",
-              value:
-                activeRun.summary.invocation_name ??
-                selectedCatalog?.invocation_name ??
-                "n/a",
-            },
-            {
-              label: "profiles",
-              value:
-                activeRun.summary.runtime_profile_names.join(", ") ||
-                activeRun.summary.runtime_default_profile_name ||
-                "n/a",
-            },
-          ]
-        : [
-            { label: "spec", value: selectedCatalog?.spec_id ?? "n/a" },
-            { label: "graph", value: selectedCatalog?.graph_id ?? "n/a" },
-            {
-              label: "invocation",
-              value: selectedCatalog?.invocation_name ?? "n/a",
-            },
-          ];
-      const explorer: ScopeToken[] = [
-        { label: "$window", value: windowLabel },
-        {
-          label: "@run_id",
-          value: exploreRunId ?? "all",
-        },
-        {
-          label: "@node_id",
-          value: exploreNodeId ?? "all",
-        },
-      ];
-      return [...base, ...explorer];
-    },
-    [
-      activeRun,
-      selectedCatalog,
-      exploreTimePreset,
-      exploreRunId,
-      exploreNodeId,
-    ],
-  );
+  const runContext = useMemo<ScopeToken[]>(() => {
+    const windowLabel = EXPLORE_PRESET_LABEL[exploreTimePreset];
+    const base: ScopeToken[] = activeRun
+      ? [
+          { label: "spec", value: selectedCatalog?.spec_id ?? "n/a" },
+          { label: "graph", value: activeRun.summary.graph_id },
+          { label: "run", value: activeRun.summary.run_id },
+          {
+            label: "invocation",
+            value:
+              activeRun.summary.invocation_name ??
+              selectedCatalog?.invocation_name ??
+              "n/a",
+          },
+          {
+            label: "profiles",
+            value:
+              activeRun.summary.runtime_profile_names.join(", ") ||
+              activeRun.summary.runtime_default_profile_name ||
+              "n/a",
+          },
+        ]
+      : [
+          { label: "spec", value: selectedCatalog?.spec_id ?? "n/a" },
+          { label: "graph", value: selectedCatalog?.graph_id ?? "n/a" },
+          {
+            label: "invocation",
+            value: selectedCatalog?.invocation_name ?? "n/a",
+          },
+        ];
+    /* Facet row ($window, @run_id, @node_id) lives in ExplorerScopeBar — omit here to avoid duplicate UI. */
+    if (selectedCatalog) {
+      return base;
+    }
+    return [
+      ...base,
+      { label: "$window", value: windowLabel },
+      { label: "@run_id", value: exploreRunId ?? "all" },
+      { label: "@node_id", value: exploreNodeId ?? "all" },
+    ];
+  }, [
+    activeRun,
+    selectedCatalog,
+    exploreTimePreset,
+    exploreRunId,
+    exploreNodeId,
+  ]);
 
   const activeViewLabel =
     VIEWS.find((view) => view.id === activeView)?.label ?? "Dashboard";
+
+  const shareExplorerUrl = useMemo(() => {
+    const path = buildExplorerUrl({
+      pathname:
+        typeof window !== "undefined" ? window.location.pathname : "/",
+      activeView,
+      specId: selectedSpecId,
+      window: exploreTimePreset,
+      runId: exploreRunId,
+      nodeId: exploreNodeId,
+      spanInspectIndex:
+        activeView === "spans" && spansInspector?.kind === "span"
+          ? spansInspector.index
+          : null,
+      recordInspectId:
+        activeView === "spans" && spansInspector?.kind === "record"
+          ? spansInspector.id
+          : null,
+    });
+    if (typeof window === "undefined") {
+      return path;
+    }
+    return `${window.location.origin}${path}`;
+  }, [
+    activeView,
+    selectedSpecId,
+    exploreTimePreset,
+    exploreRunId,
+    exploreNodeId,
+    spansInspector,
+  ]);
+
+  async function copyExplorerLink() {
+    try {
+      await navigator.clipboard.writeText(shareExplorerUrl);
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 2000);
+    } catch {
+      setError("Could not copy link to clipboard.");
+    }
+  }
+
+  const openTracesAtSpanIndex = useCallback((index: number) => {
+    setActiveView("spans");
+    setSpansInspector({ kind: "span", index });
+  }, []);
 
   function switchView(view: ViewId) {
     setActiveView(view);
@@ -1010,6 +1103,7 @@ function App() {
             <a
               key={view.id}
               href={`#${view.id}`}
+              title={view.title}
               className={`nav-item ${activeView === view.id ? "active" : ""}`}
               onClick={(event) => {
                 event.preventDefault();
@@ -1040,7 +1134,10 @@ function App() {
         </div>
 
         <footer className="nav-footer">
-          <code className="nav-footer-code">uv run mentalmodel ui --help</code>
+          <span className="nav-footer-label">Also via terminal</span>
+          <code className="nav-footer-code" title="Same data as this dashboard">
+            uv run mentalmodel ui
+          </code>
         </footer>
       </aside>
 
@@ -1067,16 +1164,16 @@ function App() {
               <h1>{activeViewLabel}</h1>
             </div>
           </div>
-          <label className="scope-search-wrap">
-            <span className="sr-only">Search and filter scope</span>
-            <input
-              type="search"
-              className="scope-search"
-              readOnly
-              placeholder={searchScopePlaceholder(activeView)}
-              aria-label={`Filter scope for this view: ${searchScopePlaceholder(activeView)}`}
-            />
-          </label>
+          <div className="topbar-actions">
+            <button
+              type="button"
+              className={`share-link-btn ${shareCopied ? "share-link-btn-done" : ""}`}
+              onClick={() => void copyExplorerLink()}
+              title="Copy a shareable URL including spec, time window, run, node, and this screen"
+            >
+              {shareCopied ? "Copied" : "Copy explorer link"}
+            </button>
+          </div>
         </section>
 
         {error ? <div className="error-banner">{error}</div> : null}
@@ -1144,6 +1241,9 @@ function App() {
           timeseries,
           timeseriesError,
           timeseriesLoading,
+          timeseriesPollBusy,
+          runSpansLoading,
+          openTracesAtSpanIndex,
         })}
       </main>
     </div>
@@ -1200,6 +1300,9 @@ function renderCurrentView({
   timeseries,
   timeseriesError,
   timeseriesLoading,
+  timeseriesPollBusy,
+  runSpansLoading,
+  openTracesAtSpanIndex,
 }: {
   activeExecution: ExecutionSession | null;
   activeCustomView: EvaluatedCustomView | null;
@@ -1250,6 +1353,9 @@ function renderCurrentView({
   timeseries: TimeseriesResponse | null;
   timeseriesError: string | null;
   timeseriesLoading: boolean;
+  timeseriesPollBusy: boolean;
+  runSpansLoading: boolean;
+  openTracesAtSpanIndex: (spanIndex: number) => void;
 }) {
   switch (activeView) {
     case "overview":
@@ -1275,6 +1381,7 @@ function renderCurrentView({
           timeseries={timeseries}
           timeseriesError={timeseriesError}
           timeseriesLoading={timeseriesLoading}
+          timeseriesPollBusy={timeseriesPollBusy}
           warningInvariantCount={warningInvariantCount}
         />
       );
@@ -1311,6 +1418,7 @@ function renderCurrentView({
         <NodeDetailView
           activeRun={activeRun}
           nodeDetail={nodeDetail}
+          openTracesAtSpanIndex={openTracesAtSpanIndex}
           runContext={runContext}
           selectedFrameId={selectedFrameId}
           selectedNodeEdges={selectedNodeEdges}
@@ -1330,6 +1438,7 @@ function renderCurrentView({
           nodeDetail={nodeDetail}
           runContext={runContext}
           runRecordsInWindow={recordsInTimeWindow}
+          runSpansLoading={runSpansLoading}
           selectedNodeId={selectedNodeId}
           selectedFrameId={selectedFrameId}
           selectedNodeRecords={selectedNodeRecords}
@@ -1382,6 +1491,7 @@ function OverviewView({
   timeseries,
   timeseriesError,
   timeseriesLoading,
+  timeseriesPollBusy,
   warningInvariantCount,
 }: {
   activeExecution: ExecutionSession | null;
@@ -1404,6 +1514,7 @@ function OverviewView({
   timeseries: TimeseriesResponse | null;
   timeseriesError: string | null;
   timeseriesLoading: boolean;
+  timeseriesPollBusy: boolean;
   warningInvariantCount: string;
 }) {
   const currentRecordCount = String(explorerRecordsInWindowCount);
@@ -1450,10 +1561,11 @@ function OverviewView({
 
       <section className="overview-layout">
         <div className="stack">
-          <Panel title="Semantic event rate">
+          <Panel className="semantic-rate-panel" title="Semantic event rate">
             <ExplorerTimeseriesChart
               error={timeseriesError}
               loading={timeseriesLoading}
+              pollBusy={timeseriesPollBusy}
               timeseries={timeseries}
             />
           </Panel>
@@ -1463,7 +1575,7 @@ function OverviewView({
           <Panel title="Runs (explorer scope)">
             <div className="interactive-list">
               {runsForExplorerList.length > 0 ? (
-                runsForExplorerList.slice(0, 5).map((run) => (
+                runsForExplorerList.slice(0, 8).map((run) => (
                   <button
                     key={run.run_id}
                     className={`list-card ${activeRun?.summary.run_id === run.run_id ? "active" : ""}`}
@@ -1918,8 +2030,8 @@ function GraphView({
           <Panel title="Shortcuts">
             <ActionRail
               rows={[
-                ["Open node detail", "Inspect inputs and outputs", "node"],
-                ["Open spans & records", "Pivot into traces and event stream", "spans"],
+                ["Open node detail", "Inputs, outputs, frames, invariants", "node"],
+                ["Open traces", "Trace timeline, OTel list, semantic records", "spans"],
               ]}
               onSelect={(target) => setActiveView(target as ViewId)}
             />
@@ -1933,6 +2045,7 @@ function GraphView({
 function NodeDetailView({
   activeRun,
   nodeDetail,
+  openTracesAtSpanIndex,
   runContext,
   selectedFrameId,
   selectedNodeEdges,
@@ -1944,6 +2057,7 @@ function NodeDetailView({
 }: {
   activeRun: RunOverview | null;
   nodeDetail: NodeDetail | null;
+  openTracesAtSpanIndex: (spanIndex: number) => void;
   runContext: ScopeToken[];
   selectedFrameId: string | null;
   selectedNodeEdges: { upstream: GraphEdge[]; downstream: GraphEdge[] };
@@ -2047,7 +2161,10 @@ function NodeDetailView({
           </Panel>
 
           <Panel title="Traces">
-            <TraceTable spans={spanItems} />
+            <TraceTable
+              onOpenInTraces={openTracesAtSpanIndex}
+              spans={spanItems}
+            />
           </Panel>
 
           <Panel title="Edges">
@@ -2123,6 +2240,9 @@ function nodeDetailIoPrefetchForRecord(
   return nodeDetail;
 }
 
+const SPAN_PAGE_SIZE = 200;
+const RECORD_PAGE_SIZE = 250;
+
 function SpansRecordsView({
   activeRun,
   exploreNodeId,
@@ -2130,6 +2250,7 @@ function SpansRecordsView({
   nodeDetail,
   runContext,
   runRecordsInWindow,
+  runSpansLoading,
   selectedNodeId,
   selectedFrameId,
   selectedNodeRecords,
@@ -2145,6 +2266,7 @@ function SpansRecordsView({
   runContext: ScopeToken[];
   /** Time-window slice of the loaded run’s semantic records (same source as list; used to join spans). */
   runRecordsInWindow: ExecutionRecord[];
+  runSpansLoading: boolean;
   selectedNodeId: string | null;
   selectedFrameId: string | null;
   selectedNodeRecords: ExecutionRecord[];
@@ -2153,11 +2275,47 @@ function SpansRecordsView({
   spansInspector: SpansInspector | null;
 }) {
   const explorerNodeLabel = exploreNodeId ?? "all";
+  const [spanShowCount, setSpanShowCount] = useState(SPAN_PAGE_SIZE);
+  const [recordShowCount, setRecordShowCount] = useState(RECORD_PAGE_SIZE);
 
-  const displayedRecords = useMemo(
-    () => selectedNodeRecords.slice(-400),
-    [selectedNodeRecords],
+  useEffect(() => {
+    setSpanShowCount(SPAN_PAGE_SIZE);
+  }, [exploreRunId, exploreNodeId, selectedFrameId, activeRun?.summary.run_id]);
+
+  useEffect(() => {
+    setRecordShowCount(RECORD_PAGE_SIZE);
+  }, [exploreRunId, exploreNodeId, selectedFrameId, selectedNodeRecords.length]);
+
+  const [traceFullscreenOpen, setTraceFullscreenOpen] = useState(false);
+
+  useEffect(() => {
+    if (!traceFullscreenOpen) {
+      return;
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setTraceFullscreenOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [traceFullscreenOpen]);
+
+  const displayedRecords = useMemo(() => {
+    const slice = selectedNodeRecords.slice(-recordShowCount);
+    return slice;
+  }, [selectedNodeRecords, recordShowCount]);
+
+  const visibleSpans = useMemo(
+    () => spanItems.slice(-spanShowCount),
+    [spanItems, spanShowCount],
   );
+  const spanIndexOffset = Math.max(0, spanItems.length - visibleSpans.length);
 
   const spanDetail =
     spansInspector?.kind === "span"
@@ -2233,64 +2391,136 @@ function SpansRecordsView({
     <>
       <RunContextStrip tokens={runContext} />
       <section className="spans-layout">
-        <div className="stack">
-          <Panel title="Spans (OTel)">
-            <div className="chip-row">
-              <StatusChip label={`@node_id: ${explorerNodeLabel}`} tone="accent" />
-              <StatusChip label={`frame: ${selectedFrameId ?? "all"}`} />
-              <StatusChip label={`${spanItems.length} spans`} />
-              <StatusChip label={`trace: ${activeRun?.summary.trace_mode ?? "n/a"}`} />
-            </div>
-            <p className="spans-explainer">
-              Timings from mirrored OTel spans. Click a row for full attributes.
-            </p>
-            <TraceList
-              selectedIndex={
-                spansInspector?.kind === "span" ? spansInspector.index : null
-              }
-              spans={spanItems}
-              onSelectSpan={(index) =>
-                setSpansInspector({ kind: "span", index })
-              }
-            />
-          </Panel>
-
-          <Panel title="Records (semantic log)">
-            <div className="chip-row">
-              <StatusChip label={`${displayedRecords.length} records`} tone="accent" />
-              <StatusChip
-                label={`scope: @node_id ${explorerNodeLabel} · frame ${selectedFrameId ?? "all"}`}
+        <div className="spans-trace-hero">
+          <Panel
+            aside={
+              spanItems.length > 0 ? (
+                <div className="trace-panel-actions">
+                  <button
+                    type="button"
+                    className="share-link-btn trace-fs-open-btn"
+                    onClick={() => setTraceFullscreenOpen(true)}
+                  >
+                    Fullscreen
+                  </button>
+                </div>
+              ) : undefined
+            }
+            subtitle="Duration on the horizontal axis; overlapping work stacks into rows (cf. distributed trace flame / waterfall views)."
+            title="Trace timeline"
+          >
+            {spanItems.length === 0 && runSpansLoading ? (
+              <div className="flamegraph-skeleton" aria-busy>
+                <span className="explorer-skeleton-chart" />
+              </div>
+            ) : spanItems.length === 0 ? (
+              <EmptyState
+                compact
+                copy="No spans in this scope yet. Ensure a run is selected and span export is enabled."
               />
-            </div>
-            <p className="spans-explainer">
-              Execution events from <span className="mono">records.jsonl</span>. Not every
-              span has a matching record line.
+            ) : (
+              <SpanFlamegraph
+                density="compact"
+                onSelectSpan={(index) =>
+                  setSpansInspector({ kind: "span", index })
+                }
+                selectedIndex={
+                  spansInspector?.kind === "span"
+                    ? spansInspector.index
+                    : null
+                }
+                spans={spanItems}
+              />
+            )}
+            <p className="spans-detail-hint spans-trace-footer">
+              Select a span block above or a row below; full fields and bundle I/O open in the
+              drawer (same detail as the Node view).{" "}
+              <span className="spans-trace-fs-hint">
+                Use <strong>Fullscreen</strong> for a taller trace layout.
+              </span>
             </p>
-            <SemanticRecordList
-              emptyHint={recordsEmptyReason}
-              records={displayedRecords}
-              selectedRecordId={
-                spansInspector?.kind === "record" ? spansInspector.id : null
-              }
-              onSelectRecord={(id) =>
-                setSpansInspector({ kind: "record", id })
-              }
-            />
           </Panel>
         </div>
 
-        <div className="stack wide">
-          <Panel title="Timeline">
-            <TimelineLens spans={spanItems} />
-          </Panel>
+        <div className="spans-lists-row">
+          <div className="stack">
+            <Panel title="OTel spans">
+              <div className="chip-row">
+                <StatusChip label={`@node_id: ${explorerNodeLabel}`} tone="accent" />
+                <StatusChip label={`frame: ${selectedFrameId ?? "all"}`} />
+                <StatusChip label={`${spanItems.length} spans`} />
+                <StatusChip label={`trace: ${activeRun?.summary.trace_mode ?? "n/a"}`} />
+              </div>
+              <p className="spans-explainer">
+                Sequential span list (like a Datadog span list). Click a row for full
+                attributes.
+              </p>
+              {runSpansLoading && exploreRunId ? (
+                <div className="spans-loading-banner" aria-live="polite">
+                  Loading span data…
+                </div>
+              ) : null}
+              <TraceList
+                indexOffset={spanIndexOffset}
+                selectedIndex={
+                  spansInspector?.kind === "span" ? spansInspector.index : null
+                }
+                spans={visibleSpans}
+                onSelectSpan={(index) =>
+                  setSpansInspector({ kind: "span", index })
+                }
+              />
+              {spanItems.length > spanShowCount ? (
+                <button
+                  type="button"
+                  className="load-more-btn"
+                  onClick={() =>
+                    setSpanShowCount((c) => c + SPAN_PAGE_SIZE)
+                  }
+                >
+                  Load older spans (
+                  {spanItems.length - spanShowCount} not shown)
+                </button>
+              ) : null}
+            </Panel>
+          </div>
 
-          <Panel title="Inspector">
-            <p className="spans-detail-hint">
-              Open a span or record to see fields, bundle <strong>inputs / output</strong> for
-              that node and frame (same data as the Node view), related semantic lines, and raw
-              JSON.
-            </p>
-          </Panel>
+          <div className="stack">
+            <Panel title="Semantic stream">
+              <div className="chip-row">
+                <StatusChip label={`${displayedRecords.length} records`} tone="accent" />
+                <StatusChip
+                  label={`scope: @node_id ${explorerNodeLabel} · frame ${selectedFrameId ?? "all"}`}
+                />
+              </div>
+              <p className="spans-explainer">
+                Execution events from <span className="mono">records.jsonl</span>. Not every
+                span has a matching record line.
+              </p>
+              <SemanticRecordList
+                emptyHint={recordsEmptyReason}
+                records={displayedRecords}
+                selectedRecordId={
+                  spansInspector?.kind === "record" ? spansInspector.id : null
+                }
+                onSelectRecord={(id) =>
+                  setSpansInspector({ kind: "record", id })
+                }
+              />
+              {selectedNodeRecords.length > recordShowCount ? (
+                <button
+                  type="button"
+                  className="load-more-btn"
+                  onClick={() =>
+                    setRecordShowCount((c) => c + RECORD_PAGE_SIZE)
+                  }
+                >
+                  Load older records (
+                  {selectedNodeRecords.length - recordShowCount} not shown)
+                </button>
+              ) : null}
+            </Panel>
+          </div>
         </div>
       </section>
 
@@ -2343,27 +2573,84 @@ function SpansRecordsView({
           subheading={new Date(recordDetail.timestamp_ms).toISOString()}
         />
       ) : null}
+
+      {traceFullscreenOpen && spanItems.length > 0 ? (
+        <div
+          className="trace-fs-overlay"
+          role="presentation"
+          onClick={() => setTraceFullscreenOpen(false)}
+        >
+          <div
+            aria-labelledby="trace-fs-title"
+            aria-modal="true"
+            className="trace-fs-dialog panel v3-panel"
+            role="dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="trace-fs-header">
+              <div>
+                <h2 className="trace-fs-title" id="trace-fs-title">
+                  Trace timeline
+                </h2>
+                <p className="panel-subtitle trace-fs-subtitle">
+                  Full-width layout with taller rows. Press Esc or click outside to
+                  close.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="share-link-btn trace-fs-close-btn"
+                onClick={() => setTraceFullscreenOpen(false)}
+              >
+                Close
+              </button>
+            </header>
+            <div className="trace-fs-chart">
+              <SpanFlamegraph
+                density="comfortable"
+                onSelectSpan={(index) => {
+                  setSpansInspector({ kind: "span", index });
+                  setTraceFullscreenOpen(false);
+                }}
+                selectedIndex={
+                  spansInspector?.kind === "span"
+                    ? spansInspector.index
+                    : null
+                }
+                spans={spanItems}
+              />
+            </div>
+            <p className="spans-detail-hint trace-fs-footer">
+              Selecting a span closes fullscreen and opens the detail drawer.
+            </p>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }
 
 function TraceList({
+  indexOffset = 0,
   onSelectSpan,
   selectedIndex,
   spans,
 }: {
+  indexOffset?: number;
   onSelectSpan: (index: number) => void;
   selectedIndex: number | null;
   spans: GenericSpan[];
 }) {
   return spans.length > 0 ? (
     <div className="trace-list">
-      {spans.map((span, index) => (
+      {spans.map((span, index) => {
+        const globalIndex = indexOffset + index;
+        return (
         <button
-          key={`${span.label}:${index}`}
+          key={`${span.label}:${globalIndex}`}
           type="button"
-          className={`trace-row-card ${selectedIndex === index ? "active" : ""}`}
-          onClick={() => onSelectSpan(index)}
+          className={`trace-row-card ${selectedIndex === globalIndex ? "active" : ""}`}
+          onClick={() => onSelectSpan(globalIndex)}
         >
           <span
             className="trace-kind-stripe"
@@ -2388,7 +2675,8 @@ function TraceList({
             </span>
           </div>
         </button>
-      ))}
+      );
+      })}
     </div>
   ) : (
     <EmptyState copy="No spans in this scope." compact />
@@ -2819,10 +3107,13 @@ function ExplorerScopeBar({
     <section className="explorer-scope-bar" aria-label="Explorer facets">
       <div className="explorer-scope-title">
         <span className="explorer-scope-product">Explorer</span>
-        <span className="explorer-scope-hint">
-          $window scopes the chart and run list. &quot;All runs&quot; for @run_id
-          aggregates the chart across runs in $window; pick a run to load bundle,
-          metrics, and node drill-down.
+        <span
+          className="explorer-scope-hint"
+          title={
+            "Time window scopes the chart and run list. “All runs” aggregates the chart; pick a run to load the bundle, metrics, and node drill-down."
+          }
+        >
+          Window · run · node — shareable via Copy explorer link
         </span>
       </div>
       <div className="explorer-facets">
@@ -2883,136 +3174,6 @@ function ExplorerScopeBar({
   );
 }
 
-function ExplorerTimeseriesChart({
-  error,
-  loading,
-  timeseries,
-}: {
-  error: string | null;
-  loading: boolean;
-  timeseries: TimeseriesResponse | null;
-}) {
-  const { paths, maxY, w, h } = useMemo(() => {
-    const width = 920;
-    const height = 232;
-    const padL = 52;
-    const padR = 20;
-    const padT = 20;
-    const padB = 44;
-    if (!timeseries || timeseries.buckets.length === 0) {
-      return {
-        paths: null as {
-          records: string;
-          loops: string;
-          nodes: string;
-        } | null,
-        maxY: 1,
-        w: width,
-        h: height,
-      };
-    }
-    const buckets = timeseries.buckets;
-    const innerW = width - padL - padR;
-    const innerH = height - padT - padB;
-    const maxVal = Math.max(
-      0.000_001,
-      ...buckets.flatMap((b) => [
-        b.records_per_sec,
-        b.loop_events_per_sec,
-        b.unique_nodes_per_sec,
-      ]),
-    );
-    const n = buckets.length;
-    const stepX = n > 1 ? innerW / (n - 1) : 0;
-    const toPoints = (pick: (b: (typeof buckets)[0]) => number) =>
-      buckets
-        .map((b, i) => {
-          const x = padL + (n === 1 ? innerW / 2 : i * stepX);
-          const y = padT + innerH * (1 - pick(b) / maxVal);
-          return `${x.toFixed(1)},${y.toFixed(1)}`;
-        })
-        .join(" ");
-    return {
-      paths: {
-        records: toPoints((b) => b.records_per_sec),
-        loops: toPoints((b) => b.loop_events_per_sec),
-        nodes: toPoints((b) => b.unique_nodes_per_sec),
-      },
-      maxY: maxVal,
-      w: width,
-      h: height,
-    };
-  }, [timeseries]);
-
-  if (loading && !timeseries) {
-    return <div className="explorer-chart-loading">Loading timeseries…</div>;
-  }
-  if (error) {
-    return <div className="explorer-chart-error">{error}</div>;
-  }
-  if (!timeseries || !paths || timeseries.buckets.length === 0) {
-    return (
-      <EmptyState
-        compact
-        copy="No data in this window. Try a wider time range or clear facets."
-      />
-    );
-  }
-
-  const first = timeseries.buckets[0];
-  const last = timeseries.buckets[timeseries.buckets.length - 1];
-  const t0 = new Date(first.start_ms).toLocaleString();
-  const t1 = new Date(last.end_ms).toLocaleString();
-
-  return (
-    <div className="explorer-timeseries">
-      <div className="explorer-ts-legend">
-        <span className="explorer-ts-series records">
-          <span className="explorer-ts-dot" /> semantic records/s
-        </span>
-        <span className="explorer-ts-series loops">
-          <span className="explorer-ts-dot" /> loop iterations/s
-        </span>
-        <span className="explorer-ts-series nodes">
-          <span className="explorer-ts-dot" /> distinct nodes/s
-        </span>
-        <span className="explorer-ts-meta">
-          rollup {Math.round(timeseries.rollup_ms / 1000)}s · scanned{" "}
-          {timeseries.runs_scanned} run bundle(s)
-        </span>
-      </div>
-      <svg
-        className="explorer-ts-svg"
-        viewBox={`0 0 ${w} ${h}`}
-        preserveAspectRatio="xMidYMid meet"
-      >
-        <text className="explorer-ts-y-label" x="8" y="28">
-          {maxY.toFixed(3)}/s
-        </text>
-        <polyline
-          className="explorer-ts-line records"
-          fill="none"
-          points={paths.records}
-        />
-        <polyline
-          className="explorer-ts-line loops"
-          fill="none"
-          points={paths.loops}
-        />
-        <polyline
-          className="explorer-ts-line nodes"
-          fill="none"
-          points={paths.nodes}
-        />
-      </svg>
-      <div className="explorer-ts-xaxis">
-        <span>{t0}</span>
-        <span>{t1}</span>
-      </div>
-    </div>
-  );
-}
-
 function RecordConsole({
   fallbackRecords,
   records,
@@ -3034,36 +3195,13 @@ function RecordConsole({
   );
 }
 
-function TimelineLens({ spans }: { spans: GenericSpan[] }) {
-  const maxMs = useMemo(
-    () => Math.max(...spans.map((s) => s.latencyMs), 0.000_001),
-    [spans],
-  );
-  return spans.length > 0 ? (
-    <div className="timeline-list">
-      {spans.map((span, index) => (
-        <div key={`${span.label}:${index}`} className="timeline-row">
-          <div className="timeline-label">{span.title}</div>
-          <div className="timeline-track">
-            <div
-              className={`timeline-fill ${index === 2 ? "warning" : index === 3 ? "error" : ""}`}
-              style={{
-                width: `${Math.min(
-                  92,
-                  Math.max((span.latencyMs / maxMs) * 100, 10),
-                )}%`,
-              }}
-            />
-          </div>
-        </div>
-      ))}
-    </div>
-  ) : (
-    <EmptyState copy="No timeline data for the current span selection." compact />
-  );
-}
-
-function TraceTable({ spans }: { spans: GenericSpan[] }) {
+function TraceTable({
+  onOpenInTraces,
+  spans,
+}: {
+  onOpenInTraces: (spanIndex: number) => void;
+  spans: GenericSpan[];
+}) {
   return spans.length > 0 ? (
     <div className="trace-table">
       <div className="trace-table-head">
@@ -3073,12 +3211,17 @@ function TraceTable({ spans }: { spans: GenericSpan[] }) {
         <span>Action</span>
       </div>
       {spans.map((span, index) => (
-        <div key={`${span.label}:${index}`} className="trace-table-row">
+        <button
+          key={`${span.label}:${index}`}
+          type="button"
+          className="trace-table-row trace-table-row-btn"
+          onClick={() => onOpenInTraces(index)}
+        >
           <span className="mono trace-table-id">{span.traceIdDisplay}</span>
           <span className="mono">{span.latencyLabel}</span>
           <span>{span.statusLabel}</span>
-          <span className="trace-table-action">Open</span>
-        </div>
+          <span className="trace-table-action">Open in Traces →</span>
+        </button>
       ))}
     </div>
   ) : (
@@ -3449,33 +3592,18 @@ function buildBreadcrumbs(
   switch (activeView) {
     case "overview":
       return [...root, "Overview"];
+    case "views":
+      return [...root, "Tables"];
     case "graph":
-      return [...root, "Execution Graph"];
+      return [...root, "Graph"];
     case "node":
-      return [...root, "Node Detail", selectedNodeId ?? "selection"];
+      return [...root, "Node", selectedNodeId ?? "—"];
     case "spans":
-      return [...root, "Spans & Records"];
+      return [...root, "Traces"];
     case "launch":
-      return ["Home", "Catalog", "Launch & Compare"];
+      return ["Home", "Catalog", "Launch"];
     default:
       return root;
-  }
-}
-
-function searchScopePlaceholder(view: ViewId) {
-  switch (view) {
-    case "overview":
-      return "Use Explorer ($window, @run_id, @node_id) above — scopes chart, run bundle, and tables";
-    case "graph":
-      return "Explorer @run_id loads the graph; @node_id syncs selection";
-    case "node":
-      return "Node + frame follow Explorer @node_id and drill-down";
-    case "spans":
-      return "Records filtered by Explorer run, node facet, and $window on timestamps";
-    case "launch":
-      return "Launch is independent of Explorer until you open a run";
-    default:
-      return "scope: current view";
   }
 }
 

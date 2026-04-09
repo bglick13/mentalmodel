@@ -295,6 +295,9 @@ export type GenericSpan = {
   latencyLabel: string;
   /** Best-effort duration in milliseconds for charts. */
   latencyMs: number;
+  /** Wall-clock bounds from OTel (ms since epoch); null when absent. */
+  startTimeMs: number | null;
+  endTimeMs: number | null;
   statusLabel: string;
   /** Short id for tables (run id or trace hint). */
   traceIdDisplay: string;
