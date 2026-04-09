@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from mentalmodel.core import Workflow
@@ -13,6 +13,7 @@ from mentalmodel.environment import (
 from mentalmodel.ir.graph import IRGraph, IRNode
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.config import TracingConfig
+from mentalmodel.observability.export import serialize_runtime_value
 from mentalmodel.observability.metrics import (
     MetricEmitter,
     create_metric_emitter,
@@ -22,7 +23,12 @@ from mentalmodel.observability.metrics import (
     run_completed_observation,
     run_started_observation,
 )
-from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter, create_tracing_adapter
+from mentalmodel.observability.tracing import (
+    RecordedSpan,
+    SpanListener,
+    TracingAdapter,
+    create_tracing_adapter,
+)
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
@@ -66,10 +72,14 @@ class AsyncExecutor:
         tracing_config: TracingConfig | None = None,
         environment: RuntimeEnvironment = EMPTY_RUNTIME_ENVIRONMENT,
         invocation_name: str | None = None,
+        span_listeners: Sequence[SpanListener] = (),
     ) -> None:
         self.max_concurrency = max(1, max_concurrency)
         self.recorder = recorder or ExecutionRecorder()
-        self.tracing = tracing or create_tracing_adapter(config=tracing_config)
+        self.tracing = tracing or create_tracing_adapter(
+            config=tracing_config,
+            listeners=span_listeners,
+        )
         metric_config = tracing_config if tracing_config is not None else self.tracing.config
         self.metrics = metrics or create_metric_emitter(config=metric_config)
         self.environment = environment
@@ -206,6 +216,7 @@ class AsyncExecutor:
                 payload={
                     "kind": node.metadata.kind,
                     "output_type": type(output).__name__,
+                    "output": serialize_runtime_value(output),
                 },
             )
             node_ctx.framed_outputs.append(

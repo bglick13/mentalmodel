@@ -126,7 +126,8 @@ export type RunSummary = {
   graph_id: string;
   run_id: string;
   created_at_ms: number;
-  success: boolean;
+  status: string;
+  success: boolean | null;
   node_count: number;
   edge_count: number;
   record_count: number;
@@ -138,6 +139,15 @@ export type RunSummary = {
   trace_mode: string;
   trace_service_name: string;
   run_dir: string;
+  source: string;
+  execution_id?: string | null;
+  availability: {
+    summary: boolean;
+    records: boolean;
+    spans: boolean;
+    replay: boolean;
+    custom_views: boolean;
+  };
 };
 
 export type ExecutionRecord = {
@@ -161,6 +171,20 @@ export type ExecutionMessage = {
   source: string;
 };
 
+export type ExecutionSpan = {
+  sequence: number;
+  name: string;
+  start_time_ns: number;
+  end_time_ns: number;
+  duration_ns: number;
+  attributes: Record<string, unknown>;
+  frame_id: string;
+  loop_node_id: string | null;
+  iteration_index: number | null;
+  error_type: string | null;
+  error_message: string | null;
+};
+
 export type ExecutionSession = {
   execution_id: string;
   spec: CatalogEntry;
@@ -172,7 +196,9 @@ export type ExecutionSession = {
   run_artifacts_dir: string | null;
   latest_sequence: number;
   records: ExecutionRecord[];
+  spans: ExecutionSpan[];
   messages: ExecutionMessage[];
+  run_handle?: RunSummary;
   run_summary?: RunOverview;
 };
 

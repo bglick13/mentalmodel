@@ -32,7 +32,6 @@ from mentalmodel.remote.workspace import (
 from mentalmodel.runtime.replay import build_replay_report
 from mentalmodel.runtime.runs import (
     RunFrameScope,
-    RunSummary,
     list_run_summaries,
     load_run_graph,
     load_run_node_inputs,
@@ -58,6 +57,11 @@ from mentalmodel.ui.execution_worker import (
     SubprocessProjectExecutionWorker,
     WorkerExecutionEvent,
 )
+from mentalmodel.ui.run_handles import (
+    DashboardRunAvailability,
+    DashboardRunHandle,
+    persisted_run_handle,
+)
 from mentalmodel.ui.workspace import flatten_project_catalogs
 
 
@@ -74,6 +78,7 @@ class DashboardExecutionSession:
     run_id: str | None = None
     run_artifacts_dir: str | None = None
     records: list[dict[str, JsonValue]] = field(default_factory=list)
+    spans: list[dict[str, JsonValue]] = field(default_factory=list)
     messages: list[dict[str, JsonValue]] = field(default_factory=list)
     _next_sequence: int = field(default=1, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -85,6 +90,9 @@ class DashboardExecutionSession:
     def on_record_payload(self, payload: dict[str, JsonValue]) -> None:
         record_payload = dict(payload)
         with self._lock:
+            record_run_id = record_payload.get("run_id")
+            if self.run_id is None and isinstance(record_run_id, str) and record_run_id:
+                self.run_id = record_run_id
             sequence = _record_sequence(record_payload)
             if sequence <= 0:
                 sequence = self._next_sequence
@@ -114,6 +122,18 @@ class DashboardExecutionSession:
             if self.status == "pending":
                 self.status = "running"
 
+    def on_span_payload(self, payload: dict[str, JsonValue]) -> None:
+        span_payload = dict(payload)
+        with self._lock:
+            sequence = _span_sequence(span_payload)
+            if sequence <= 0:
+                sequence = self._next_sequence
+                span_payload["sequence"] = sequence
+            self._next_sequence = max(self._next_sequence, sequence + 1)
+            self.spans.append(span_payload)
+            if self.status == "pending":
+                self.status = "running"
+
     def mark_running(self) -> None:
         with self._lock:
             if self.status == "pending":
@@ -139,7 +159,8 @@ class DashboardExecutionSession:
         with self._lock:
             self.status = "succeeded" if success is True else "failed"
             self.finished_at_ms = int(time.time() * 1000)
-            self.run_id = run_id if isinstance(run_id, str) else None
+            if isinstance(run_id, str):
+                self.run_id = run_id
             self.run_artifacts_dir = (
                 run_artifacts_dir if isinstance(run_artifacts_dir, str) else None
             )
@@ -166,6 +187,7 @@ class DashboardExecutionSession:
             ]
             latest_sequence = max(
                 max((_record_sequence(record) for record in self.records), default=0),
+                max((_span_sequence(span) for span in self.spans), default=0),
                 max((_message_sequence(message) for message in self.messages), default=0),
             )
             return {
@@ -179,6 +201,13 @@ class DashboardExecutionSession:
                 "run_artifacts_dir": self.run_artifacts_dir,
                 "latest_sequence": latest_sequence,
                 "records": _as_json_list(new_records),
+                "spans": _as_json_list(
+                    [
+                        span
+                        for span in self.spans
+                        if _span_sequence(span) > after_sequence
+                    ]
+                ),
                 "messages": _as_json_list(new_messages),
             }
 
@@ -311,15 +340,26 @@ class DashboardService:
     def get_execution(self, execution_id: str, *, after_sequence: int = 0) -> dict[str, JsonValue]:
         session = self._require_session(execution_id)
         snapshot = session.snapshot(after_sequence=after_sequence)
+        handle = self._active_run_handle(session)
+        if handle is not None:
+            snapshot["run_handle"] = handle.as_dict()
         if session.run_id is not None:
-            if session.run_artifacts_dir is not None and Path(session.run_artifacts_dir).exists():
-                summary = load_run_summary(Path(session.run_artifacts_dir))
-                snapshot["run_summary"] = {"summary": _summary_to_payload(summary)}
-            else:
-                snapshot["run_summary"] = self.get_run_overview(
-                    graph_id=session.spec.graph_id,
-                    run_id=session.run_id,
-                )
+            try:
+                if (
+                    session.run_artifacts_dir is not None
+                    and Path(session.run_artifacts_dir).exists()
+                ):
+                    summary = load_run_summary(Path(session.run_artifacts_dir))
+                    snapshot["run_summary"] = {
+                        "summary": persisted_run_handle(summary).as_dict()
+                    }
+                else:
+                    snapshot["run_summary"] = self.get_run_overview(
+                        graph_id=session.spec.graph_id,
+                        run_id=session.run_id,
+                    )
+            except RunInspectionError:
+                pass
         return snapshot
 
     def list_runs(
@@ -340,12 +380,42 @@ class DashboardService:
                 invocation_name=invocation_name,
             )
         )
-        return tuple(
-            _summary_to_payload(summary)
+        persisted = {
+            summary.run_id: persisted_run_handle(summary)
             for summary in summaries
-        )
+        }
+        active = {
+            handle.run_id: handle
+            for handle in (
+                self._active_run_handle(session)
+                for session in self._matching_sessions(
+                    graph_id=graph_id,
+                    invocation_name=invocation_name,
+                )
+            )
+            if handle is not None
+        }
+        merged: list[DashboardRunHandle] = []
+        seen: set[str] = set()
+        for summary in summaries:
+            active_handle = active.get(summary.run_id)
+            merged.append(
+                active_handle if active_handle is not None else persisted[summary.run_id]
+            )
+            seen.add(summary.run_id)
+        for run_id, handle in active.items():
+            if run_id not in seen:
+                merged.append(handle)
+        merged.sort(key=lambda handle: (handle.created_at_ms, handle.run_id), reverse=True)
+        return tuple(handle.as_dict() for handle in merged)
 
     def get_run_graph(self, *, graph_id: str, run_id: str) -> dict[str, JsonValue]:
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return self._graph_payload_for_entry(session.spec)
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         graph = load_run_graph(
             runs_dir=history_runs_dir,
@@ -355,6 +425,21 @@ class DashboardService:
         return _graph_to_payload(graph)
 
     def get_run_overview(self, *, graph_id: str, run_id: str) -> dict[str, JsonValue]:
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            handle = self._active_run_handle(session)
+            if handle is None:
+                raise RunInspectionError(f"Run {run_id!r} is not available.")
+            return {
+                "summary": handle.as_dict(),
+                "verification": None,
+                "graph": self._graph_payload_for_entry(session.spec),
+                "metrics": [],
+                "invariants": [],
+            }
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         summary = resolve_run_summary(
             runs_dir=history_runs_dir,
@@ -375,7 +460,7 @@ class DashboardService:
         graph = self.get_run_graph(graph_id=graph_id, run_id=run_id)
         metrics = self._derive_numeric_output_metrics(graph_id=graph_id, run_id=run_id)
         return {
-            "summary": _summary_to_payload(summary),
+            "summary": persisted_run_handle(summary).as_dict(),
             "verification": verification,
             "graph": graph,
             "metrics": _as_json_list(metrics),
@@ -419,6 +504,16 @@ class DashboardService:
         run_id: str,
         node_id: str | None = None,
     ) -> tuple[dict[str, JsonValue], ...]:
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return tuple(
+                record
+                for record in session.records
+                if node_id is None or record.get("node_id") == node_id
+            )
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_records(
             runs_dir=history_runs_dir,
@@ -436,6 +531,16 @@ class DashboardService:
     ) -> tuple[dict[str, JsonValue], ...]:
         """Return OTel span rows from ``otel-spans.jsonl`` (optionally filtered by node)."""
 
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return tuple(
+                span
+                for span in session.spans
+                if node_id is None or _span_node_id(span) == node_id
+            )
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_spans(
             runs_dir=history_runs_dir,
@@ -451,6 +556,12 @@ class DashboardService:
         run_id: str,
         loop_node_id: str | None = None,
     ) -> dict[str, JsonValue]:
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return self._active_run_replay_payload(session, loop_node_id=loop_node_id)
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         report = build_replay_report(
             runs_dir=history_runs_dir,
@@ -468,6 +579,40 @@ class DashboardService:
         node_id: str,
         frame_id: str | None = None,
     ) -> dict[str, JsonValue]:
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            filtered_records = tuple(
+                record
+                for record in session.records
+                if record.get("node_id") == node_id
+                and (frame_id is None or record.get("frame_id") == frame_id)
+            )
+            return {
+                "node_id": node_id,
+                "frame_id": frame_id,
+                **_active_node_io_payload(
+                    records=filtered_records,
+                    node_id=node_id,
+                ),
+                "trace": {
+                    "records": list(filtered_records),
+                    "spans": [
+                        span
+                        for span in session.spans
+                        if _span_node_id(span) == node_id
+                        and (frame_id is None or span.get("frame_id") == frame_id)
+                    ],
+                },
+                "available_frames": _as_json_list(
+                    self._active_available_frames(
+                        session=session,
+                        node_id=node_id,
+                    )
+                ),
+            }
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         detail: dict[str, JsonValue] = {
             "node_id": node_id,
@@ -515,6 +660,192 @@ class DashboardService:
             )
         )
         return detail
+
+    def _matching_sessions(
+        self,
+        *,
+        graph_id: str | None = None,
+        invocation_name: str | None = None,
+    ) -> tuple[DashboardExecutionSession, ...]:
+        with self._lock:
+            sessions = tuple(self._sessions.values())
+        return tuple(
+            session
+            for session in sessions
+            if (graph_id is None or session.spec.graph_id == graph_id)
+            and (
+                invocation_name is None
+                or session.spec.invocation_name == invocation_name
+            )
+        )
+
+    def _session_for_run(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> DashboardExecutionSession | None:
+        for session in self._matching_sessions(graph_id=graph_id):
+            if session.run_id == run_id:
+                return session
+        return None
+
+    def _active_run_handle(
+        self,
+        session: DashboardExecutionSession,
+    ) -> DashboardRunHandle | None:
+        if session.run_id is None:
+            return None
+        output_count = sum(
+            1
+            for record in session.records
+            if record.get("event_type") == "node.succeeded"
+        )
+        return DashboardRunHandle(
+            schema_version=0,
+            graph_id=session.spec.graph_id,
+            run_id=session.run_id,
+            created_at_ms=session.started_at_ms,
+            status=session.status,
+            success=(
+                True
+                if session.status == "succeeded"
+                else False if session.status == "failed" else None
+            ),
+            node_count=0,
+            edge_count=0,
+            record_count=len(session.records),
+            output_count=output_count,
+            state_count=0,
+            invocation_name=session.spec.invocation_name,
+            runtime_default_profile_name=None,
+            runtime_profile_names=(),
+            trace_mode="live",
+            trace_service_name="mentalmodel",
+            run_dir=session.run_artifacts_dir or "",
+            source="active",
+            execution_id=session.execution_id,
+            availability=DashboardRunAvailability(
+                summary=True,
+                records=bool(session.records),
+                spans=bool(session.spans),
+                replay=bool(session.records),
+                custom_views=False,
+            ),
+        )
+
+    def _has_persisted_history(self, *, graph_id: str, run_id: str) -> bool:
+        runs_root = (
+            self.runs_dir
+            if self.remote_run_store is None
+            else self.remote_run_store.runs_root
+        )
+        try:
+            self._history_runs_dir(graph_id=graph_id, run_id=run_id)
+            resolve_run_summary(
+                runs_dir=runs_root,
+                graph_id=graph_id,
+                run_id=run_id,
+            )
+            return True
+        except RunInspectionError:
+            return False
+
+    def _graph_payload_for_entry(
+        self,
+        entry: DashboardCatalogEntry,
+    ) -> dict[str, JsonValue]:
+        external_project = self._external_project_for_entry(entry)
+        if external_project is not None:
+            payload = self._load_external_catalog_graph(entry, external_project.project.root_dir)
+            return _as_json_object(payload["graph"])
+        invocation = read_verify_invocation_spec(entry.spec_path)
+        _, program = load_workflow_subject(invocation.program)
+        return _graph_to_payload(lower_program(program))
+
+    def _active_run_replay_payload(
+        self,
+        session: DashboardExecutionSession,
+        *,
+        loop_node_id: str | None,
+    ) -> dict[str, JsonValue]:
+        records = [
+            record
+            for record in session.records
+            if loop_node_id is None or record.get("loop_node_id") == loop_node_id
+        ]
+        seen_frames: list[str] = []
+        node_summaries: dict[tuple[str, str], dict[str, JsonValue]] = {}
+        for record in records:
+            frame_id = (
+                record.get("frame_id")
+                if isinstance(record.get("frame_id"), str)
+                else "root"
+            )
+            if frame_id not in seen_frames:
+                seen_frames.append(frame_id)
+            node_id = (
+                record.get("node_id")
+                if isinstance(record.get("node_id"), str)
+                else "unknown"
+            )
+            key = (node_id, frame_id)
+            node_summaries[key] = {
+                "node_id": node_id,
+                "frame_id": frame_id,
+                "loop_node_id": record.get("loop_node_id"),
+                "iteration_index": record.get("iteration_index"),
+                "succeeded": False,
+                "failed": False,
+                "invariant_status": None,
+                "invariant_passed": None,
+                "invariant_severity": None,
+                "last_event_type": record.get("event_type") or "unknown",
+            }
+        return {
+            "graph_id": session.spec.graph_id,
+            "run_id": session.run_id,
+            "invocation_name": session.spec.invocation_name,
+            "success": session.status == "succeeded",
+            "event_count": len(records),
+            "node_count": len({record.get("node_id") for record in records}),
+            "frame_ids": seen_frames,
+            "events": records,
+            "node_summaries": list(node_summaries.values()),
+        }
+
+    def _active_available_frames(
+        self,
+        *,
+        session: DashboardExecutionSession,
+        node_id: str,
+    ) -> list[dict[str, JsonValue]]:
+        seen: list[dict[str, JsonValue]] = []
+        seen_keys: set[tuple[str, str | None, int | None]] = set()
+        for record in session.records:
+            if record.get("node_id") != node_id:
+                continue
+            frame_id = record.get("frame_id")
+            if not isinstance(frame_id, str):
+                continue
+            loop_node_id = record.get("loop_node_id")
+            iteration_index = record.get("iteration_index")
+            key = (
+                frame_id,
+                loop_node_id if isinstance(loop_node_id, str) else None,
+                iteration_index if isinstance(iteration_index, int) else None,
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            seen.append(
+                {
+                    "frame_id": frame_id,
+                    "loop_node_id": key[1],
+                    "iteration_index": key[2],
+                }
+            )
+        return seen
 
     def _run_session(self, session: DashboardExecutionSession) -> None:
         try:
@@ -851,6 +1182,9 @@ class DashboardService:
         if event.kind == "record":
             session.on_record_payload(event.payload)
             return
+        if event.kind == "span":
+            session.on_span_payload(event.payload)
+            return
         if event.kind == "message":
             message = event.payload.get("message")
             if not isinstance(message, str) or not message:
@@ -1116,28 +1450,6 @@ def _empty_timeseries(
         "runs_scanned": 0,
     }
 
-
-def _summary_to_payload(summary: RunSummary) -> dict[str, JsonValue]:
-    return {
-        "schema_version": summary.schema_version,
-        "graph_id": summary.graph_id,
-        "run_id": summary.run_id,
-        "created_at_ms": summary.created_at_ms,
-        "success": summary.success,
-        "node_count": summary.node_count,
-        "edge_count": summary.edge_count,
-        "record_count": summary.record_count,
-        "output_count": summary.output_count,
-        "state_count": summary.state_count,
-        "invocation_name": summary.invocation_name,
-        "runtime_default_profile_name": summary.runtime_default_profile_name,
-        "runtime_profile_names": list(summary.runtime_profile_names),
-        "trace_mode": summary.trace_mode,
-        "trace_service_name": summary.trace_service_name,
-        "run_dir": str(summary.run_dir),
-    }
-
-
 def _safe_load_payload(
     *,
     runs_dir: Path | None,
@@ -1207,6 +1519,55 @@ def _record_sequence(record: dict[str, JsonValue]) -> int:
 def _message_sequence(message: dict[str, JsonValue]) -> int:
     value = message.get("sequence")
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _span_sequence(span: dict[str, JsonValue]) -> int:
+    value = span.get("sequence")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _span_node_id(span: dict[str, JsonValue]) -> str | None:
+    attributes = span.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    value = attributes.get("mentalmodel.node.id")
+    return value if isinstance(value, str) else None
+
+
+def _active_node_io_payload(
+    *,
+    records: Sequence[dict[str, JsonValue]],
+    node_id: str,
+) -> dict[str, JsonValue]:
+    inputs: JsonValue | None = None
+    output: JsonValue | None = None
+    for record in records:
+        event_type = record.get("event_type")
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if event_type == "node.inputs_resolved":
+            record_inputs = payload.get("inputs")
+            if record_inputs is not None:
+                inputs = record_inputs
+        if event_type == "node.succeeded":
+            record_output = payload.get("output")
+            if record_output is not None:
+                output = record_output
+    detail: dict[str, JsonValue] = {}
+    if inputs is None:
+        detail["inputs_error"] = (
+            f"Resolved inputs for node {node_id!r} have not streamed yet."
+        )
+    else:
+        detail["inputs"] = inputs
+    if output is None:
+        detail["output_error"] = (
+            f"Node output for {node_id!r} is not available until the node succeeds."
+        )
+    else:
+        detail["output"] = output
+    return detail
 
 
 def _resolve_custom_view(

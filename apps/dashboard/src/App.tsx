@@ -189,11 +189,14 @@ function filterRecordsByTimeWindow(
 }
 
 function formatSuccessRateForRuns(sample: RunSummary[]): string {
-  if (sample.length === 0) {
+  const completed = sample.filter(
+    (run) => run.status === "succeeded" || run.status === "failed",
+  );
+  if (completed.length === 0) {
     return "n/a";
   }
-  const successes = sample.filter((run) => run.success).length;
-  return `${((successes / sample.length) * 100).toFixed(1)}%`;
+  const successes = completed.filter((run) => run.status === "succeeded").length;
+  return `${((successes / completed.length) * 100).toFixed(1)}%`;
 }
 
 const EXPLORE_PRESET_LABEL: Record<ExploreTimePreset, string> = {
@@ -451,11 +454,16 @@ function App() {
     if (
       exploreRunId != null &&
       runs.length > 0 &&
-      !runs.some((r) => r.run_id === exploreRunId)
+      !runs.some((r) => r.run_id === exploreRunId) &&
+      !(
+        activeExecution?.run_id === exploreRunId &&
+        activeExecution.status !== "succeeded" &&
+        activeExecution.status !== "failed"
+      )
     ) {
       setExploreRunId(null);
     }
-  }, [exploreRunId, runs]);
+  }, [activeExecution?.run_id, activeExecution?.status, exploreRunId, runs]);
 
   useEffect(() => {
     if (!selectedCatalog) {
@@ -472,8 +480,28 @@ function App() {
     if (activeRun?.summary.run_id === exploreRunId) {
       return;
     }
+    if (
+      activeExecution?.run_id === exploreRunId &&
+      activeExecution.status !== "succeeded" &&
+      activeExecution.status !== "failed" &&
+      !runs.some((run) => run.run_id === exploreRunId)
+    ) {
+      setActiveRun(null);
+      setActiveReplay(null);
+      setNodeDetail(null);
+      setRunSpans(null);
+      return;
+    }
     void loadRun(selectedCatalog, exploreRunId);
-  }, [selectedCatalog, exploreRunId, loadRun, activeRun?.summary.run_id]);
+  }, [
+    selectedCatalog,
+    exploreRunId,
+    loadRun,
+    activeExecution?.run_id,
+    activeExecution?.status,
+    activeRun?.summary.run_id,
+    runs,
+  ]);
 
   useEffect(() => {
     if (!selectedCatalog || !activeRun || exploreRunId == null) {
@@ -720,6 +748,7 @@ function App() {
           return {
             ...next,
             records: [...current.records, ...next.records],
+            spans: [...current.spans, ...next.spans],
             messages: [...current.messages, ...next.messages],
           };
         });
@@ -806,14 +835,23 @@ function App() {
     () => getSelectedNodeSummary(activeReplay, selectedNodeId, selectedFrameId),
     [activeReplay, selectedFrameId, selectedNodeId],
   );
+  const liveRecords = activeExecution?.records ?? [];
+  const liveMessages = activeExecution?.messages ?? [];
+  const liveRunRecords = useMemo(
+    () =>
+      activeExecution?.run_id === exploreRunId
+        ? liveRecords
+        : [],
+    [activeExecution?.run_id, exploreRunId, liveRecords],
+  );
   const recordsInTimeWindow = useMemo(
     () =>
       filterRecordsByTimeWindow(
-        activeRecords,
+        activeRun?.summary.run_id === exploreRunId ? activeRecords : liveRunRecords,
         exploreWindow.sinceMs,
         exploreWindow.untilMs,
       ),
-    [activeRecords, exploreWindow],
+    [activeRecords, activeRun?.summary.run_id, exploreRunId, exploreWindow, liveRunRecords],
   );
   const selectedNodeRecords = useMemo(
     () =>
@@ -826,8 +864,6 @@ function App() {
     }
     return runsInExploreWindow.reduce((sum, r) => sum + r.record_count, 0);
   }, [exploreRunId, recordsInTimeWindow, runsInExploreWindow]);
-  const liveRecords = activeExecution?.records ?? [];
-  const liveMessages = activeExecution?.messages ?? [];
   const recentRunSuccessLabel = useMemo(
     () => formatSuccessRateForRuns(runsInExploreWindow),
     [runsInExploreWindow],
@@ -850,11 +886,24 @@ function App() {
     () =>
       buildSpanViews(
         nodeDetail,
-        runSpans,
+        activeRun?.summary.run_id === exploreRunId
+          ? runSpans
+          : activeExecution?.run_id === exploreRunId
+            ? activeExecution.spans
+            : runSpans,
         exploreNodeId,
         selectedFrameId,
       ),
-    [nodeDetail, runSpans, exploreNodeId, selectedFrameId],
+    [
+      activeExecution?.run_id,
+      activeExecution?.spans,
+      activeRun?.summary.run_id,
+      nodeDetail,
+      runSpans,
+      exploreNodeId,
+      selectedFrameId,
+      exploreRunId,
+    ],
   );
 
   useEffect(() => {
@@ -1292,10 +1341,13 @@ function renderCurrentView({
     case "launch":
       return (
         <LaunchCompareView
+          activeExecution={activeExecution}
           catalog={catalog}
           customSpecPath={customSpecPath}
           handleRun={handleRun}
           handleRunFromPath={handleRunFromPath}
+          liveMessages={liveMessages}
+          liveRecords={liveRecords}
           runs={runs}
           selectedCatalog={selectedCatalog}
           setCatalog={setCatalog}
@@ -1422,8 +1474,14 @@ function OverviewView({
                     <div className="list-card-head">
                       <span>{run.invocation_name ?? run.run_id.slice(0, 12)}</span>
                       <StatusChip
-                        label={run.success ? "pass" : "fail"}
-                        tone={run.success ? "ok" : "error"}
+                        label={run.status}
+                        tone={
+                          run.status === "succeeded"
+                            ? "ok"
+                            : run.status === "failed"
+                              ? "error"
+                              : "accent"
+                        }
                       />
                     </div>
                     <div className="list-card-copy">
@@ -1538,10 +1596,9 @@ function OverviewView({
                 activeExecution.spec.project_id &&
                 activeExecution.spec.project_id !== "mentalmodel-examples" ? (
                   <div className="empty-state">
-                    External project executions do not stream live semantic
-                    records into the dashboard yet. While the run initializes,
-                    this panel stays empty until subprocess output or the
-                    completed bundle arrives.
+                    External run started. Live records have not arrived yet, so
+                    the worker is likely still in setup before the workflow
+                    begins emitting semantic events.
                   </div>
                 ) : null}
               </div>
@@ -2377,10 +2434,13 @@ function SemanticRecordList({
 }
 
 function LaunchCompareView({
+  activeExecution,
   catalog,
   customSpecPath,
   handleRun,
   handleRunFromPath,
+  liveMessages,
+  liveRecords,
   runs,
   selectedCatalog,
   setCatalog,
@@ -2388,10 +2448,13 @@ function LaunchCompareView({
   setExploreRunId,
   setSelectedSpecId,
 }: {
+  activeExecution: ExecutionSession | null;
   catalog: CatalogEntry[];
   customSpecPath: string;
   handleRun: (specId: string) => Promise<void>;
   handleRunFromPath: (specPath: string) => Promise<void>;
+  liveMessages: ExecutionMessage[];
+  liveRecords: ExecutionRecord[];
   runs: RunSummary[];
   selectedCatalog: CatalogEntry | null;
   setCatalog: (entries: CatalogEntry[]) => void;
@@ -2495,6 +2558,78 @@ function LaunchCompareView({
                 </button>
               ) : null}
             </div>
+          ) : null}
+
+          {activeExecution ? (
+            <>
+              <div className="launch-meta launch-live-meta">
+                <div>
+                  <span className="eyebrow">Execution</span>
+                  <div className="launch-meta-value">
+                    <StatusChip
+                      label={activeExecution.status}
+                      tone={
+                        activeExecution.status === "succeeded"
+                          ? "ok"
+                          : activeExecution.status === "failed"
+                            ? "error"
+                            : "accent"
+                      }
+                    />
+                  </div>
+                </div>
+                <div>
+                  <span className="eyebrow">Live records</span>
+                  <div className="launch-meta-value">{liveRecords.length}</div>
+                </div>
+                <div>
+                  <span className="eyebrow">Live messages</span>
+                  <div className="launch-meta-value">{liveMessages.length}</div>
+                </div>
+                <div>
+                  <span className="eyebrow">Run id</span>
+                  <div className="launch-meta-value">
+                    {activeExecution.run_id ?? "pending"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="record-console launch-console">
+                {liveMessages.length > 0 ? (
+                  liveMessages.slice(-4).map((message) => (
+                    <div
+                      key={`${message.sequence}:${message.timestamp_ms}`}
+                      className="record-console-line"
+                    >
+                      <span className="record-console-pill mono">
+                        {message.level}
+                      </span>
+                      <span className="record-console-node mono">
+                        {message.source}
+                      </span>
+                      <span>{message.message}</span>
+                    </div>
+                  ))
+                ) : liveRecords.length > 0 ? (
+                  liveRecords.slice(-4).map((record) => (
+                    <div key={record.record_id} className="record-console-line">
+                      <span className="record-console-pill mono">
+                        {record.event_type}
+                      </span>
+                      <span className="record-console-node mono">
+                        {record.node_id}
+                      </span>
+                      <span>{record.frame_id}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="empty-state compact">
+                    Launch requested. Waiting for the first worker message or
+                    semantic record.
+                  </div>
+                )}
+              </div>
+            </>
           ) : null}
         </Panel>
 

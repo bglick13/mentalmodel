@@ -13,7 +13,7 @@ from mentalmodel.environment import EMPTY_RUNTIME_ENVIRONMENT, RuntimeEnvironmen
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import write_json
-from mentalmodel.observability.tracing import RecordedSpan
+from mentalmodel.observability.tracing import RecordedSpan, SpanListener
 from mentalmodel.remote import (
     CompletedRunSink,
     ExecutionRecordSink,
@@ -182,6 +182,7 @@ def run_verification(
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
     record_listeners: Sequence[RecordListener] = (),
+    span_listeners: Sequence[SpanListener] = (),
     record_sinks: Sequence[ExecutionRecordSink] = (),
     completed_run_sink: CompletedRunSink | None = None,
 ) -> VerificationReport:
@@ -194,6 +195,7 @@ def run_verification(
         environment=environment,
         invocation_name=invocation_name,
         record_listeners=record_listeners,
+        span_listeners=span_listeners,
         record_sinks=record_sinks,
     )
     property_checks = (
@@ -260,6 +262,7 @@ def _capture_runtime(
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
     record_listeners: Sequence[RecordListener] = (),
+    span_listeners: Sequence[SpanListener] = (),
     record_sinks: Sequence[ExecutionRecordSink] = (),
 ) -> RuntimeExecutionCapture:
     sink_listeners = tuple(record_listener_for_sink(sink) for sink in record_sinks)
@@ -269,6 +272,7 @@ def _capture_runtime(
         recorder=recorder,
         environment=resolved_environment,
         invocation_name=invocation_name,
+        span_listeners=span_listeners,
     )
     try:
         result = asyncio.run(

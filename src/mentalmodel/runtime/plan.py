@@ -21,6 +21,7 @@ from mentalmodel.environment import ResourceKey
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IRGraph, IRNode
 from mentalmodel.ir.lowering import lower_program_with_bindings
+from mentalmodel.observability.export import serialize_runtime_value
 from mentalmodel.observability.metrics import (
     OutputMetricSpec,
     cast_metric_specs,
@@ -696,6 +697,7 @@ class _LoopNodeRunner:
                 payload={
                     "kind": node.metadata.kind,
                     "output_type": type(output).__name__,
+                    "output": serialize_runtime_value(output),
                 },
             )
             node_ctx.framed_outputs.append(

@@ -632,10 +632,20 @@ def _record_signatures(
     return tuple(
         {
             "event_type": _require_str(record, "event_type"),
-            "payload": _require_payload(record),
+            "payload": _signature_payload(record),
         }
         for record in records
     )
+
+
+def _signature_payload(record: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    payload = dict(_require_payload(record))
+    event_type = _require_str(record, "event_type")
+    if event_type == "node.inputs_resolved":
+        payload.pop("inputs", None)
+    if event_type == "node.succeeded":
+        payload.pop("output", None)
+    return payload
 
 
 def _event_types(records: tuple[dict[str, JsonValue], ...]) -> list[str]:

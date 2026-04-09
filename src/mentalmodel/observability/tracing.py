@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -33,6 +33,9 @@ class RecordedSpan:
     error_message: str | None = None
 
 
+SpanListener = Callable[[RecordedSpan], None]
+
+
 @dataclass(slots=True)
 class TracingAdapter:
     """Wrapper around an OpenTelemetry tracer plus local span capture."""
@@ -41,6 +44,7 @@ class TracingAdapter:
     provider: TracerProvider
     config: TracingConfig
     spans: list[RecordedSpan] = field(default_factory=list)
+    listeners: Sequence[SpanListener] = field(default_factory=tuple)
 
     @property
     def sink_configured(self) -> bool:
@@ -69,19 +73,20 @@ class TracingAdapter:
                 raise
             finally:
                 if self.config.capture_local_spans:
-                    self.spans.append(
-                        RecordedSpan(
-                            name=name,
-                            start_time_ns=start_time_ns,
-                            end_time_ns=time.time_ns(),
-                            attributes=attrs,
-                            frame_id=_span_frame_id(attrs),
-                            loop_node_id=_span_loop_node_id(attrs),
-                            iteration_index=_span_iteration_index(attrs),
-                            error_type=error_type,
-                            error_message=error_message,
-                        )
+                    recorded = RecordedSpan(
+                        name=name,
+                        start_time_ns=start_time_ns,
+                        end_time_ns=time.time_ns(),
+                        attributes=attrs,
+                        frame_id=_span_frame_id(attrs),
+                        loop_node_id=_span_loop_node_id(attrs),
+                        iteration_index=_span_iteration_index(attrs),
+                        error_type=error_type,
+                        error_message=error_message,
                     )
+                    self.spans.append(recorded)
+                    for listener in self.listeners:
+                        listener(recorded)
 
     def snapshot_spans(self) -> tuple[RecordedSpan, ...]:
         """Return an immutable copy of captured spans."""
@@ -104,6 +109,7 @@ class TracingFactory:
     """Factory for tracer providers and exporters from typed config."""
 
     config: TracingConfig
+    listeners: Sequence[SpanListener] = ()
 
     def create(self) -> TracingAdapter:
         provider = TracerProvider(resource=self._resource())
@@ -114,6 +120,7 @@ class TracingFactory:
             tracer=provider.get_tracer("mentalmodel.runtime"),
             provider=provider,
             config=self.config,
+            listeners=self.listeners,
         )
 
     def _resource(self) -> Resource:
@@ -155,11 +162,12 @@ def create_tracing_adapter(
     *,
     config: TracingConfig | None = None,
     service_name: str = "mentalmodel",
+    listeners: Sequence[SpanListener] = (),
 ) -> TracingAdapter:
     """Create a tracing adapter from explicit config or environment defaults."""
 
     resolved = config or load_tracing_config(service_name=service_name)
-    return TracingFactory(resolved).create()
+    return TracingFactory(resolved, listeners=listeners).create()
 
 
 def _span_frame_id(attributes: Mapping[str, str]) -> str:

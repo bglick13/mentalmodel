@@ -4,6 +4,7 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -465,8 +466,8 @@ class DashboardApiTest(unittest.TestCase):
             "success": True,
             "runtime": {
                 "success": True,
-                "record_count": 1,
-                "output_count": 0,
+                "record_count": 2,
+                "output_count": 1,
                 "state_count": 0,
                 "run_id": None,
                 "run_artifacts_dir": None,
@@ -479,37 +480,119 @@ class DashboardApiTest(unittest.TestCase):
             "property_checks": [],
             "graph_id": "pangramanizer_training_real_verify3",
         }
-        live_record = {
+        live_inputs_record = {
+            "run_id": "run-external-live",
             "timestamp_ms": 1234,
             "node_id": "rollout_join",
             "frame_id": "root",
-            "event": "node_completed",
+            "event_type": "node.inputs_resolved",
+            "payload": {
+                "inputs": {
+                    "prompt": "Write a pangram about space travel.",
+                }
+            },
         }
+        live_output_record = {
+            "run_id": "run-external-live",
+            "timestamp_ms": 1235,
+            "node_id": "rollout_join",
+            "frame_id": "root",
+            "event_type": "node.succeeded",
+            "payload": {
+                "output": {
+                    "sample_text": "Sphinx of black quartz, judge my vow.",
+                    "pangram_score": 1.0,
+                }
+            },
+        }
+        live_span = {
+            "name": "join:rollout_join",
+            "start_time_ns": 10,
+            "end_time_ns": 20,
+            "duration_ns": 10,
+            "attributes": {
+                "mentalmodel.node.id": "rollout_join",
+            },
+            "frame_id": "root",
+            "loop_node_id": None,
+            "iteration_index": None,
+            "error_type": None,
+            "error_message": None,
+        }
+        completion_gate = threading.Event()
+
+        class ControlledPipe:
+            def __init__(
+                self,
+                *,
+                initial_lines: tuple[str, ...],
+                completion_line: str | None = None,
+                completion_gate: threading.Event | None = None,
+            ) -> None:
+                self._initial_lines = list(initial_lines)
+                self._completion_line = completion_line
+                self._completion_gate = completion_gate
+                self._completion_emitted = completion_line is None
+
+            def __iter__(self) -> ControlledPipe:
+                return self
+
+            def __next__(self) -> str:
+                if self._initial_lines:
+                    return self._initial_lines.pop(0)
+                if self._completion_emitted:
+                    raise StopIteration
+                assert self._completion_gate is not None
+                released = self._completion_gate.wait(timeout=1.0)
+                if not released:
+                    raise StopIteration
+                self._completion_emitted = True
+                assert self._completion_line is not None
+                return self._completion_line
+
+            def close(self) -> None:
+                return
 
         class FakePopen:
             def __init__(self, args: list[str], **_: object) -> None:
                 self.args = args
-                self.stdout = io.StringIO(
-                    "\n".join(
-                        (
-                            "Your Tinker SDK version is outdated.",
-                            WORKER_EVENT_PREFIX
-                            + json.dumps(
-                                {
-                                    "kind": "record",
-                                    "payload": live_record,
-                                }
-                            ),
-                            WORKER_EVENT_PREFIX
-                            + json.dumps(
-                                {
-                                    "kind": "completion",
-                                    "payload": payload,
-                                }
-                            ),
+                self.stdout = ControlledPipe(
+                    initial_lines=(
+                        "Your Tinker SDK version is outdated.\n",
+                        WORKER_EVENT_PREFIX
+                        + json.dumps(
+                            {
+                                "kind": "record",
+                                "payload": live_inputs_record,
+                            }
                         )
+                        + "\n",
+                        WORKER_EVENT_PREFIX
+                        + json.dumps(
+                            {
+                                "kind": "record",
+                                "payload": live_output_record,
+                            }
+                        )
+                        + "\n",
+                        WORKER_EVENT_PREFIX
+                        + json.dumps(
+                            {
+                                "kind": "span",
+                                "payload": live_span,
+                            }
+                        )
+                        + "\n",
+                    ),
+                    completion_line=WORKER_EVENT_PREFIX
+                    + json.dumps(
+                        {
+                            "kind": "completion",
+                            "payload": payload,
+                        }
                     )
-                    + "\n"
+                    + "\n",
+                    completion_gate=completion_gate,
                 )
                 self.stderr = io.StringIO("")
 
@@ -519,11 +602,69 @@ class DashboardApiTest(unittest.TestCase):
         with patch(
             "mentalmodel.ui.execution_worker.subprocess.Popen",
             side_effect=FakePopen,
-        ) as popen:
+        ) as popen, patch("mentalmodel.ui.service.subprocess.run") as run_subprocess:
+            run_subprocess.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "graph": {
+                            "graph_id": "pangramanizer_training_real_verify3",
+                            "metadata": {},
+                            "nodes": [],
+                            "edges": [],
+                        },
+                        "analysis": {
+                            "error_count": 0,
+                            "warning_count": 0,
+                            "findings": [],
+                        },
+                    }
+                ),
+                stderr="",
+            )
             launch = client.post("/api/executions", json={"spec_id": "pangram-real-verify3"})
             self.assertEqual(launch.status_code, 200)
             execution_id = launch.json()["execution_id"]
-            for _ in range(20):
+            for _ in range(40):
+                execution = client.get(f"/api/executions/{execution_id}").json()
+                if (
+                    execution["status"] == "running"
+                    and execution["run_id"] == "run-external-live"
+                    and len(execution["records"]) == 2
+                    and len(execution["spans"]) == 1
+                ):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(execution["status"], "running")
+            self.assertEqual(execution["run_id"], "run-external-live")
+            self.assertEqual(len(execution["records"]), 2)
+            self.assertEqual(len(execution["spans"]), 1)
+            node_detail_response = client.get(
+                "/api/runs/pangramanizer_training_real_verify3/run-external-live/nodes/rollout_join"
+            )
+            self.assertEqual(node_detail_response.status_code, 200)
+            node_detail = node_detail_response.json()
+            self.assertEqual(
+                node_detail["inputs"],
+                {"prompt": "Write a pangram about space travel."},
+            )
+            self.assertEqual(
+                node_detail["output"],
+                {
+                    "sample_text": "Sphinx of black quartz, judge my vow.",
+                    "pangram_score": 1.0,
+                },
+            )
+            self.assertEqual(len(node_detail["trace"]["records"]), 2)
+            self.assertEqual(len(node_detail["trace"]["spans"]), 1)
+            spans_response = client.get(
+                "/api/runs/pangramanizer_training_real_verify3/run-external-live/spans"
+            )
+            self.assertEqual(spans_response.status_code, 200)
+            self.assertEqual(len(spans_response.json()["spans"]), 1)
+            completion_gate.set()
+            for _ in range(40):
                 execution = client.get(f"/api/executions/{execution_id}").json()
                 if execution["status"] in {"succeeded", "failed"}:
                     break
@@ -535,8 +676,25 @@ class DashboardApiTest(unittest.TestCase):
                 for message in execution["messages"]
             )
         )
-        self.assertEqual(len(execution["records"]), 1)
+        self.assertEqual(execution["run_id"], "run-external-live")
+        self.assertEqual(len(execution["records"]), 2)
+        self.assertEqual(len(execution["spans"]), 1)
         self.assertEqual(execution["records"][0]["node_id"], "rollout_join")
+        runs_response = client.get(
+            "/api/runs",
+            params={
+                "graph_id": "pangramanizer_training_real_verify3",
+                "invocation_name": "pangram_real_verify3",
+            },
+        )
+        self.assertEqual(runs_response.status_code, 200)
+        runs = runs_response.json()["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["run_id"], "run-external-live")
+        self.assertEqual(runs[0]["status"], "succeeded")
+        self.assertEqual(runs[0]["source"], "active")
+        self.assertTrue(runs[0]["availability"]["records"])
+        self.assertTrue(runs[0]["availability"]["spans"])
         popen.assert_called_once()
 
     def test_external_spec_path_registration_and_execution_use_subprocess(self) -> None:

@@ -14,7 +14,7 @@ from mentalmodel.ui.catalog import DashboardCatalogError
 
 WORKER_EVENT_PREFIX = "MM_EVENT:"
 
-WorkerEventKind = Literal["completion", "lifecycle", "message", "record"]
+WorkerEventKind = Literal["completion", "lifecycle", "message", "record", "span"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -219,7 +219,7 @@ def _decode_worker_event(line: str) -> WorkerExecutionEvent | None:
         raise DashboardCatalogError("External worker event must be a JSON object.")
     kind = decoded.get("kind")
     payload = decoded.get("payload")
-    if kind not in {"completion", "lifecycle", "message", "record"}:
+    if kind not in {"completion", "lifecycle", "message", "record", "span"}:
         raise DashboardCatalogError(f"Unsupported external worker event kind {kind!r}.")
     if not isinstance(payload, dict):
         raise DashboardCatalogError("External worker event payload must be a JSON object.")
@@ -259,6 +259,7 @@ from mentalmodel.invocation import (
     read_verify_invocation_spec,
 )
 from mentalmodel.observability.export import execution_record_to_json
+from mentalmodel.observability.export import recorded_span_to_json
 from mentalmodel.testing import run_verification
 
 EVENT_PREFIX = "MM_EVENT:"
@@ -290,6 +291,10 @@ def on_record(record: object) -> None:
     emit("record", execution_record_to_json(record))
 
 
+def on_span(span: object) -> None:
+    emit("span", recorded_span_to_json(span))
+
+
 report = run_verification(
     program,
     module=module,
@@ -297,6 +302,7 @@ report = run_verification(
     environment=environment,
     invocation_name=invocation.invocation_name,
     record_listeners=(on_record,),
+    span_listeners=(on_span,),
 )
 emit("completion", report.as_dict())
 """.strip()
