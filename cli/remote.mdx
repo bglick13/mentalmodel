@@ -31,6 +31,10 @@ Hosted repo-linked mode is the primary product path.
 Local workspace mode exists for generated demo stacks, offline development, and
 multi-repo local testing.
 
+If you are moving from the earlier local-workspace MVP to the hosted model, use
+the [Remote Migration](/guides/remote-migration) guide alongside this command
+reference.
+
 ## Repo-linked hosted path
 
 Phase 1 introduces a repo-owned service config in `mentalmodel.toml`.
@@ -180,6 +184,8 @@ Local checks still validate:
 - output routing
 - stack asset layout
 
+## Hosted operator workflow
+
 ## Normal completed-run flow
 
 In a linked repo, the normal operator path is now just:
@@ -223,6 +229,11 @@ The important semantics are:
 - the completed bundle upload is the authoritative closeout step
 - once the completed bundle lands, the dashboard should pivot back to the
   persisted run view rather than treating the live session as canonical
+
+For operator-facing diagnosis, `mentalmodel verify --json` now surfaces
+`runtime.live_execution_delivery` alongside `runtime.completed_run_upload`, so
+you can distinguish live-stream failures from completed bundle upload failures
+without guessing from logs alone.
 
 What that looks like operationally:
 

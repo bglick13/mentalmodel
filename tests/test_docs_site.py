@@ -122,3 +122,28 @@ class DocsSiteTest(unittest.TestCase):
         self.assertIn("temporary bridge", readme)
         self.assertIn("live to\ncompleted handoff", ui_page)
         self.assertNotIn("[`projects`](/cli/projects)", overview_page)
+
+    def test_phase_6_remote_docs_cover_delivery_health_and_migration(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        docs_json = (repo_root / "docs.json").read_text(encoding="utf-8")
+        remote_page = (repo_root / "cli" / "remote.mdx").read_text(encoding="utf-8")
+        ui_page = (repo_root / "cli" / "ui.mdx").read_text(encoding="utf-8")
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        guide = (repo_root / "guides" / "remote-migration.mdx").read_text(
+            encoding="utf-8"
+        )
+        remote_readme = (repo_root / "src" / "mentalmodel" / "remote" / "README.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("guides/remote-migration", docs_json)
+        self.assertIn("runtime.live_execution_delivery", remote_page)
+        self.assertIn("Hosted operator workflow", remote_page)
+        self.assertIn("Remote Migration", remote_page)
+        self.assertIn("remote delivery health", ui_page)
+        self.assertIn("recent remote operation events", ui_page)
+        self.assertIn("runtime.live_execution_delivery", readme)
+        self.assertIn("Remote Migration guide", readme)
+        self.assertIn("remote sync", guide)
+        self.assertIn("remote operation events", remote_readme)
+        self.assertIn("runtime.live_execution_delivery", remote_readme)

@@ -1,0 +1,92 @@
+---
+title: Remote Migration
+description: Move from the local workspace MVP to the hosted repo-linked mentalmodel service model.
+---
+
+This guide is the migration path from the earlier local-workspace MVP to the
+current hosted repo-linked model.
+
+## When to use which path
+
+Use the hosted path when:
+
+- a repo should appear in the dashboard without editing a server-local
+  `workspace.toml`
+- completed runs should upload automatically after `mentalmodel verify`
+- live execution should stream to the hosted dashboard during long runs
+- operators need remote delivery diagnostics and recent service-side events
+
+Use the local workspace path when:
+
+- you are prototyping against a generated local stack
+- you need one offline dashboard that mounts multiple local repos directly
+- you are testing provider/catalog behavior without linking a hosted service
+
+## Hosted migration checklist
+
+1. Add `mentalmodel.toml` to the repo root.
+2. Define:
+   - `[project]`
+   - `[remote]`
+   - `[catalog]`
+   - `[runs]`
+   - `[verify]`
+3. Export the configured API key environment variable.
+4. Run `mentalmodel remote link`.
+5. Confirm the link with `mentalmodel remote status`.
+6. Confirm hosted readiness with `mentalmodel remote doctor`.
+7. Run the normal workflow:
+
+```bash
+uv run mentalmodel verify --spec path/to/spec.toml
+```
+
+After that, the producer flow should be:
+
+- write the canonical local `.runs` bundle
+- stream live execution during the run
+- upload the completed bundle automatically
+
+## What changes from the MVP
+
+The hosted model no longer treats these as the common path:
+
+- editing a server-local `workspace.toml`
+- using `mentalmodel projects add`
+- manually running `mentalmodel remote sync` after every verification
+- requiring the hosted dashboard to import the producer repo locally
+
+Those remain useful local-development tools, but they are not the standard
+hosted operator workflow.
+
+## Diagnosing remote delivery
+
+The hosted path now has three main debugging surfaces:
+
+1. `mentalmodel remote doctor`
+   Confirms repo config, API key, default spec, runs dir, and remote link state.
+
+2. `mentalmodel verify`
+   Runtime payload now includes:
+   - `runtime.live_execution_delivery`
+   - `runtime.completed_run_upload`
+
+3. Hosted dashboard
+   The dashboard now exposes remote delivery summaries and recent remote
+   operation events for the selected run.
+
+If live streaming fails transiently, the producer keeps the buffered events
+locally and still writes the final `.runs` bundle. If the completed upload
+fails, the command reports that failure explicitly and the local bundle remains
+the recovery source of truth.
+
+## Recovery path
+
+If the hosted service was unavailable during a previous run, use:
+
+```bash
+uv run mentalmodel remote sync --config /path/to/mentalmodel.toml
+```
+
+`remote sync` is now the recovery and backfill path, not the normal hosted
+workflow.

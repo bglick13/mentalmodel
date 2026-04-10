@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import base64
-import json
 import time
 from pathlib import Path
 from typing import cast
-from urllib import request
 
 from mentalmodel.analysis import AnalysisReport
 from mentalmodel.ir.graph import IRGraph
@@ -14,7 +12,6 @@ from mentalmodel.observability.export import execution_record_to_json, recorded_
 from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.remote.contracts import (
     CatalogSource,
-    RemoteContractError,
     RemoteLiveSessionStartRequest,
     RemoteLiveSessionStatus,
     RemoteLiveSessionUpdateRequest,
@@ -25,9 +22,11 @@ from mentalmodel.remote.project_config import MentalModelProjectConfig
 from mentalmodel.remote.sinks import (
     CompletedRunPublishResult,
     CompletedRunSink,
+    LiveExecutionPublishResult,
     LiveExecutionSink,
 )
 from mentalmodel.remote.store import RunBundleUpload, UploadedArtifact
+from mentalmodel.remote.transport import RemoteRequestError, request_json_with_retry
 from mentalmodel.runtime.runs import (
     build_run_manifest_from_summary,
     list_run_summaries,
@@ -105,7 +104,7 @@ def upload_run_bundle_to_server(
     server_url: str,
     upload: RunBundleUpload,
     api_key: str | None = None,
-) -> RemoteRunUploadReceipt:
+) -> tuple[RemoteRunUploadReceipt, int]:
     """Upload one completed run bundle to the remote ingest API."""
 
     response = _request_json(
@@ -114,7 +113,9 @@ def upload_run_bundle_to_server(
         payload=upload.as_dict(),
         api_key=api_key,
     )
-    return RemoteRunUploadReceipt.from_dict(response)
+    payload = cast(dict[str, object], response["payload"])
+    attempt_count = cast(int, response["attempt_count"])
+    return RemoteRunUploadReceipt.from_dict(payload), attempt_count
 
 
 def sync_runs_to_server(
@@ -130,7 +131,7 @@ def sync_runs_to_server(
     catalog_entry_id: str | None = None,
     catalog_source: CatalogSource | None = None,
     api_key: str | None = None,
-) -> tuple[RemoteRunUploadReceipt, ...]:
+) -> tuple[tuple[RemoteRunUploadReceipt, int], ...]:
     """Sync one or more local run bundles to the remote ingest API."""
 
     uploads: tuple[RunBundleUpload, ...]
@@ -189,7 +190,7 @@ def sync_runs_for_project(
     environment_name: str | None = None,
     catalog_entry_id: str | None = None,
     catalog_source: CatalogSource | None = None,
-) -> tuple[RemoteRunUploadReceipt, ...]:
+) -> tuple[tuple[RemoteRunUploadReceipt, int], ...]:
     """Sync one or more local run bundles using repo-linked remote config."""
 
     return sync_runs_to_server(
@@ -239,18 +240,49 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
         self._started = False
         self._buffered_records: list[dict[str, object]] = []
         self._buffered_spans: list[dict[str, object]] = []
+        self._delivered_record_count = 0
+        self._delivered_span_count = 0
+        self._start_attempt_count = 0
+        self._update_attempt_count = 0
+        self._error: str | None = None
+        self._error_category: str | None = None
+        self._retryable: bool | None = None
 
     @property
     def server_url(self) -> str:
         return self._config.server_url
 
     def start(self, *, graph: IRGraph, analysis: AnalysisReport) -> None:
-        if self._started:
-            return
         self._graph_payload = _graph_to_remote_payload(graph)
         self._analysis_payload = _analysis_to_remote_payload(analysis)
+        self._ensure_started()
+
+    def delivery_result(self) -> LiveExecutionPublishResult | None:
+        if self._graph_payload is None:
+            return None
+        return LiveExecutionPublishResult(
+            transport="service-api-live",
+            success=self._error is None,
+            graph_id=cast(str, self._graph_payload["graph_id"]),
+            run_id=self.run_id,
+            project_id=self.project_id,
+            server_url=self.server_url,
+            start_attempt_count=self._start_attempt_count,
+            update_attempt_count=self._update_attempt_count,
+            delivered_record_count=self._delivered_record_count,
+            delivered_span_count=self._delivered_span_count,
+            buffered_record_count=len(self._buffered_records),
+            buffered_span_count=len(self._buffered_spans),
+            retryable=self._retryable,
+            error_category=self._error_category,
+            error=self._error,
+        )
+
+    def _ensure_started(self) -> None:
+        if self._started or self._graph_payload is None or self._analysis_payload is None:
+            return
         try:
-            _request_json(
+            response = _request_json(
                 f"{self.server_url.rstrip('/')}/api/remote/live/sessions/start",
                 method="POST",
                 payload=RemoteLiveSessionStartRequest(
@@ -269,13 +301,18 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
                 ).as_dict(),
                 api_key=self._config.resolve_api_key(),
             )
+            self._start_attempt_count += cast(int, response["attempt_count"])
             self._started = True
-        except Exception:
-            return
+            self._error = None
+            self._error_category = None
+            self._retryable = None
+        except RemoteRequestError as exc:
+            self._start_attempt_count += exc.attempt_count
+            self._error = str(exc)
+            self._error_category = exc.category.value
+            self._retryable = exc.retryable
 
     def emit_record(self, record: ExecutionRecord) -> None:
-        if not self._started:
-            return
         self._buffered_records.append(
             cast(dict[str, object], execution_record_to_json(record))
         )
@@ -283,8 +320,6 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
             self._flush()
 
     def emit_span(self, span: RecordedSpan) -> None:
-        if not self._started:
-            return
         self._buffered_spans.append(
             cast(dict[str, object], recorded_span_to_json(span))
         )
@@ -292,8 +327,6 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
             self._flush()
 
     def complete(self, *, success: bool, error: str | None = None) -> None:
-        if not self._started:
-            return
         self._flush(
             status=(
                 RemoteLiveSessionStatus.SUCCEEDED
@@ -309,10 +342,13 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
         status: RemoteLiveSessionStatus | None = None,
         error: str | None = None,
     ) -> None:
+        self._ensure_started()
         if not self._started:
             return
         if not self._buffered_records and not self._buffered_spans and status is None:
             return
+        record_count = len(self._buffered_records)
+        span_count = len(self._buffered_spans)
         payload = RemoteLiveSessionUpdateRequest(
             graph_id=cast(str, cast(dict[str, object], self._graph_payload)["graph_id"]),
             run_id=self.run_id,
@@ -322,17 +358,26 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
             records=tuple(self._buffered_records),
             spans=tuple(self._buffered_spans),
         )
-        self._buffered_records = []
-        self._buffered_spans = []
         try:
-            _request_json(
+            response = _request_json(
                 f"{self.server_url.rstrip('/')}/api/remote/live/sessions/{self.run_id}",
                 method="POST",
                 payload=payload.as_dict(),
                 api_key=self._config.resolve_api_key(),
             )
-        except Exception:
-            return
+            self._update_attempt_count += cast(int, response["attempt_count"])
+            self._delivered_record_count += record_count
+            self._delivered_span_count += span_count
+            self._buffered_records = []
+            self._buffered_spans = []
+            self._error = None
+            self._error_category = None
+            self._retryable = None
+        except RemoteRequestError as exc:
+            self._update_attempt_count += exc.attempt_count
+            self._error = str(exc)
+            self._error_category = exc.category.value
+            self._retryable = exc.retryable
 
 
 class RemoteServiceCompletedRunSink(CompletedRunSink):
@@ -377,7 +422,7 @@ class RemoteServiceCompletedRunSink(CompletedRunSink):
             catalog_entry_id=self.catalog_entry_id,
             catalog_source=self.catalog_source,
         )
-        receipt = upload_run_bundle_to_server(
+        receipt, attempt_count = upload_run_bundle_to_server(
             server_url=self._config.server_url,
             upload=upload,
             api_key=self._config.resolve_api_key(),
@@ -391,6 +436,7 @@ class RemoteServiceCompletedRunSink(CompletedRunSink):
             server_url=self._config.server_url,
             remote_run_dir=receipt.run_dir,
             uploaded_at_ms=receipt.uploaded_at_ms,
+            attempt_count=attempt_count,
         )
 
 
@@ -401,22 +447,13 @@ def _request_json(
     payload: dict[str, object] | None,
     api_key: str | None,
 ) -> dict[str, object]:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {"Accept": "application/json"}
-    if api_key is not None:
-        headers["Authorization"] = f"Bearer {api_key}"
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-    req = request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with request.urlopen(req) as response:
-            raw = response.read().decode("utf-8")
-    except Exception as exc:
-        raise RemoteContractError(f"Remote run request failed: {exc}") from exc
-    decoded = json.loads(raw)
-    if not isinstance(decoded, dict):
-        raise RemoteContractError("Remote run response must be a JSON object.")
-    return decoded
+    response = request_json_with_retry(
+        url=url,
+        method=method,
+        payload=payload,
+        api_key=api_key,
+    )
+    return {"payload": response.payload, "attempt_count": response.attempt_count}
 
 
 def failed_completed_run_publish(
@@ -438,6 +475,13 @@ def failed_completed_run_publish(
         project_id=project_id or manifest.project_id,
         server_url=server_url,
         uploaded_at_ms=uploaded_at_ms,
+        attempt_count=(
+            error.attempt_count if isinstance(error, RemoteRequestError) else 1
+        ),
+        retryable=(error.retryable if isinstance(error, RemoteRequestError) else None),
+        error_category=(
+            error.category.value if isinstance(error, RemoteRequestError) else None
+        ),
         error=str(error),
     )
 

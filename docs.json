@@ -42,6 +42,7 @@
           "pages": [
             "guides/authoring-workflows",
             "guides/dashboard-ui",
+            "guides/remote-migration",
             "guides/reusable-blocks",
             "guides/step-loops",
             "guides/effects-and-actors",
@@ -96,6 +97,7 @@
               "cli/docs",
               "cli/verify",
               "cli/ui",
+              "cli/remote",
               "cli/replay",
               "cli/runs",
               "cli/otel",

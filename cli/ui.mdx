@@ -197,3 +197,11 @@ completed handoff clearly:
   persisted `.runs` artifact as the canonical inspection surface
 - if live streaming drops temporarily, the final completed bundle still
   preserves the authoritative run
+
+Phase 6 also adds explicit remote delivery health diagnostics to the overview
+surface:
+
+- remote delivery health for the selected project or run
+- the producer-side `runtime.live_execution_delivery` result for active runs
+- recent remote operation events for link, catalog publish, live delivery, and
+  completed run upload activity

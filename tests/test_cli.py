@@ -41,7 +41,7 @@ from mentalmodel.remote.contracts import (
     RemoteProjectRecord,
     WorkspaceConfig,
 )
-from mentalmodel.remote.sinks import CompletedRunPublishResult
+from mentalmodel.remote.sinks import CompletedRunPublishResult, LiveExecutionPublishResult
 from mentalmodel.remote.workspace import write_workspace_config
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.runs import list_run_summaries
@@ -114,6 +114,43 @@ class RecordingCliLiveExecutionSink:
 
     def complete(self, *, success: bool, error: str | None = None) -> None:
         self.completions.append((success, error))
+
+    def delivery_result(self) -> LiveExecutionPublishResult:
+        return LiveExecutionPublishResult(
+            transport="service-api",
+            success=True,
+            graph_id="async_rl_demo",
+            run_id=self.run_id,
+            project_id="mentalmodel-examples",
+            server_url="http://127.0.0.1:8765",
+            start_attempt_count=1,
+            update_attempt_count=1,
+            delivered_record_count=self.record_count,
+            delivered_span_count=self.span_count,
+            buffered_record_count=0,
+            buffered_span_count=0,
+        )
+
+
+class FailingCliLiveExecutionSink(RecordingCliLiveExecutionSink):
+    def delivery_result(self) -> LiveExecutionPublishResult:
+        return LiveExecutionPublishResult(
+            transport="service-api",
+            success=False,
+            graph_id="async_rl_demo",
+            run_id=self.run_id,
+            project_id="mentalmodel-examples",
+            server_url="http://127.0.0.1:8765",
+            start_attempt_count=2,
+            update_attempt_count=3,
+            delivered_record_count=self.record_count,
+            delivered_span_count=self.span_count,
+            buffered_record_count=0,
+            buffered_span_count=0,
+            retryable=True,
+            error_category="network",
+            error="remote live stream unavailable",
+        )
 
 
 def build_parameterized_program(
@@ -916,24 +953,28 @@ class CliTest(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
                 with patch(
-                    "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
-                    return_value=CompletedRunPublishResult(
-                        transport="service-api",
-                        success=True,
-                        graph_id="async_rl_demo",
-                        run_id="run-uploaded",
-                        project_id="mentalmodel-examples",
-                        server_url="http://127.0.0.1:8765",
-                        remote_run_dir="/remote/async_rl_demo/run-uploaded",
-                        uploaded_at_ms=1000,
-                    ),
-                ) as publish_run:
-                    with contextlib.chdir(root):
-                        with contextlib.redirect_stdout(stdout):
-                            exit_code = run_verify(
-                                "mentalmodel.examples.async_rl.demo:build_program",
-                                json_output=True,
-                            )
+                    "mentalmodel.cli.RemoteServiceLiveExecutionSink",
+                    RecordingCliLiveExecutionSink,
+                ):
+                    with patch(
+                        "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
+                        return_value=CompletedRunPublishResult(
+                            transport="service-api",
+                            success=True,
+                            graph_id="async_rl_demo",
+                            run_id="run-uploaded",
+                            project_id="mentalmodel-examples",
+                            server_url="http://127.0.0.1:8765",
+                            remote_run_dir="/remote/async_rl_demo/run-uploaded",
+                            uploaded_at_ms=1000,
+                        ),
+                    ) as publish_run:
+                        with contextlib.chdir(root):
+                            with contextlib.redirect_stdout(stdout):
+                                exit_code = run_verify(
+                                    "mentalmodel.examples.async_rl.demo:build_program",
+                                    json_output=True,
+                                )
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             runtime = cast(dict[str, object], payload["runtime"])
@@ -1046,6 +1087,66 @@ class CliTest(unittest.TestCase):
             upload = cast(dict[str, object], runtime["completed_run_upload"])
             self.assertFalse(upload["success"])
             self.assertIn("remote unavailable", cast(str, upload["error"]))
+
+    def test_verify_fails_when_live_execution_delivery_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "mentalmodel.toml").write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "mentalmodel-examples"',
+                        'label = "Mentalmodel Examples"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                        "[runs]",
+                        'default_runs_dir = ".runs"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.cli.RemoteServiceLiveExecutionSink",
+                    FailingCliLiveExecutionSink,
+                ):
+                    with patch(
+                        "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
+                        return_value=CompletedRunPublishResult(
+                            transport="service-api",
+                            success=True,
+                            graph_id="async_rl_demo",
+                            run_id="run-uploaded",
+                            project_id="mentalmodel-examples",
+                            server_url="http://127.0.0.1:8765",
+                            remote_run_dir="/remote/async_rl_demo/run-uploaded",
+                            uploaded_at_ms=1000,
+                        ),
+                    ):
+                        with contextlib.chdir(root):
+                            with contextlib.redirect_stdout(stdout):
+                                exit_code = run_verify(
+                                    "mentalmodel.examples.async_rl.demo:build_program",
+                                    json_output=True,
+                                )
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(stdout.getvalue())
+            runtime = cast(dict[str, object], payload["runtime"])
+            self.assertTrue(payload["success"])
+            self.assertTrue(Path(cast(str, runtime["run_artifacts_dir"])).exists())
+            live_delivery = cast(dict[str, object], runtime["live_execution_delivery"])
+            self.assertFalse(live_delivery["success"])
+            self.assertEqual(live_delivery["error_category"], "network")
+            self.assertIn("remote live stream unavailable", cast(str, live_delivery["error"]))
 
     def test_remote_write_demo_command_writes_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-from urllib import request
-
 from mentalmodel.remote.contracts import (
     RemoteContractError,
     RemoteProjectCatalogPublishRequest,
@@ -10,6 +7,7 @@ from mentalmodel.remote.contracts import (
     RemoteProjectRecord,
 )
 from mentalmodel.remote.project_config import MentalModelProjectConfig
+from mentalmodel.remote.transport import request_json_with_retry
 
 
 def link_project_to_server(
@@ -66,23 +64,12 @@ def _request_json(
     payload: dict[str, object] | None,
     api_key: str,
 ) -> dict[str, object]:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-    req = request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with request.urlopen(req) as response:
-            raw = response.read().decode("utf-8")
-    except Exception as exc:
-        raise RemoteContractError(f"Remote project request failed: {exc}") from exc
-    decoded = json.loads(raw)
-    if not isinstance(decoded, dict):
-        raise RemoteContractError("Remote project response must be a JSON object.")
-    return decoded
+    return request_json_with_retry(
+        url=url,
+        method=method,
+        payload=payload,
+        api_key=api_key,
+    ).payload
 
 
 def build_link_request(

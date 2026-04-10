@@ -10,6 +10,7 @@ from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.remote import RunManifest
+from mentalmodel.remote.sinks import LiveExecutionPublishResult
 from mentalmodel.testing import run_verification
 
 
@@ -48,6 +49,20 @@ class RecordingLiveExecutionSink:
     def complete(self, *, success: bool, error: str | None = None) -> None:
         self.completions.append((success, error))
 
+    def delivery_result(self) -> LiveExecutionPublishResult | None:
+        if not self.started:
+            return None
+        return LiveExecutionPublishResult(
+            transport="recording",
+            success=True,
+            graph_id=self.started[0][0].graph_id,
+            run_id=self.records[0].run_id if self.records else "run-missing",
+            start_attempt_count=1,
+            update_attempt_count=1,
+            delivered_record_count=len(self.records),
+            delivered_span_count=len(self.spans),
+        )
+
 
 class RemoteSinksTest(unittest.TestCase):
     def test_run_verification_emits_record_and_completed_run_sinks(self) -> None:
@@ -83,6 +98,7 @@ class RemoteSinksTest(unittest.TestCase):
         self.assertEqual(live_sink.completions, [(True, None)])
         self.assertTrue(all(record.run_id == report.runtime.run_id for record in live_sink.records))
         self.assertTrue(all(span.sequence > 0 for span in live_sink.spans))
+        self.assertIsNotNone(report.runtime.live_execution_delivery)
 
 
 if __name__ == "__main__":

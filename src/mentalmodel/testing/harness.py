@@ -18,6 +18,7 @@ from mentalmodel.remote import (
     CompletedRunPublishResult,
     CompletedRunSink,
     ExecutionRecordSink,
+    LiveExecutionPublishResult,
     LiveExecutionSink,
     record_listener_for_sink,
 )
@@ -55,6 +56,7 @@ class RuntimeVerificationResult:
     invocation_name: str | None = None
     error: str | None = None
     completed_run_upload: CompletedRunPublishResult | None = None
+    live_execution_delivery: LiveExecutionPublishResult | None = None
     invariant_failures: tuple[RuntimeInvariantFailure, ...] = ()
 
     @property
@@ -124,6 +126,11 @@ class VerificationReport:
                     None
                     if self.runtime.completed_run_upload is None
                     else self.runtime.completed_run_upload.as_dict()
+                ),
+                "live_execution_delivery": (
+                    None
+                    if self.runtime.live_execution_delivery is None
+                    else self.runtime.live_execution_delivery.as_dict()
                 ),
                 "warning_invariant_failures": [
                     failure.as_dict()
@@ -274,6 +281,9 @@ def run_verification(
             success=runtime_capture.result.success,
             error=runtime_capture.result.error,
         )
+    live_execution_delivery = (
+        None if live_execution_sink is None else live_execution_sink.delivery_result()
+    )
     runtime = RuntimeVerificationResult(
         success=runtime_capture.result.success,
         record_count=runtime_capture.result.record_count,
@@ -284,6 +294,7 @@ def run_verification(
         invocation_name=runtime_capture.result.invocation_name,
         error=runtime_capture.result.error,
         completed_run_upload=completed_run_upload,
+        live_execution_delivery=live_execution_delivery,
         invariant_failures=runtime_capture.result.invariant_failures,
     )
     final_report = VerificationReport(

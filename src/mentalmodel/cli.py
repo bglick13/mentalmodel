@@ -547,6 +547,7 @@ def run_verify(
     summary.add_column("Static Errors", justify="right")
     summary.add_column("Warnings", justify="right")
     summary.add_column("Runtime", justify="right")
+    summary.add_column("Live", justify="right")
     summary.add_column("Upload", justify="right")
     summary.add_column("Warning Invariants", justify="right")
     summary.add_column("Property Checks", justify="right")
@@ -565,6 +566,15 @@ def run_verify(
         dict[str, object] | None,
         runtime_payload.get("completed_run_upload"),
     )
+    live_execution_delivery = cast(
+        dict[str, object] | None,
+        runtime_payload.get("live_execution_delivery"),
+    )
+    live_status = (
+        ""
+        if live_execution_delivery is None
+        else ("pass" if live_execution_delivery.get("success") is True else "fail")
+    )
     upload_status = (
         ""
         if completed_run_upload is None
@@ -575,6 +585,7 @@ def run_verify(
         str(cast(int, analysis_payload["error_count"])),
         str(cast(int, analysis_payload["warning_count"])),
         "pass" if runtime_payload["success"] is True else "fail",
+        live_status,
         upload_status,
         str(len(warning_invariant_failures)),
         str(len(property_checks_payload)),
@@ -589,6 +600,7 @@ def run_verify(
     runtime_table.add_column("Invocation")
     runtime_table.add_column("Warning Invariants", justify="right")
     runtime_table.add_column("Run Artifacts")
+    runtime_table.add_column("Live")
     runtime_table.add_column("Upload")
     runtime_table.add_column("Error")
     runtime_table.add_row(
@@ -599,10 +611,46 @@ def run_verify(
         cast(str | None, runtime_payload.get("invocation_name")) or "",
         str(len(warning_invariant_failures)),
         cast(str | None, runtime_payload.get("run_artifacts_dir")) or "",
+        live_status or "",
         upload_status or "",
         cast(str | None, runtime_payload.get("error")) or "",
     )
     console.print(runtime_table)
+
+    if live_execution_delivery is not None:
+        live_table = Table(title="Live Execution Delivery")
+        live_table.add_column("Transport")
+        live_table.add_column("Run")
+        live_table.add_column("Start Attempts", justify="right")
+        live_table.add_column("Update Attempts", justify="right")
+        live_table.add_column("Delivered")
+        live_table.add_column("Buffered")
+        live_table.add_column("Error")
+        live_table.add_row(
+            cast(str, live_execution_delivery["transport"]),
+            "/".join(
+                (
+                    cast(str, live_execution_delivery["graph_id"]),
+                    cast(str, live_execution_delivery["run_id"]),
+                )
+            ),
+            str(cast(int, live_execution_delivery["start_attempt_count"])),
+            str(cast(int, live_execution_delivery["update_attempt_count"])),
+            "/".join(
+                (
+                    str(cast(int, live_execution_delivery["delivered_record_count"])),
+                    str(cast(int, live_execution_delivery["delivered_span_count"])),
+                )
+            ),
+            "/".join(
+                (
+                    str(cast(int, live_execution_delivery["buffered_record_count"])),
+                    str(cast(int, live_execution_delivery["buffered_span_count"])),
+                )
+            ),
+            cast(str | None, live_execution_delivery.get("error")) or "",
+        )
+        console.print(live_table)
 
     if completed_run_upload is not None:
         upload_table = Table(title="Completed Run Upload")
@@ -764,6 +812,10 @@ def _verify_payload_success(payload: dict[str, object]) -> bool:
     if payload.get("success") is not True:
         return False
     runtime_payload = cast(dict[str, object], payload["runtime"])
+    live_execution_delivery = runtime_payload.get("live_execution_delivery")
+    if isinstance(live_execution_delivery, dict):
+        if live_execution_delivery.get("success") is not True:
+            return False
     completed_run_upload = runtime_payload.get("completed_run_upload")
     if not isinstance(completed_run_upload, dict):
         return True
@@ -1078,7 +1130,7 @@ def run_remote_sync(
     payload = {
         "server_url": resolved_server_url,
         "count": len(receipts),
-        "runs": [receipt.as_dict() for receipt in receipts],
+        "runs": [receipt.as_dict() for receipt, _ in receipts],
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1089,7 +1141,7 @@ def run_remote_sync(
     table.add_column("Run")
     table.add_column("Project")
     table.add_column("Uploaded", justify="right")
-    for receipt in receipts:
+    for receipt, _attempt_count in receipts:
         table.add_row(
             receipt.graph_id,
             receipt.run_id,

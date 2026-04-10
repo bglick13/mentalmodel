@@ -37,6 +37,20 @@ The durable Phase 2 backend stores:
 The older file-backed store remains in-tree as a deterministic fallback for
 tests and local stack scenarios.
 
+Phase 6 hardens the hosted path so it is production-usable rather than merely
+demo-shaped:
+
+- outbound remote operations use deterministic retry/backoff with explicit
+  failure categorization
+- project link, catalog publish, completed run upload, and live session traffic
+  all record remote operation events
+- producer-side verification results surface both
+  `runtime.live_execution_delivery` and `runtime.completed_run_upload`
+- the dashboard and API can inspect recent remote operation events and
+  summarize project/run delivery health
+- `mentalmodel remote sync` is the recovery and backfill tool, not the normal
+  operator path
+
 ## Main entrypoints
 
 - `RunManifest`
@@ -107,7 +121,10 @@ tests and local stack scenarios.
 13. Completed bundle ingest marks the matching live session committed so the
     dashboard can hand off cleanly from temporary live state to canonical
     persisted inspection.
-14. `mentalmodel remote sync` remains the manual recovery and backfill path
+14. The remote service records project- and run-scoped remote operation events
+    for link, catalog publish, live start/update/commit, and completed run
+    upload outcomes.
+15. `mentalmodel remote sync` remains the manual recovery and backfill path
     when automatic upload fails or older local bundles need to be published.
 
 ## Verification

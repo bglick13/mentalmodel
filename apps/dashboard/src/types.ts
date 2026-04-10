@@ -201,6 +201,48 @@ export type ExecutionSession = {
   messages: ExecutionMessage[];
   run_handle?: RunSummary;
   run_summary?: RunOverview;
+  live_execution_delivery?: LiveExecutionDelivery | null;
+};
+
+export type RemoteDelivery = {
+  last_event_at_ms: number | null;
+  last_status: string | null;
+  last_kind: string | null;
+  last_error_message: string | null;
+  recent_success_count: number;
+  recent_failure_count: number;
+};
+
+export type LiveExecutionDelivery = {
+  transport: string;
+  success: boolean;
+  graph_id: string;
+  run_id: string;
+  project_id: string | null;
+  server_url: string | null;
+  start_attempt_count: number;
+  update_attempt_count: number;
+  delivered_record_count: number;
+  delivered_span_count: number;
+  buffered_record_count: number;
+  buffered_span_count: number;
+  retryable: boolean | null;
+  error_category: string | null;
+  error: string | null;
+};
+
+export type RemoteOperationEvent = {
+  event_id: string;
+  occurred_at_ms: number;
+  kind: string;
+  status: string;
+  project_id: string | null;
+  graph_id: string | null;
+  run_id: string | null;
+  invocation_name: string | null;
+  error_category: string | null;
+  error_message: string | null;
+  metadata: Record<string, unknown>;
 };
 
 export type ReplayNodeSummary = {
@@ -254,6 +296,7 @@ export type RunOverview = {
   graph: GraphPayload;
   metrics: NumericMetric[];
   invariants: InvariantOverview[];
+  remote_delivery: RemoteDelivery | null;
 };
 
 export type EvaluatedCustomViewRow = {

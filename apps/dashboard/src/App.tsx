@@ -22,6 +22,7 @@ import {
   fetchCatalogGraph,
   fetchExecution,
   fetchNodeDetail,
+  fetchRemoteEvents,
   fetchRunCustomView,
   fetchRunOverview,
   fetchRunRecords,
@@ -62,6 +63,7 @@ import type {
   NumericMetric,
   ReplayNodeSummary,
   ReplayReport,
+  RemoteOperationEvent,
   RunOverview,
   RunSummary,
   TableColumn,
@@ -265,6 +267,7 @@ function App() {
   const [runSpans, setRunSpans] = useState<Record<string, unknown>[] | null>(
     null,
   );
+  const [remoteEvents, setRemoteEvents] = useState<RemoteOperationEvent[]>([]);
   const [runSpansLoading, setRunSpansLoading] = useState(false);
   const explorerUrlHydratedRef = useRef(false);
   const prevExplorerSpecIdRef = useRef<string | null>(null);
@@ -586,6 +589,36 @@ function App() {
       cancelled = true;
     };
   }, [selectedCatalog, activeRun?.summary.run_id, exploreRunId]);
+
+  useEffect(() => {
+    const projectId = selectedCatalog?.project_id ?? null;
+    const graphId = selectedCatalog?.graph_id ?? null;
+    const runId = exploreRunId;
+    if (!projectId && !graphId && !runId) {
+      setRemoteEvents([]);
+      return;
+    }
+    let cancelled = false;
+    void fetchRemoteEvents({
+      projectId,
+      graphId,
+      runId,
+      limit: 20,
+    })
+      .then((events) => {
+        if (!cancelled) {
+          setRemoteEvents(events);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRemoteEvents([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCatalog?.project_id, selectedCatalog?.graph_id, exploreRunId]);
 
   useEffect(() => {
     if (
@@ -1210,6 +1243,7 @@ function App() {
           liveMessages,
           liveRecords,
           metricGroups,
+          remoteEvents,
           nodeDetail,
           recentRunSuccessLabel,
           runContext,
@@ -1269,6 +1303,7 @@ function renderCurrentView({
   liveMessages,
   liveRecords,
   metricGroups,
+  remoteEvents,
   nodeDetail,
   recentRunSuccessLabel,
   runContext,
@@ -1322,6 +1357,7 @@ function renderCurrentView({
   liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
   metricGroups: MetricGroupView[];
+  remoteEvents: RemoteOperationEvent[];
   nodeDetail: NodeDetail | null;
   recentRunSuccessLabel: string;
   runContext: ScopeToken[];
@@ -1370,6 +1406,7 @@ function renderCurrentView({
           liveMessages={liveMessages}
           liveRecords={liveRecords}
           metricGroups={metricGroups}
+          remoteEvents={remoteEvents}
           recentRunSuccessLabel={recentRunSuccessLabel}
           runContext={runContext}
           runsForExplorerList={runsForExplorerList}
@@ -1480,6 +1517,7 @@ function OverviewView({
   liveMessages,
   liveRecords,
   metricGroups,
+  remoteEvents,
   recentRunSuccessLabel,
   runContext,
   runsForExplorerList,
@@ -1503,6 +1541,7 @@ function OverviewView({
   liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
   metricGroups: MetricGroupView[];
+  remoteEvents: RemoteOperationEvent[];
   recentRunSuccessLabel: string;
   runContext: ScopeToken[];
   runsForExplorerList: RunSummary[];
@@ -1636,6 +1675,88 @@ function OverviewView({
       <section className="overview-bottom">
         <Panel title="Records">
           <RecordConsole records={activeRun ? activeRun.graph.nodes.length > 0 ? liveRecords.length > 0 ? liveRecords.slice(-4) : [] : [] : []} fallbackRecords={activeExecution?.records.slice(-4) ?? []} />
+        </Panel>
+
+        <Panel title="Remote delivery">
+          {activeRun?.remote_delivery || activeExecution?.live_execution_delivery ? (
+            <div className="stack compact">
+              {activeRun?.remote_delivery ? (
+                <div className="list-card">
+                  <div className="list-card-head">
+                    <span>Service health</span>
+                    <StatusChip
+                      label={activeRun.remote_delivery.last_status ?? "unknown"}
+                      tone={
+                        activeRun.remote_delivery.last_status === "succeeded"
+                          ? "ok"
+                          : activeRun.remote_delivery.last_status === "failed"
+                            ? "error"
+                            : "accent"
+                      }
+                    />
+                  </div>
+                  <div className="list-card-copy">
+                    {activeRun.remote_delivery.last_kind ?? "no events"} · failures (24h):{" "}
+                    {activeRun.remote_delivery.recent_failure_count} · successes (24h):{" "}
+                    {activeRun.remote_delivery.recent_success_count}
+                  </div>
+                  {activeRun.remote_delivery.last_error_message ? (
+                    <div className="list-card-copy">
+                      {activeRun.remote_delivery.last_error_message}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {activeExecution?.live_execution_delivery ? (
+                <div className="list-card">
+                  <div className="list-card-head">
+                    <span>Producer delivery</span>
+                    <StatusChip
+                      label={
+                        activeExecution.live_execution_delivery.success
+                          ? "succeeded"
+                          : "failed"
+                      }
+                      tone={
+                        activeExecution.live_execution_delivery.success ? "ok" : "error"
+                      }
+                    />
+                  </div>
+                  <div className="list-card-copy">
+                    start attempts:{" "}
+                    {String(activeExecution.live_execution_delivery.start_attempt_count)} · update attempts:{" "}
+                    {String(activeExecution.live_execution_delivery.update_attempt_count)}
+                  </div>
+                  {activeExecution.live_execution_delivery.error ? (
+                    <div className="list-card-copy">
+                      {activeExecution.live_execution_delivery.error}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              {remoteEvents.length > 0 ? (
+                <div className="interactive-list">
+                  {remoteEvents.slice(0, 6).map((event) => (
+                    <div key={event.event_id} className="list-card">
+                      <div className="list-card-head">
+                        <span>{event.kind}</span>
+                        <StatusChip
+                          label={event.status}
+                          tone={event.status === "succeeded" ? "ok" : "error"}
+                        />
+                      </div>
+                      <div className="list-card-copy">
+                        {new Date(event.occurred_at_ms).toLocaleTimeString()}
+                        {event.error_message ? ` · ${event.error_message}` : ""}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <EmptyState copy="No remote delivery diagnostics available for the current scope." />
+          )}
         </Panel>
 
         <Panel

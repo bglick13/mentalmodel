@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.remote.backend import (
     RemoteBackendConfig,
+    RemoteEventStore,
     RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
@@ -24,6 +25,11 @@ from mentalmodel.remote.contracts import (
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteRunUploadReceipt,
+)
+from mentalmodel.remote.events import (
+    RemoteOperationEvent,
+    RemoteOperationKind,
+    RemoteOperationStatus,
 )
 from mentalmodel.remote.store import FileRemoteRunStore, RunBundleUpload
 from mentalmodel.ui.catalog import DashboardCatalogEntry
@@ -40,6 +46,7 @@ def create_dashboard_app(
     remote_run_store: RemoteRunStore | None = None,
     remote_project_store: RemoteProjectStore | None = None,
     remote_live_session_store: RemoteLiveSessionStore | None = None,
+    remote_event_store: RemoteEventStore | None = None,
     remote_api_key: str | None = None,
 ) -> FastAPI:
     """Create the Phase 26 dashboard API and optional static frontend host."""
@@ -71,6 +78,15 @@ def create_dashboard_app(
             else RemoteLiveSessionStore.from_config(remote_backend_config)
         )
     )
+    configured_remote_event_store = (
+        remote_event_store
+        if remote_event_store is not None
+        else (
+            None
+            if remote_backend_config is None
+            else RemoteEventStore.from_config(remote_backend_config)
+        )
+    )
     service = DashboardService(
         runs_dir=runs_dir,
         catalog_entries=catalog_entries,
@@ -78,6 +94,7 @@ def create_dashboard_app(
         remote_run_store=configured_remote_store,
         remote_project_store=configured_remote_project_store,
         remote_live_session_store=configured_remote_live_store,
+        remote_event_store=configured_remote_event_store,
     )
     ingest_store = (
         configured_remote_store
@@ -127,7 +144,21 @@ def create_dashboard_app(
         try:
             request_payload = RemoteProjectLinkRequest.from_dict(payload)
             project = configured_remote_project_store.link_project(request_payload)
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.PROJECT_LINK,
+                status=RemoteOperationStatus.SUCCEEDED,
+                project_id=request_payload.project_id,
+                metadata={"catalog_entry_count": project.catalog_entry_count},
+            )
         except Exception as exc:  # pragma: no cover - thin API wrapper
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.PROJECT_LINK,
+                status=RemoteOperationStatus.FAILED,
+                project_id=_optional_payload_str(payload, "project_id"),
+                error=exc,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"project": project.as_dict(include_catalog_snapshot=True)}
 
@@ -179,7 +210,21 @@ def create_dashboard_app(
             if request_payload.project_id != project_id:
                 raise ValueError("Catalog publish path project_id does not match payload.")
             project = configured_remote_project_store.publish_catalog(request_payload)
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.CATALOG_PUBLISH,
+                status=RemoteOperationStatus.SUCCEEDED,
+                project_id=request_payload.project_id,
+                metadata={"catalog_entry_count": project.catalog_entry_count},
+            )
         except Exception as exc:  # pragma: no cover - thin API wrapper
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.CATALOG_PUBLISH,
+                status=RemoteOperationStatus.FAILED,
+                project_id=project_id,
+                error=exc,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"project": project.as_dict(include_catalog_snapshot=True)}
 
@@ -221,7 +266,46 @@ def create_dashboard_app(
                     run_id=upload.manifest.run_id,
                     committed_at_ms=uploaded_at_ms,
                 )
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.RUN_UPLOAD,
+                status=RemoteOperationStatus.SUCCEEDED,
+                project_id=upload.manifest.project_id,
+                graph_id=upload.manifest.graph_id,
+                run_id=upload.manifest.run_id,
+                invocation_name=upload.manifest.invocation_name,
+                metadata={"artifact_count": len(upload.manifest.artifacts)},
+            )
+            if configured_remote_live_store is not None:
+                _record_remote_event(
+                    configured_remote_event_store,
+                    kind=RemoteOperationKind.LIVE_COMMIT,
+                    status=RemoteOperationStatus.SUCCEEDED,
+                    project_id=upload.manifest.project_id,
+                    graph_id=upload.manifest.graph_id,
+                    run_id=upload.manifest.run_id,
+                    invocation_name=upload.manifest.invocation_name,
+                )
         except Exception as exc:  # pragma: no cover - thin API wrapper
+            graph_id = None
+            run_id = None
+            project_id = None
+            invocation_name = None
+            if "upload" in locals():
+                graph_id = upload.manifest.graph_id
+                run_id = upload.manifest.run_id
+                project_id = upload.manifest.project_id
+                invocation_name = upload.manifest.invocation_name
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.RUN_UPLOAD,
+                status=RemoteOperationStatus.FAILED,
+                project_id=project_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                invocation_name=invocation_name,
+                error=exc,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RemoteRunUploadReceipt(
             graph_id=upload.manifest.graph_id,
@@ -251,7 +335,27 @@ def create_dashboard_app(
                     project_id=request_payload.project_id
                 )
             session = configured_remote_live_store.start_session(request_payload)
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.LIVE_START,
+                status=RemoteOperationStatus.SUCCEEDED,
+                project_id=request_payload.project_id,
+                graph_id=request_payload.graph_id,
+                run_id=request_payload.run_id,
+                invocation_name=request_payload.invocation_name,
+                metadata={"node_count": _payload_list_length(request_payload.graph, "nodes")},
+            )
         except Exception as exc:  # pragma: no cover - thin API wrapper
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.LIVE_START,
+                status=RemoteOperationStatus.FAILED,
+                project_id=_optional_payload_str(payload, "project_id"),
+                graph_id=_optional_payload_str(payload, "graph_id"),
+                run_id=_optional_payload_str(payload, "run_id"),
+                invocation_name=_optional_payload_str(payload, "invocation_name"),
+                error=exc,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"session": session.as_dict()}
 
@@ -271,9 +375,59 @@ def create_dashboard_app(
             if request_payload.run_id != run_id:
                 raise ValueError("Live session path run_id does not match payload.")
             session = configured_remote_live_store.apply_update(request_payload)
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.LIVE_UPDATE,
+                status=RemoteOperationStatus.SUCCEEDED,
+                project_id=session.project_id,
+                graph_id=request_payload.graph_id,
+                run_id=request_payload.run_id,
+                invocation_name=session.invocation_name,
+                metadata={
+                    "record_count": len(request_payload.records),
+                    "span_count": len(request_payload.spans),
+                    "status": (
+                        None
+                        if request_payload.status is None
+                        else request_payload.status.value
+                    ),
+                },
+            )
         except Exception as exc:  # pragma: no cover - thin API wrapper
+            _record_remote_event(
+                configured_remote_event_store,
+                kind=RemoteOperationKind.LIVE_UPDATE,
+                status=RemoteOperationStatus.FAILED,
+                graph_id=_optional_payload_str(payload, "graph_id"),
+                run_id=run_id,
+                error=exc,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"session": session.as_dict()}
+
+    @app.get("/api/remote/events", response_model=None)
+    def list_remote_events(
+        project_id: Annotated[str | None, Query()] = None,
+        graph_id: Annotated[str | None, Query()] = None,
+        run_id: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        _auth: None = Depends(require_remote_auth),
+    ) -> object:
+        if configured_remote_event_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote event listing requires remote backend configuration.",
+            )
+        return {
+            "events": list(
+                service.list_remote_events(
+                    project_id=project_id,
+                    graph_id=graph_id,
+                    run_id=run_id,
+                    limit=limit,
+                )
+            )
+        }
 
     @app.post("/api/catalog/from-path", response_model=None)
     def catalog_from_path(
@@ -494,6 +648,49 @@ def create_dashboard_app(
             return FileResponse(frontend_dist / "index.html")
 
     return app
+
+
+def _record_remote_event(
+    event_store: RemoteEventStore | None,
+    *,
+    kind: RemoteOperationKind,
+    status: RemoteOperationStatus,
+    project_id: str | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    invocation_name: str | None = None,
+    error: Exception | None = None,
+    metadata: dict[str, JsonValue] | None = None,
+) -> None:
+    if event_store is None:
+        return
+    error_message = None if error is None else str(error)
+    error_category = None if error is None else type(error).__name__
+    event_store.record_event(
+        RemoteOperationEvent(
+            event_id=f"evt-{time.time_ns()}",
+            occurred_at_ms=int(time.time() * 1000),
+            kind=kind,
+            status=status,
+            project_id=project_id,
+            graph_id=graph_id,
+            run_id=run_id,
+            invocation_name=invocation_name,
+            error_category=error_category,
+            error_message=error_message,
+            metadata={} if metadata is None else dict(metadata),
+        )
+    )
+
+
+def _optional_payload_str(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _payload_list_length(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    return len(value) if isinstance(value, list) else 0
 
 
 def _catalog_entries_to_json(

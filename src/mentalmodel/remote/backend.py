@@ -29,6 +29,12 @@ from mentalmodel.remote.contracts import (
     RunManifest,
     RunManifestStatus,
 )
+from mentalmodel.remote.events import (
+    RemoteDeliveryHealthSummary,
+    RemoteOperationEvent,
+    RemoteOperationKind,
+    RemoteOperationStatus,
+)
 from mentalmodel.remote.sinks import CompletedRunPublishResult, CompletedRunSink
 from mentalmodel.remote.store import RunBundleUpload
 from mentalmodel.remote.sync import build_run_bundle_upload_from_run_dir
@@ -172,6 +178,34 @@ class LiveSessionIndex(Protocol):
         graph_id: str | None = None,
         invocation_name: str | None = None,
     ) -> tuple[RemoteLiveSessionRecord, ...]: ...
+
+
+class EventIndex(Protocol):
+    def record_event(self, event: RemoteOperationEvent) -> RemoteOperationEvent: ...
+
+    def list_events(
+        self,
+        *,
+        project_id: str | None = None,
+        graph_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[RemoteOperationEvent, ...]: ...
+
+    def summarize_project(
+        self,
+        *,
+        project_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary: ...
+
+    def summarize_run(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary: ...
 
 
 class InMemoryArtifactStore:
@@ -517,6 +551,58 @@ class InMemoryLiveSessionIndex:
             rows = [row for row in rows if row.invocation_name == invocation_name]
         rows.sort(key=lambda row: (row.started_at_ms, row.run_id), reverse=True)
         return tuple(rows)
+
+
+class InMemoryEventIndex:
+    """Deterministic remote operation event log for tests and local service use."""
+
+    def __init__(self) -> None:
+        self._rows: list[RemoteOperationEvent] = []
+
+    def record_event(self, event: RemoteOperationEvent) -> RemoteOperationEvent:
+        self._rows.append(event)
+        self._rows.sort(key=lambda row: (row.occurred_at_ms, row.event_id), reverse=True)
+        return event
+
+    def list_events(
+        self,
+        *,
+        project_id: str | None = None,
+        graph_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[RemoteOperationEvent, ...]:
+        rows = [
+            row
+            for row in self._rows
+            if (project_id is None or row.project_id == project_id)
+            and (graph_id is None or row.graph_id == graph_id)
+            and (run_id is None or row.run_id == run_id)
+        ]
+        return tuple(rows[: max(1, limit)])
+
+    def summarize_project(
+        self,
+        *,
+        project_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary:
+        return _summarize_events(
+            self.list_events(project_id=project_id, limit=500),
+            since_ms=since_ms,
+        )
+
+    def summarize_run(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary:
+        return _summarize_events(
+            self.list_events(graph_id=graph_id, run_id=run_id, limit=500),
+            since_ms=since_ms,
+        )
 
 
 class S3ArtifactStore:
@@ -1569,7 +1655,175 @@ class PostgresLiveSessionIndex:
                     "on remote_live_spans (graph_id, run_id, sequence asc)"
                 )
                 conn.commit()
-            self._schema_ready = True
+                self._schema_ready = True
+
+
+class PostgresEventIndex:
+    """Postgres-backed remote operation event log for hosted operator visibility."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
+
+    def record_event(self, event: RemoteOperationEvent) -> RemoteOperationEvent:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            conn.execute(
+                """
+                insert into remote_operation_events (
+                    event_id,
+                    occurred_at_ms,
+                    kind,
+                    status,
+                    project_id,
+                    graph_id,
+                    run_id,
+                    invocation_name,
+                    error_category,
+                    error_message,
+                    metadata_json
+                )
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                on conflict (event_id) do update
+                set
+                    occurred_at_ms = excluded.occurred_at_ms,
+                    kind = excluded.kind,
+                    status = excluded.status,
+                    project_id = excluded.project_id,
+                    graph_id = excluded.graph_id,
+                    run_id = excluded.run_id,
+                    invocation_name = excluded.invocation_name,
+                    error_category = excluded.error_category,
+                    error_message = excluded.error_message,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    event.event_id,
+                    event.occurred_at_ms,
+                    event.kind.value,
+                    event.status.value,
+                    event.project_id,
+                    event.graph_id,
+                    event.run_id,
+                    event.invocation_name,
+                    event.error_category,
+                    event.error_message,
+                    json.dumps(event.metadata, sort_keys=True),
+                ),
+            )
+            conn.commit()
+        return event
+
+    def list_events(
+        self,
+        *,
+        project_id: str | None = None,
+        graph_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[RemoteOperationEvent, ...]:
+        self._ensure_schema()
+        conditions: list[str] = []
+        params: list[object] = []
+        if project_id is not None:
+            conditions.append("project_id = %s")
+            params.append(project_id)
+        if graph_id is not None:
+            conditions.append("graph_id = %s")
+            params.append(graph_id)
+        if run_id is not None:
+            conditions.append("run_id = %s")
+            params.append(run_id)
+        where_clause = ""
+        if conditions:
+            where_clause = "where " + " and ".join(conditions)
+        params.append(max(1, limit))
+        with psycopg.connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"""
+                select
+                    event_id,
+                    occurred_at_ms,
+                    kind,
+                    status,
+                    project_id,
+                    graph_id,
+                    run_id,
+                    invocation_name,
+                    error_category,
+                    error_message,
+                    metadata_json
+                from remote_operation_events
+                {where_clause}
+                order by occurred_at_ms desc, event_id desc
+                limit %s
+                """,
+                tuple(params),
+            ).fetchall()
+        return tuple(_remote_operation_event_from_row(row) for row in rows)
+
+    def summarize_project(
+        self,
+        *,
+        project_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary:
+        return _summarize_events(
+            self.list_events(project_id=project_id, limit=500),
+            since_ms=since_ms,
+        )
+
+    def summarize_run(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary:
+        return _summarize_events(
+            self.list_events(graph_id=graph_id, run_id=run_id, limit=500),
+            since_ms=since_ms,
+        )
+
+    def _ensure_schema(self) -> None:
+        if self._schema_ready:
+            return
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            with psycopg.connect(self.database_url) as conn:
+                conn.execute(
+                    """
+                    create table if not exists remote_operation_events (
+                        event_id text primary key,
+                        occurred_at_ms bigint not null,
+                        kind text not null,
+                        status text not null,
+                        project_id text,
+                        graph_id text,
+                        run_id text,
+                        invocation_name text,
+                        error_category text,
+                        error_message text,
+                        metadata_json jsonb not null default '{}'::jsonb
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    create index if not exists remote_operation_events_project_idx
+                    on remote_operation_events (project_id, occurred_at_ms desc)
+                    """
+                )
+                conn.execute(
+                    """
+                    create index if not exists remote_operation_events_run_idx
+                    on remote_operation_events (graph_id, run_id, occurred_at_ms desc)
+                    """
+                )
+                conn.commit()
+                self._schema_ready = True
 
 
 class RemoteRunStore:
@@ -1790,6 +2044,59 @@ class RemoteLiveSessionStore:
         return self._live_session_index.list_sessions(
             graph_id=graph_id,
             invocation_name=invocation_name,
+        )
+
+
+class RemoteEventStore:
+    """Remote operator event log adapter for hosted diagnostics."""
+
+    def __init__(self, *, event_index: EventIndex) -> None:
+        self._event_index = event_index
+
+    @classmethod
+    def from_config(cls, config: RemoteBackendConfig) -> RemoteEventStore:
+        return cls(event_index=PostgresEventIndex(config.database_url))
+
+    def record_event(self, event: RemoteOperationEvent) -> RemoteOperationEvent:
+        return self._event_index.record_event(event)
+
+    def list_events(
+        self,
+        *,
+        project_id: str | None = None,
+        graph_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[RemoteOperationEvent, ...]:
+        return self._event_index.list_events(
+            project_id=project_id,
+            graph_id=graph_id,
+            run_id=run_id,
+            limit=limit,
+        )
+
+    def summarize_project(
+        self,
+        *,
+        project_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary:
+        return self._event_index.summarize_project(
+            project_id=project_id,
+            since_ms=since_ms,
+        )
+
+    def summarize_run(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        since_ms: int | None = None,
+    ) -> RemoteDeliveryHealthSummary:
+        return self._event_index.summarize_run(
+            graph_id=graph_id,
+            run_id=run_id,
+            since_ms=since_ms,
         )
 
 
@@ -2122,6 +2429,51 @@ def _json_object_from_db_payload(raw: str, field_name: str) -> dict[str, object]
     if not isinstance(payload, dict):
         raise RemoteContractError(f"Stored {field_name} must decode to an object.")
     return cast(dict[str, object], payload)
+
+
+def _remote_operation_event_from_row(row: Sequence[object]) -> RemoteOperationEvent:
+    metadata_json = cast(str, row[10])
+    metadata = _json_object_from_db_payload(metadata_json, "remote_operation_events.metadata_json")
+    return RemoteOperationEvent(
+        event_id=cast(str, row[0]),
+        occurred_at_ms=cast(int, row[1]),
+        kind=RemoteOperationKind(cast(str, row[2])),
+        status=RemoteOperationStatus(cast(str, row[3])),
+        project_id=cast(str | None, row[4]),
+        graph_id=cast(str | None, row[5]),
+        run_id=cast(str | None, row[6]),
+        invocation_name=cast(str | None, row[7]),
+        error_category=cast(str | None, row[8]),
+        error_message=cast(str | None, row[9]),
+        metadata={str(key): cast_json_value(value) for key, value in metadata.items()},
+    )
+
+
+def _summarize_events(
+    events: Sequence[RemoteOperationEvent],
+    *,
+    since_ms: int | None,
+) -> RemoteDeliveryHealthSummary:
+    recent_events = (
+        tuple(event for event in events if since_ms is None or event.occurred_at_ms >= since_ms)
+    )
+    latest = next(iter(events), None)
+    return RemoteDeliveryHealthSummary(
+        last_event_at_ms=None if latest is None else latest.occurred_at_ms,
+        last_status=None if latest is None else latest.status,
+        last_kind=None if latest is None else latest.kind,
+        last_error_message=None if latest is None else latest.error_message,
+        recent_success_count=sum(
+            1
+            for event in recent_events
+            if event.status is RemoteOperationStatus.SUCCEEDED
+        ),
+        recent_failure_count=sum(
+            1
+            for event in recent_events
+            if event.status is RemoteOperationStatus.FAILED
+        ),
+    )
 
 
 def _json_str(payload: dict[str, JsonValue], key: str) -> str:

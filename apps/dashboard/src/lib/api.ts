@@ -4,6 +4,7 @@ import type {
   EvaluatedCustomView,
   ExecutionSession,
   NodeDetail,
+  RemoteOperationEvent,
   ReplayReport,
   RunOverview,
   RunSummary,
@@ -138,6 +139,31 @@ export async function fetchRunOverview(
   runId: string,
 ): Promise<RunOverview> {
   return request(`/api/runs/${graphId}/${runId}/overview`);
+}
+
+export async function fetchRemoteEvents(params: {
+  projectId?: string | null;
+  graphId?: string | null;
+  runId?: string | null;
+  limit?: number;
+}): Promise<RemoteOperationEvent[]> {
+  const query = new URLSearchParams();
+  if (params.projectId) {
+    query.set("project_id", params.projectId);
+  }
+  if (params.graphId) {
+    query.set("graph_id", params.graphId);
+  }
+  if (params.runId) {
+    query.set("run_id", params.runId);
+  }
+  if (params.limit != null) {
+    query.set("limit", String(params.limit));
+  }
+  const payload = await request<{ events: RemoteOperationEvent[] }>(
+    `/api/remote/events?${query.toString()}`,
+  );
+  return payload.events;
 }
 
 export async function fetchRunCustomView(

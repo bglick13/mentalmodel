@@ -16,9 +16,11 @@ from mentalmodel.examples.async_rl.demo import build_program
 from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
+    InMemoryEventIndex,
     InMemoryLiveSessionIndex,
     InMemoryManifestIndex,
     InMemoryProjectIndex,
+    RemoteEventStore,
     RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
@@ -325,6 +327,68 @@ class DashboardApiTest(unittest.TestCase):
         project = response.json()["project"]
         self.assertEqual(project["catalog_version"], 2)
         self.assertEqual(project["catalog_entry_count"], 1)
+
+    def test_remote_event_endpoint_and_run_overview_include_delivery_health(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+        event_store = RemoteEventStore(event_index=InMemoryEventIndex())
+        run_store = RemoteRunStore(
+            artifact_store=InMemoryArtifactStore(),
+            manifest_index=InMemoryManifestIndex(),
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                remote_project_store=project_store,
+                remote_live_session_store=live_store,
+                remote_run_store=run_store,
+                remote_event_store=event_store,
+                remote_api_key="test-key",
+            )
+        )
+        project_store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                catalog_provider="pangramanizer.dashboard:catalog",
+            )
+        )
+        report = run_verification(build_program(), persist_run_artifacts=True)
+        self.assertIsNotNone(report.run_artifacts)
+        assert report.run_artifacts is not None
+        upload = build_run_bundle_upload(
+            runs_dir=report.run_artifacts.run_dir.parent.parent,
+            graph_id=report.analysis.graph.graph_id,
+            run_id=report.runtime.run_id,
+            project_id="pangramanizer",
+            project_label="Pangramanizer",
+        )
+        ingest_response = client.post(
+            "/api/remote/runs",
+            headers={"Authorization": "Bearer test-key"},
+            json=upload.as_dict(),
+        )
+        self.assertEqual(ingest_response.status_code, 200)
+        overview = client.get(
+            f"/api/runs/{report.analysis.graph.graph_id}/{report.runtime.run_id}/overview"
+        )
+        self.assertEqual(overview.status_code, 200)
+        delivery = overview.json()["remote_delivery"]
+        self.assertIn(delivery["last_kind"], {"run.upload", "live.commit"})
+        self.assertEqual(delivery["last_status"], "succeeded")
+        events = client.get(
+            "/api/remote/events",
+            headers={"Authorization": "Bearer test-key"},
+            params={
+                "graph_id": report.analysis.graph.graph_id,
+                "run_id": report.runtime.run_id,
+            },
+        )
+        self.assertEqual(events.status_code, 200)
+        payload = events.json()["events"]
+        self.assertGreaterEqual(len(payload), 1)
+        self.assertIn(payload[0]["kind"], {"run.upload", "live.commit"})
 
     def test_review_workflow_dashboard_api_launches_and_inspects_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

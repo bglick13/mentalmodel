@@ -246,6 +246,11 @@ Dashboard UI:
 - a linked repo now also streams live execution state during normal
   `mentalmodel verify` execution, so the hosted dashboard can show records,
   spans, metrics, and invariant progress before the final bundle lands
+- `mentalmodel verify --json` now surfaces `runtime.live_execution_delivery`
+  alongside `runtime.completed_run_upload` so operators can distinguish
+  producer-side live-stream failures from completed bundle upload failures
+- use the [Remote Migration guide](/Users/ben/repos/mentalmodel/guides/remote-migration.mdx)
+  when moving from the local-workspace MVP to the hosted repo-linked path
 - in a linked repo, `mentalmodel verify --spec ...` now uploads the completed
   run bundle automatically after local `.runs` materialization succeeds
 - the hosted dashboard treats the live session as a temporary bridge and

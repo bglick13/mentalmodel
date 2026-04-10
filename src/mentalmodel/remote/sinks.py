@@ -24,6 +24,9 @@ class CompletedRunPublishResult:
     server_url: str | None = None
     remote_run_dir: str | None = None
     uploaded_at_ms: int | None = None
+    attempt_count: int = 1
+    retryable: bool | None = None
+    error_category: str | None = None
     error: str | None = None
 
     def __post_init__(self) -> None:
@@ -39,6 +42,8 @@ class CompletedRunPublishResult:
             raise ValueError("CompletedRunPublishResult.remote_run_dir cannot be empty.")
         if self.uploaded_at_ms is not None and self.uploaded_at_ms < 0:
             raise ValueError("CompletedRunPublishResult.uploaded_at_ms cannot be negative.")
+        if self.attempt_count < 1:
+            raise ValueError("CompletedRunPublishResult.attempt_count must be at least 1.")
         if self.success and self.error is not None:
             raise ValueError(
                 "CompletedRunPublishResult.error must be None when success is true."
@@ -58,6 +63,69 @@ class CompletedRunPublishResult:
             "server_url": self.server_url,
             "remote_run_dir": self.remote_run_dir,
             "uploaded_at_ms": self.uploaded_at_ms,
+            "attempt_count": self.attempt_count,
+            "retryable": self.retryable,
+            "error_category": self.error_category,
+            "error": self.error,
+        }
+
+
+@dataclass(slots=True, frozen=True)
+class LiveExecutionPublishResult:
+    """Outcome of remote live execution delivery for one run."""
+
+    transport: str
+    success: bool
+    graph_id: str
+    run_id: str
+    project_id: str | None = None
+    server_url: str | None = None
+    start_attempt_count: int = 0
+    update_attempt_count: int = 0
+    delivered_record_count: int = 0
+    delivered_span_count: int = 0
+    buffered_record_count: int = 0
+    buffered_span_count: int = 0
+    retryable: bool | None = None
+    error_category: str | None = None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.transport:
+            raise ValueError("LiveExecutionPublishResult.transport cannot be empty.")
+        if not self.graph_id:
+            raise ValueError("LiveExecutionPublishResult.graph_id cannot be empty.")
+        if not self.run_id:
+            raise ValueError("LiveExecutionPublishResult.run_id cannot be empty.")
+        if self.start_attempt_count < 0 or self.update_attempt_count < 0:
+            raise ValueError("LiveExecutionPublishResult attempt counts cannot be negative.")
+        if self.delivered_record_count < 0 or self.delivered_span_count < 0:
+            raise ValueError("LiveExecutionPublishResult delivered counts cannot be negative.")
+        if self.buffered_record_count < 0 or self.buffered_span_count < 0:
+            raise ValueError("LiveExecutionPublishResult buffered counts cannot be negative.")
+        if self.success and self.error is not None:
+            raise ValueError("LiveExecutionPublishResult.error must be None when success is true.")
+        if not self.success and not self.error:
+            raise ValueError(
+                "LiveExecutionPublishResult.error is required when success is false."
+            )
+
+    def as_dict(self) -> dict[str, str | int | bool | None]:
+        return {
+            "transport": self.transport,
+            "success": self.success,
+            "graph_id": self.graph_id,
+            "run_id": self.run_id,
+            "project_id": self.project_id,
+            "server_url": self.server_url,
+            "start_attempt_count": self.start_attempt_count,
+            "update_attempt_count": self.update_attempt_count,
+            "delivered_record_count": self.delivered_record_count,
+            "delivered_span_count": self.delivered_span_count,
+            "buffered_record_count": self.buffered_record_count,
+            "buffered_span_count": self.buffered_span_count,
+            "retryable": self.retryable,
+            "error_category": self.error_category,
             "error": self.error,
         }
 
@@ -95,6 +163,9 @@ class LiveExecutionSink(Protocol):
 
     def complete(self, *, success: bool, error: str | None = None) -> None:
         """Flush and mark the live session terminal."""
+
+    def delivery_result(self) -> LiveExecutionPublishResult | None:
+        """Return the current delivery outcome for this live stream."""
 
 
 class NoOpCompletedRunSink:
@@ -152,6 +223,9 @@ class NoOpLiveExecutionSink:
 
     def complete(self, *, success: bool, error: str | None = None) -> None:
         del success, error
+
+    def delivery_result(self) -> LiveExecutionPublishResult | None:
+        return None
 
 
 class CompositeExecutionRecordSink:

@@ -25,6 +25,7 @@ from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import execution_record_to_json
 from mentalmodel.remote.backend import (
     RemoteCompletedRunSink,
+    RemoteEventStore,
     RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
@@ -84,6 +85,7 @@ class DashboardExecutionSession:
     error: str | None = None
     run_id: str | None = None
     run_artifacts_dir: str | None = None
+    live_execution_delivery: dict[str, JsonValue] | None = None
     records: list[dict[str, JsonValue]] = field(default_factory=list)
     spans: list[dict[str, JsonValue]] = field(default_factory=list)
     messages: list[dict[str, JsonValue]] = field(default_factory=list)
@@ -152,6 +154,11 @@ class DashboardExecutionSession:
             self.finished_at_ms = int(time.time() * 1000)
             self.run_id = report.runtime.run_id
             self.run_artifacts_dir = report.runtime.run_artifacts_dir
+            self.live_execution_delivery = (
+                None
+                if report.runtime.live_execution_delivery is None
+                else _as_json_object(report.runtime.live_execution_delivery.as_dict())
+            )
             if report.runtime.error is not None:
                 self.error = report.runtime.error
 
@@ -170,6 +177,12 @@ class DashboardExecutionSession:
                 self.run_id = run_id
             self.run_artifacts_dir = (
                 run_artifacts_dir if isinstance(run_artifacts_dir, str) else None
+            )
+            live_execution_delivery = runtime.get("live_execution_delivery")
+            self.live_execution_delivery = (
+                _as_json_object(live_execution_delivery)
+                if isinstance(live_execution_delivery, dict)
+                else None
             )
             if isinstance(runtime_error, str):
                 self.error = runtime_error
@@ -216,6 +229,7 @@ class DashboardExecutionSession:
                     ]
                 ),
                 "messages": _as_json_list(new_messages),
+                "live_execution_delivery": self.live_execution_delivery,
             }
 
 
@@ -231,12 +245,14 @@ class DashboardService:
         remote_run_store: RemoteRunStore | None = None,
         remote_project_store: RemoteProjectStore | None = None,
         remote_live_session_store: RemoteLiveSessionStore | None = None,
+        remote_event_store: RemoteEventStore | None = None,
         project_execution_worker: ProjectExecutionWorker | None = None,
     ) -> None:
         self.runs_dir = runs_dir
         self.remote_run_store = remote_run_store
         self.remote_project_store = remote_project_store
         self.remote_live_session_store = remote_live_session_store
+        self.remote_event_store = remote_event_store
         self._project_execution_worker = (
             project_execution_worker
             if project_execution_worker is not None
@@ -296,12 +312,23 @@ class DashboardService:
                     "catalog_published": True,
                     "catalog_published_at_ms": None,
                     "catalog_version": None,
+                    "remote_health": None,
                 }
             )
         if self.remote_project_store is not None:
             for project in self.remote_project_store.list_projects():
                 if project.project_id in seen_project_ids:
                     continue
+                remote_health = (
+                    None
+                    if self.remote_event_store is None
+                    else _as_json_object(
+                        self.remote_event_store.summarize_project(
+                            project_id=project.project_id,
+                            since_ms=int(time.time() * 1000) - 86_400_000,
+                        ).as_dict()
+                    )
+                )
                 projects.append(
                     {
                         "project_id": project.project_id,
@@ -326,9 +353,30 @@ class DashboardService:
                         "linked_at_ms": project.linked_at_ms,
                         "updated_at_ms": project.updated_at_ms,
                         "default_verify_spec": project.default_verify_spec,
+                        "remote_health": remote_health,
                     }
                 )
         return tuple(projects)
+
+    def list_remote_events(
+        self,
+        *,
+        project_id: str | None = None,
+        graph_id: str | None = None,
+        run_id: str | None = None,
+        limit: int = 100,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        if self.remote_event_store is None:
+            return ()
+        return tuple(
+            _as_json_object(event.as_dict())
+            for event in self.remote_event_store.list_events(
+                project_id=project_id,
+                graph_id=graph_id,
+                run_id=run_id,
+                limit=limit,
+            )
+        )
 
     def _remote_catalog_entries(self) -> tuple[DashboardCatalogEntry, ...]:
         if self.remote_project_store is None:
@@ -543,6 +591,7 @@ class DashboardService:
                 "graph": self._graph_payload_for_entry(session.spec),
                 "metrics": [],
                 "invariants": [],
+                "remote_delivery": None,
             }
         remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
         if (
@@ -558,6 +607,17 @@ class DashboardService:
                 ),
                 "invariants": _as_json_list(
                     _invariants_from_live_records(remote_live.records)
+                ),
+                "remote_delivery": (
+                    None
+                    if self.remote_event_store is None
+                    else _as_json_object(
+                        self.remote_event_store.summarize_run(
+                            graph_id=graph_id,
+                            run_id=run_id,
+                            since_ms=int(time.time() * 1000) - 86_400_000,
+                        ).as_dict()
+                    )
                 ),
             }
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
@@ -597,6 +657,17 @@ class DashboardService:
                 for node in replay.node_summaries
                 if node.invariant_status is not None
             ]),
+            "remote_delivery": (
+                None
+                if self.remote_event_store is None
+                else _as_json_object(
+                    self.remote_event_store.summarize_run(
+                        graph_id=graph_id,
+                        run_id=run_id,
+                        since_ms=int(time.time() * 1000) - 86_400_000,
+                    ).as_dict()
+                )
+            ),
         }
 
     def get_run_custom_view(
