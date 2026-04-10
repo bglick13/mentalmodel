@@ -350,6 +350,71 @@ class CliTest(unittest.TestCase):
             self.assertEqual(payload["project"]["project_id"], "pangramanizer")
             status_project.assert_called_once()
 
+    def test_remote_publish_catalog_command_reads_repo_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            spec_path = root / "verify.toml"
+            spec_path.write_text(
+                "[program]\nentrypoint = \"mentalmodel.examples.async_rl.demo:build_program\"\n",
+                encoding="utf-8",
+            )
+            config_path = root / "mentalmodel.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "pangramanizer"',
+                        'label = "Pangramanizer"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                        "[verify]",
+                        'default_spec = "verify.toml"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.cli.publish_catalog_to_server",
+                    return_value=RemoteProjectRecord(
+                        project_id="pangramanizer",
+                        label="Pangramanizer",
+                        linked_at_ms=1000,
+                        updated_at_ms=1002,
+                        catalog_snapshot=ProjectCatalogSnapshot(
+                            project_id="pangramanizer",
+                            provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+                            published_at_ms=1001,
+                            entries=(default_dashboard_catalog()[0].as_dict(),),
+                            version=2,
+                        ),
+                    ),
+                ) as publish_catalog:
+                    with contextlib.redirect_stdout(stdout):
+                        exit_code = main(
+                            [
+                                "remote",
+                                "publish-catalog",
+                                "--config",
+                                str(config_path),
+                                "--json",
+                            ]
+                        )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["project"]["project_id"], "pangramanizer")
+            self.assertEqual(payload["project"]["catalog_version"], 2)
+            publish_catalog.assert_called_once()
+
     def test_ui_command_supports_frontend_dev_server_and_catalog_provider(self) -> None:
         with patch("mentalmodel.cli.create_dashboard_app", return_value=object()) as create_app:
             with patch("mentalmodel.cli.webbrowser.open") as open_browser:

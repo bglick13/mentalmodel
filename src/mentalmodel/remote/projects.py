@@ -5,6 +5,7 @@ from urllib import request
 
 from mentalmodel.remote.contracts import (
     RemoteContractError,
+    RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteProjectRecord,
 )
@@ -42,6 +43,22 @@ def fetch_remote_project_status(
     return RemoteProjectRecord.from_dict(project_payload)
 
 
+def publish_catalog_to_server(
+    config: MentalModelProjectConfig,
+) -> RemoteProjectRecord:
+    payload = config.to_catalog_publish_request().as_dict()
+    response = _request_json(
+        f"{config.server_url.rstrip('/')}/api/remote/projects/{config.project_id}/catalog",
+        method="POST",
+        payload=payload,
+        api_key=config.resolve_api_key(),
+    )
+    project_payload = response.get("project")
+    if not isinstance(project_payload, dict):
+        raise RemoteContractError("Remote catalog publish response must include project.")
+    return RemoteProjectRecord.from_dict(project_payload)
+
+
 def _request_json(
     url: str,
     *,
@@ -72,3 +89,9 @@ def build_link_request(
     config: MentalModelProjectConfig,
 ) -> RemoteProjectLinkRequest:
     return config.to_link_request()
+
+
+def build_catalog_publish_request(
+    config: MentalModelProjectConfig,
+) -> RemoteProjectCatalogPublishRequest:
+    return config.to_catalog_publish_request()

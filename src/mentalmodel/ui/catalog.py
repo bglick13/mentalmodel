@@ -37,6 +37,27 @@ class DashboardMetricGroup:
             "max_items": self.max_items,
         }
 
+    @classmethod
+    def from_dict(cls, payload: object) -> DashboardMetricGroup:
+        raw = _require_object(payload, "DashboardMetricGroup")
+        metric_path_prefixes = raw.get("metric_path_prefixes")
+        if not isinstance(metric_path_prefixes, list) or any(
+            not isinstance(item, str) or item == "" for item in metric_path_prefixes
+        ):
+            raise DashboardCatalogError(
+                "DashboardMetricGroup.metric_path_prefixes must be a non-empty string list."
+            )
+        max_items = raw.get("max_items", 8)
+        if not isinstance(max_items, int) or isinstance(max_items, bool):
+            raise DashboardCatalogError("DashboardMetricGroup.max_items must be an integer.")
+        return cls(
+            group_id=_require_str(raw, "group_id", "DashboardMetricGroup"),
+            title=_require_str(raw, "title", "DashboardMetricGroup"),
+            description=_optional_str(raw, "description", "DashboardMetricGroup") or "",
+            metric_path_prefixes=tuple(metric_path_prefixes),
+            max_items=max_items,
+        )
+
 
 @dataclass(slots=True, frozen=True)
 class DashboardPinnedNode:
@@ -52,6 +73,15 @@ class DashboardPinnedNode:
             "title": self.title,
             "description": self.description,
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> DashboardPinnedNode:
+        raw = _require_object(payload, "DashboardPinnedNode")
+        return cls(
+            node_id=_require_str(raw, "node_id", "DashboardPinnedNode"),
+            title=_require_str(raw, "title", "DashboardPinnedNode"),
+            description=_optional_str(raw, "description", "DashboardPinnedNode") or "",
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -69,6 +99,7 @@ class DashboardCatalogEntry:
     catalog_source: str | None = None
     category: str = "default"
     tags: tuple[str, ...] = ()
+    launch_enabled: bool = True
     default_loop_node_id: str | None = None
     metric_groups: tuple[DashboardMetricGroup, ...] = ()
     pinned_nodes: tuple[DashboardPinnedNode, ...] = ()
@@ -87,11 +118,65 @@ class DashboardCatalogEntry:
             "catalog_source": self.catalog_source,
             "category": self.category,
             "tags": list(self.tags),
+            "launch_enabled": self.launch_enabled,
             "default_loop_node_id": self.default_loop_node_id,
             "metric_groups": [group.as_dict() for group in self.metric_groups],
             "pinned_nodes": [node.as_dict() for node in self.pinned_nodes],
             "custom_views": [view.as_dict() for view in self.custom_views],
         }
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: object,
+        *,
+        launch_enabled: bool | None = None,
+    ) -> DashboardCatalogEntry:
+        raw = _require_object(payload, "DashboardCatalogEntry")
+        spec_path = _require_str(raw, "spec_path", "DashboardCatalogEntry")
+        tags = raw.get("tags", [])
+        if not isinstance(tags, list) or any(not isinstance(item, str) for item in tags):
+            raise DashboardCatalogError("DashboardCatalogEntry.tags must be a string list.")
+        metric_groups_payload = raw.get("metric_groups", [])
+        if not isinstance(metric_groups_payload, list):
+            raise DashboardCatalogError("DashboardCatalogEntry.metric_groups must be a list.")
+        pinned_nodes_payload = raw.get("pinned_nodes", [])
+        if not isinstance(pinned_nodes_payload, list):
+            raise DashboardCatalogError("DashboardCatalogEntry.pinned_nodes must be a list.")
+        custom_views_payload = raw.get("custom_views", [])
+        if not isinstance(custom_views_payload, list):
+            raise DashboardCatalogError("DashboardCatalogEntry.custom_views must be a list.")
+        resolved_launch_enabled = (
+            launch_enabled
+            if launch_enabled is not None
+            else _optional_bool(raw, "launch_enabled", "DashboardCatalogEntry", default=True)
+        )
+        return cls(
+            spec_id=_require_str(raw, "spec_id", "DashboardCatalogEntry"),
+            label=_require_str(raw, "label", "DashboardCatalogEntry"),
+            description=_require_str(raw, "description", "DashboardCatalogEntry"),
+            spec_path=Path(spec_path),
+            graph_id=_require_str(raw, "graph_id", "DashboardCatalogEntry"),
+            invocation_name=_require_str(raw, "invocation_name", "DashboardCatalogEntry"),
+            project_id=_optional_str(raw, "project_id", "DashboardCatalogEntry"),
+            project_label=_optional_str(raw, "project_label", "DashboardCatalogEntry"),
+            catalog_source=_optional_str(raw, "catalog_source", "DashboardCatalogEntry"),
+            category=_optional_str(raw, "category", "DashboardCatalogEntry") or "default",
+            tags=tuple(tags),
+            launch_enabled=resolved_launch_enabled,
+            default_loop_node_id=_optional_str(
+                raw, "default_loop_node_id", "DashboardCatalogEntry"
+            ),
+            metric_groups=tuple(
+                DashboardMetricGroup.from_dict(item) for item in metric_groups_payload
+            ),
+            pinned_nodes=tuple(
+                DashboardPinnedNode.from_dict(item) for item in pinned_nodes_payload
+            ),
+            custom_views=tuple(
+                DashboardCustomView.from_dict(item) for item in custom_views_payload
+            ),
+        )
 
 
 def default_dashboard_catalog() -> tuple[DashboardCatalogEntry, ...]:
@@ -186,7 +271,7 @@ def validate_dashboard_catalog(
                 f"{entry.project_id!r}/{entry.graph_id!r}/{entry.invocation_name!r}."
             )
         seen_run_keys.add(run_key)
-        if not entry.spec_path.is_file():
+        if entry.launch_enabled and not entry.spec_path.is_file():
             raise DashboardCatalogError(
                 f"Dashboard spec path does not exist: {entry.spec_path}"
             )
@@ -374,3 +459,40 @@ def _validate_custom_views(entry: DashboardCatalogEntry) -> None:
                     raise DashboardCatalogError(
                         f"Selector {column.column_id!r} must declare node_id."
                     )
+
+
+def _require_object(payload: object, kind: str) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise DashboardCatalogError(f"{kind} must decode from a JSON object.")
+    return payload
+
+
+def _require_str(payload: dict[str, object], key: str, kind: str) -> str:
+    value = payload.get(key)
+    if isinstance(value, str) and value:
+        return value
+    raise DashboardCatalogError(f"{kind}.{key} must be a non-empty string.")
+
+
+def _optional_str(payload: dict[str, object], key: str, kind: str) -> str | None:
+    value = payload.get(key)
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        return value
+    raise DashboardCatalogError(f"{kind}.{key} must be a string when present.")
+
+
+def _optional_bool(
+    payload: dict[str, object],
+    key: str,
+    kind: str,
+    *,
+    default: bool,
+) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise DashboardCatalogError(f"{kind}.{key} must be a boolean when present.")

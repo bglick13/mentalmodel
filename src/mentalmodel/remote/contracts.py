@@ -651,6 +651,59 @@ class RemoteProjectLinkRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteProjectCatalogPublishRequest:
+    """Repo-owned catalog publish request for an already linked remote project."""
+
+    project_id: str
+    catalog_provider: str
+    catalog_snapshot: ProjectCatalogSnapshot
+
+    def __post_init__(self) -> None:
+        _require_identifier(
+            self.project_id,
+            "RemoteProjectCatalogPublishRequest.project_id",
+        )
+        if not self.catalog_provider:
+            raise RemoteContractError(
+                "RemoteProjectCatalogPublishRequest.catalog_provider cannot be empty."
+            )
+        if self.catalog_snapshot.project_id != self.project_id:
+            raise RemoteContractError(
+                "RemoteProjectCatalogPublishRequest.catalog_snapshot project_id mismatch."
+            )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "project_id": self.project_id,
+            "catalog_provider": self.catalog_provider,
+            "catalog_snapshot": self.catalog_snapshot.as_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RemoteProjectCatalogPublishRequest:
+        project_id = payload.get("project_id")
+        catalog_provider = payload.get("catalog_provider")
+        snapshot_payload = payload.get("catalog_snapshot")
+        if not isinstance(project_id, str):
+            raise RemoteContractError(
+                "RemoteProjectCatalogPublishRequest.project_id must be a string."
+            )
+        if not isinstance(catalog_provider, str):
+            raise RemoteContractError(
+                "RemoteProjectCatalogPublishRequest.catalog_provider must be a string."
+            )
+        if not isinstance(snapshot_payload, dict):
+            raise RemoteContractError(
+                "RemoteProjectCatalogPublishRequest.catalog_snapshot must be a JSON object."
+            )
+        return cls(
+            project_id=project_id,
+            catalog_provider=catalog_provider,
+            catalog_snapshot=ProjectCatalogSnapshot.from_dict(snapshot_payload),
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteProjectRecord:
     """Service-owned remote project record for one linked repo."""
 

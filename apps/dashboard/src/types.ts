@@ -54,6 +54,7 @@ export type CatalogEntry = {
   catalog_source?: string | null;
   category: string;
   tags: string[];
+  launch_enabled: boolean;
   default_loop_node_id: string | null;
   metric_groups: MetricGroup[];
   pinned_nodes: PinnedNode[];

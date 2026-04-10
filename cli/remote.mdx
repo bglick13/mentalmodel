@@ -11,6 +11,7 @@ data plane.
 ```bash
 uv run mentalmodel remote link
 uv run mentalmodel remote status
+uv run mentalmodel remote publish-catalog
 uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
 uv run mentalmodel remote doctor --workspace-config /tmp/mentalmodel-remote/workspace.toml
 uv run mentalmodel remote up --output-dir /tmp/mentalmodel-remote --open-browser
@@ -49,6 +50,7 @@ The common hosted setup flow is now:
 ```bash
 uv run mentalmodel remote link
 uv run mentalmodel remote status
+uv run mentalmodel remote publish-catalog
 ```
 
 `remote link` discovers `mentalmodel.toml`, resolves the repo-owned catalog
@@ -90,6 +92,32 @@ How to use that:
 4. Open the hosted dashboard or use `mentalmodel remote status` to confirm the
    project is now known remotely.
 
+## `remote publish-catalog`
+
+Republish just the hosted dashboard contract for an already linked project:
+
+```bash
+uv run mentalmodel remote publish-catalog
+uv run mentalmodel remote publish-catalog --config /Users/ben/repos/pangramanizer/mentalmodel.toml
+```
+
+Use this when:
+
+- pinned nodes changed
+- metric groups changed
+- custom views changed
+- the hosted dashboard should pick up catalog updates without relinking the
+  whole project
+
+`remote publish-catalog` reads the same repo-owned `mentalmodel.toml`, resolves
+the configured Python catalog provider, serializes the current dashboard
+contract into a stable snapshot, and `POST`s that snapshot to the remote
+service.
+
+The hosted dashboard now reads those stored remote catalog snapshots first. In
+the hosted path it no longer needs to import the producer repo locally just to
+render project entries, metric groups, pinned nodes, or custom views.
+
 ## `remote status`
 
 Read the linked project record back from the remote service:
@@ -101,6 +129,9 @@ uv run mentalmodel remote status --config /Users/ben/repos/pangramanizer/mentalm
 
 Use this when you want to confirm the Phase 1 hosted seam before thinking about
 run upload or live streaming.
+
+The status payload now also surfaces catalog version and publish metadata, so
+you can confirm that the hosted dashboard is looking at the expected snapshot.
 
 ## `remote write-demo`
 

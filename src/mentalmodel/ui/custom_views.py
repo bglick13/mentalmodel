@@ -31,6 +31,20 @@ class DashboardTableRowSource:
             "loop_node_id": self.loop_node_id,
         }
 
+    @classmethod
+    def from_dict(cls, payload: object) -> DashboardTableRowSource:
+        raw = _require_object(payload, "DashboardTableRowSource")
+        kind = _require_str(raw, "kind", "DashboardTableRowSource")
+        node_id = _require_str(raw, "node_id", "DashboardTableRowSource")
+        items_path = _require_str(raw, "items_path", "DashboardTableRowSource")
+        loop_node_id = _optional_str(raw, "loop_node_id", "DashboardTableRowSource")
+        return cls(
+            kind=kind,
+            node_id=node_id,
+            items_path=items_path,
+            loop_node_id=loop_node_id,
+        )
+
 
 @dataclass(slots=True, frozen=True)
 class DashboardValueSelector:
@@ -49,6 +63,16 @@ class DashboardValueSelector:
             "event_type": self.event_type,
         }
 
+    @classmethod
+    def from_dict(cls, payload: object) -> DashboardValueSelector:
+        raw = _require_object(payload, "DashboardValueSelector")
+        return cls(
+            kind=_require_str(raw, "kind", "DashboardValueSelector"),
+            path=_optional_str(raw, "path", "DashboardValueSelector"),
+            node_id=_optional_str(raw, "node_id", "DashboardValueSelector"),
+            event_type=_optional_str(raw, "event_type", "DashboardValueSelector"),
+        )
+
 
 @dataclass(slots=True, frozen=True)
 class DashboardTableColumn:
@@ -66,6 +90,17 @@ class DashboardTableColumn:
             "description": self.description,
             "selector": self.selector.as_dict(),
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> DashboardTableColumn:
+        raw = _require_object(payload, "DashboardTableColumn")
+        selector = raw.get("selector")
+        return cls(
+            column_id=_require_str(raw, "column_id", "DashboardTableColumn"),
+            title=_require_str(raw, "title", "DashboardTableColumn"),
+            description=_optional_str(raw, "description", "DashboardTableColumn") or "",
+            selector=DashboardValueSelector.from_dict(selector),
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -88,6 +123,21 @@ class DashboardCustomView:
             "row_source": self.row_source.as_dict(),
             "columns": [column.as_dict() for column in self.columns],
         }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> DashboardCustomView:
+        raw = _require_object(payload, "DashboardCustomView")
+        columns_payload = raw.get("columns")
+        if not isinstance(columns_payload, list):
+            raise TypeError("DashboardCustomView.columns must be a list.")
+        return cls(
+            view_id=_require_str(raw, "view_id", "DashboardCustomView"),
+            title=_require_str(raw, "title", "DashboardCustomView"),
+            description=_optional_str(raw, "description", "DashboardCustomView") or "",
+            kind=_require_str(raw, "kind", "DashboardCustomView"),
+            row_source=DashboardTableRowSource.from_dict(raw.get("row_source")),
+            columns=tuple(DashboardTableColumn.from_dict(item) for item in columns_payload),
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -449,3 +499,25 @@ def _is_json_value(value: object) -> TypeGuard[JsonValue]:
     if isinstance(value, dict):
         return all(isinstance(key, str) and _is_json_value(item) for key, item in value.items())
     return False
+
+
+def _require_object(payload: object, kind: str) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise TypeError(f"{kind} must decode from a JSON object.")
+    return payload
+
+
+def _require_str(payload: dict[str, object], key: str, kind: str) -> str:
+    value = payload.get(key)
+    if isinstance(value, str) and value:
+        return value
+    raise TypeError(f"{kind}.{key} must be a non-empty string.")
+
+
+def _optional_str(payload: dict[str, object], key: str, kind: str) -> str | None:
+    value = payload.get(key)
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        return value
+    raise TypeError(f"{kind}.{key} must be a string when present.")

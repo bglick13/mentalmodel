@@ -11,7 +11,11 @@ from fastapi.staticfiles import StaticFiles
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.remote.backend import RemoteBackendConfig, RemoteProjectStore, RemoteRunStore
-from mentalmodel.remote.contracts import ProjectCatalog, RemoteProjectLinkRequest
+from mentalmodel.remote.contracts import (
+    ProjectCatalog,
+    RemoteProjectCatalogPublishRequest,
+    RemoteProjectLinkRequest,
+)
 from mentalmodel.remote.store import FileRemoteRunStore, RunBundleUpload
 from mentalmodel.ui.catalog import DashboardCatalogEntry
 from mentalmodel.ui.service import DashboardService
@@ -137,6 +141,26 @@ def create_dashboard_app(
             project = configured_remote_project_store.get_project(project_id=project_id)
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"project": project.as_dict(include_catalog_snapshot=True)}
+
+    @app.post("/api/remote/projects/{project_id}/catalog", response_model=None)
+    def publish_remote_catalog(
+        project_id: str,
+        payload: Annotated[dict[str, object], Body()],
+        _auth: None = Depends(require_remote_auth),
+    ) -> object:
+        if configured_remote_project_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote catalog publish requires remote backend configuration.",
+            )
+        try:
+            request_payload = RemoteProjectCatalogPublishRequest.from_dict(payload)
+            if request_payload.project_id != project_id:
+                raise ValueError("Catalog publish path project_id does not match payload.")
+            project = configured_remote_project_store.publish_catalog(request_payload)
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"project": project.as_dict(include_catalog_snapshot=True)}
 
     @app.post("/api/remote/runs", response_model=None)

@@ -37,6 +37,7 @@ from mentalmodel.remote.workspace import (
 from mentalmodel.runtime.replay import build_replay_report
 from mentalmodel.runtime.runs import (
     RunFrameScope,
+    RunSummary,
     list_run_summaries,
     load_run_graph,
     load_run_node_inputs,
@@ -246,16 +247,24 @@ class DashboardService:
         base_entries = (
             tuple(catalog_entries)
             if catalog_entries is not None
-            else default_dashboard_catalog()
+            else (
+                ()
+                if remote_project_store is not None and not self._project_catalogs
+                else default_dashboard_catalog()
+            )
         )
         project_entries = flatten_project_catalogs(self._project_catalogs)
-        self._catalog = validate_dashboard_catalog(base_entries + project_entries)
+        self._static_catalog = validate_dashboard_catalog(base_entries + project_entries)
         self._dynamic_catalog: dict[str, DashboardCatalogEntry] = {}
         self._sessions: dict[str, DashboardExecutionSession] = {}
         self._lock = threading.Lock()
 
     def list_catalog(self) -> tuple[DashboardCatalogEntry, ...]:
-        return tuple(self._catalog) + tuple(self._dynamic_catalog.values())
+        return validate_dashboard_catalog(
+            self._static_catalog
+            + self._remote_catalog_entries()
+            + tuple(self._dynamic_catalog.values())
+        )
 
     def list_projects(self) -> tuple[dict[str, JsonValue], ...]:
         projects: list[dict[str, JsonValue]] = []
@@ -318,12 +327,32 @@ class DashboardService:
                 )
         return tuple(projects)
 
+    def _remote_catalog_entries(self) -> tuple[DashboardCatalogEntry, ...]:
+        if self.remote_project_store is None:
+            return ()
+        entries: list[DashboardCatalogEntry] = []
+        for project in self.remote_project_store.list_projects():
+            if project.project_id in self._project_catalog_by_id:
+                continue
+            snapshot = project.catalog_snapshot
+            if snapshot is None:
+                continue
+            for raw_entry in snapshot.entries:
+                entry = DashboardCatalogEntry.from_dict(raw_entry, launch_enabled=False)
+                entries.append(
+                    replace(
+                        entry,
+                        project_id=project.project_id,
+                        project_label=project.label,
+                        catalog_source="remote-snapshot",
+                    )
+                )
+        return tuple(entries)
+
     def _resolve_entry(self, spec_id: str) -> DashboardCatalogEntry:
-        for entry in self._catalog:
+        for entry in self.list_catalog():
             if entry.spec_id == spec_id:
                 return entry
-        if spec_id in self._dynamic_catalog:
-            return self._dynamic_catalog[spec_id]
         raise DashboardCatalogError(f"Unknown dashboard catalog entry {spec_id!r}.")
 
     def register_spec_path(self, spec_path: Path) -> DashboardCatalogEntry:
@@ -341,6 +370,11 @@ class DashboardService:
 
     def load_catalog_graph(self, spec_id: str) -> dict[str, JsonValue]:
         entry = self._resolve_entry(spec_id)
+        if not entry.launch_enabled:
+            return {
+                "catalog_entry": _as_json_object(entry.as_dict()),
+                **self._remote_catalog_graph_payload(entry),
+            }
         external_project = self._external_project_for_entry(entry)
         if external_project is not None:
             payload = self._load_external_catalog_graph(entry, external_project.project.root_dir)
@@ -363,6 +397,10 @@ class DashboardService:
         self,
         entry: DashboardCatalogEntry,
     ) -> DashboardExecutionSession:
+        if not entry.launch_enabled:
+            raise DashboardCatalogError(
+                f"Dashboard execution is not available for catalog entry {entry.spec_id!r}."
+            )
         session = DashboardExecutionSession(
             execution_id=f"exec-{uuid.uuid4().hex}",
             spec=entry,
@@ -810,6 +848,54 @@ class DashboardService:
         invocation = read_verify_invocation_spec(entry.spec_path)
         _, program = load_workflow_subject(invocation.program)
         return _graph_to_payload(lower_program(program))
+
+    def _remote_catalog_graph_payload(
+        self,
+        entry: DashboardCatalogEntry,
+    ) -> dict[str, JsonValue]:
+        summary = self._latest_summary_for_entry(entry)
+        if summary is None:
+            return {
+                "graph": {
+                    "graph_id": entry.graph_id,
+                    "metadata": {},
+                    "nodes": [],
+                    "edges": [],
+                },
+                "analysis": {
+                    "error_count": 0,
+                    "warning_count": 0,
+                    "findings": [],
+                },
+            }
+        return {
+            "graph": self.get_run_graph(graph_id=summary.graph_id, run_id=summary.run_id),
+            "analysis": {
+                "error_count": 0,
+                "warning_count": 0,
+                "findings": [],
+            },
+        }
+
+    def _latest_summary_for_entry(
+        self,
+        entry: DashboardCatalogEntry,
+    ) -> RunSummary | None:
+        summaries = (
+            self.remote_run_store.list_run_summaries(
+                graph_id=entry.graph_id,
+                invocation_name=entry.invocation_name,
+            )
+            if self.remote_run_store is not None
+            else list_run_summaries(
+                runs_dir=self.runs_dir,
+                graph_id=entry.graph_id,
+                invocation_name=entry.invocation_name,
+            )
+        )
+        if not summaries:
+            return None
+        return max(summaries, key=lambda summary: (summary.created_at_ms, summary.run_id))
 
     def _active_run_replay_payload(
         self,

@@ -13,10 +13,15 @@ from mentalmodel.remote.backend import (
     RemoteProjectStore,
     RemoteRunStore,
 )
-from mentalmodel.remote.contracts import ProjectCatalogSnapshot, RemoteProjectLinkRequest
+from mentalmodel.remote.contracts import (
+    ProjectCatalogSnapshot,
+    RemoteProjectCatalogPublishRequest,
+    RemoteProjectLinkRequest,
+)
 from mentalmodel.remote.store import FileRemoteRunStore
 from mentalmodel.remote.sync import build_run_bundle_upload
 from mentalmodel.testing import run_verification
+from mentalmodel.ui.catalog import default_dashboard_catalog
 
 
 class RemoteStoreTest(unittest.TestCase):
@@ -142,6 +147,37 @@ class RemoteStoreTest(unittest.TestCase):
         listed = store.list_projects()
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0].project_id, "pangramanizer")
+
+    def test_remote_project_store_publishes_catalog_without_relinking(self) -> None:
+        store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        linked = store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                default_environment="prod",
+                catalog_provider="pangramanizer.dashboard:catalog",
+            )
+        )
+        entry = default_dashboard_catalog()[0]
+        published = store.publish_catalog(
+            RemoteProjectCatalogPublishRequest(
+                project_id="pangramanizer",
+                catalog_provider="pangramanizer.dashboard:catalog",
+                catalog_snapshot=ProjectCatalogSnapshot(
+                    project_id="pangramanizer",
+                    provider="pangramanizer.dashboard:catalog",
+                    published_at_ms=2000,
+                    entries=(entry.as_dict(),),
+                    default_entry_id=entry.spec_id,
+                    version=2,
+                ),
+            )
+        )
+        self.assertEqual(published.project_id, "pangramanizer")
+        self.assertEqual(published.linked_at_ms, linked.linked_at_ms)
+        self.assertTrue(published.catalog_published)
+        self.assertEqual(published.catalog_version, 2)
+        self.assertEqual(published.catalog_entry_count, 1)
 
 
 if __name__ == "__main__":

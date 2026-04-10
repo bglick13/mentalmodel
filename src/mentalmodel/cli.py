@@ -66,6 +66,7 @@ from mentalmodel.remote.project_config import (
 from mentalmodel.remote.projects import (
     fetch_remote_project_status,
     link_project_to_server,
+    publish_catalog_to_server,
 )
 from mentalmodel.remote.sync import sync_runs_to_server
 from mentalmodel.remote.workspace import (
@@ -912,6 +913,7 @@ def run_remote_link(
     table.add_column("Project")
     table.add_column("Server")
     table.add_column("Catalog")
+    table.add_column("Version")
     table.add_row(
         project.project_id,
         project_config.server_url,
@@ -920,6 +922,7 @@ def run_remote_link(
             if project.catalog_published
             else "not published"
         ),
+        str(project.catalog_version or ""),
     )
     Console().print(table)
     return 0
@@ -954,6 +957,7 @@ def run_remote_status(
     table.add_column("Linked")
     table.add_column("Updated")
     table.add_column("Catalog")
+    table.add_column("Version")
     table.add_row(
         project.project_id,
         project_config.server_url,
@@ -964,6 +968,49 @@ def run_remote_status(
             if project.catalog_published
             else "not published"
         ),
+        str(project.catalog_version or ""),
+    )
+    Console().print(table)
+    return 0
+
+
+def run_remote_publish_catalog(
+    *,
+    config: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Publish the current repo-owned dashboard catalog snapshot to the remote service."""
+
+    project_config = (
+        load_project_config(config)
+        if config is not None
+        else load_discovered_project_config()
+    )
+    project = publish_catalog_to_server(project_config)
+    payload = {
+        "config_path": str(project_config.config_path),
+        "repo_root": str(project_config.repo_root),
+        "server_url": project_config.server_url,
+        "project": project.as_dict(include_catalog_snapshot=True),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel remote publish-catalog")
+    table.add_column("Project")
+    table.add_column("Server")
+    table.add_column("Catalog")
+    table.add_column("Version")
+    table.add_row(
+        project.project_id,
+        project_config.server_url,
+        (
+            f"published ({project.catalog_entry_count} entries)"
+            if project.catalog_published
+            else "not published"
+        ),
+        str(project.catalog_version or ""),
     )
     Console().print(table)
     return 0
@@ -2386,6 +2433,15 @@ def build_parser() -> argparse.ArgumentParser:
     remote_status.add_argument("--config", type=Path)
     remote_status.add_argument("--json", action="store_true", help="Emit JSON output.")
 
+    remote_publish_catalog = remote_subparsers.add_parser(
+        "publish-catalog",
+        help="Publish the current repo-owned dashboard catalog snapshot to the remote service.",
+    )
+    remote_publish_catalog.add_argument("--config", type=Path)
+    remote_publish_catalog.add_argument(
+        "--json", action="store_true", help="Emit JSON output."
+    )
+
     remote_sync = remote_subparsers.add_parser(
         "sync",
         help="Sync persisted local runs to the remote ingest API.",
@@ -2681,6 +2737,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             if args.remote_command == "status":
                 return run_remote_status(
+                    config=args.config,
+                    json_output=args.json,
+                )
+            if args.remote_command == "publish-catalog":
+                return run_remote_publish_catalog(
                     config=args.config,
                     json_output=args.json,
                 )

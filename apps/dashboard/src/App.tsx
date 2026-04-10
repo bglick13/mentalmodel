@@ -1644,6 +1644,7 @@ function OverviewView({
             selectedCatalog ? (
               <button
                 className="primary-action"
+                disabled={!selectedCatalog.launch_enabled}
                 onClick={() => void handleRun(selectedCatalog.spec_id)}
               >
                 Run verification
@@ -2824,6 +2825,19 @@ function LaunchCompareView({
                   {selectedCatalog.invocation_name}
                 </div>
               </div>
+              <div>
+                <span className="eyebrow">Execution</span>
+                <div className="launch-meta-value">
+                  {selectedCatalog.launch_enabled ? "local/dashboard" : "hosted read-only"}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {selectedCatalog && !selectedCatalog.launch_enabled ? (
+            <div className="launch-hint">
+              This catalog entry was published from a remote snapshot. Inspect runs here, but
+              launch verification from the producer repo instead of the hosted dashboard.
             </div>
           ) : null}
 
@@ -2832,6 +2846,7 @@ function LaunchCompareView({
               <button
                 type="button"
                 className="primary-action secondary"
+                disabled={!selectedCatalog.launch_enabled}
                 onClick={() => void handleRun(selectedCatalog.spec_id)}
               >
                 Run again (selected catalog)

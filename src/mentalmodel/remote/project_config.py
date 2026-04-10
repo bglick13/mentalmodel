@@ -9,6 +9,7 @@ from mentalmodel.errors import MentalModelError
 from mentalmodel.remote.contracts import (
     ProjectCatalogSnapshot,
     ProjectRegistration,
+    RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
 )
 from mentalmodel.ui.workspace import resolve_project_catalog
@@ -97,8 +98,12 @@ class MentalModelProjectConfig:
             default_environment=self.default_environment,
         )
 
-    def build_catalog_snapshot(self) -> ProjectCatalogSnapshot | None:
-        if not self.publish_on_link:
+    def build_catalog_snapshot(
+        self,
+        *,
+        force: bool = False,
+    ) -> ProjectCatalogSnapshot | None:
+        if not force and not self.publish_on_link:
             return None
         project_catalog = resolve_project_catalog(self.to_local_project_registration())
         return ProjectCatalogSnapshot(
@@ -120,6 +125,15 @@ class MentalModelProjectConfig:
             default_runs_dir=self.default_runs_dir_text,
             default_verify_spec=self.default_verify_spec_text,
             catalog_snapshot=self.build_catalog_snapshot(),
+        )
+
+    def to_catalog_publish_request(self) -> RemoteProjectCatalogPublishRequest:
+        snapshot = self.build_catalog_snapshot(force=True)
+        assert snapshot is not None
+        return RemoteProjectCatalogPublishRequest(
+            project_id=self.project_id,
+            catalog_provider=self.catalog_provider,
+            catalog_snapshot=snapshot,
         )
 
 

@@ -14,6 +14,7 @@ primitives for remote-compatible run handling:
 - project/workspace registration
 - repo-owned `mentalmodel.toml` project config loading
 - remote project records and catalog snapshot publication
+- dedicated catalog republish support for already linked projects
 - project-scoped catalog provider shape
 - canonical run bundle upload payloads
 - a deterministic file-backed remote ingest store
@@ -43,6 +44,7 @@ tests and local transition scenarios.
 - `CompletedRunSink`
 - `ProjectRegistration`
 - `RemoteProjectLinkRequest`
+- `RemoteProjectCatalogPublishRequest`
 - `RemoteProjectRecord`
 - `ProjectCatalogSnapshot`
 - `ProjectCatalog`
@@ -55,6 +57,7 @@ tests and local transition scenarios.
 - `FileRemoteRunStore`
 - `load_project_config`
 - `link_project_to_server`
+- `publish_catalog_to_server`
 - `build_run_bundle_upload`
 - `sync_runs_to_server`
 - `load_workspace_config`
@@ -88,6 +91,8 @@ tests and local transition scenarios.
 8. `mentalmodel remote link` reads repo-owned `mentalmodel.toml`, resolves the
    configured catalog provider, and publishes a remote project record plus the
    current catalog snapshot.
+9. `mentalmodel remote publish-catalog` republishes the hosted dashboard
+   contract without relinking the whole project.
 
 ## Verification
 

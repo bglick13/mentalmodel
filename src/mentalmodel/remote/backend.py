@@ -19,6 +19,7 @@ from mentalmodel.remote.contracts import (
     CatalogSource,
     ProjectCatalogSnapshot,
     RemoteContractError,
+    RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteProjectRecord,
     RunManifest,
@@ -118,6 +119,11 @@ class ProjectIndex(Protocol):
     def upsert_project(
         self,
         payload: RemoteProjectLinkRequest,
+    ) -> RemoteProjectRecord: ...
+
+    def publish_catalog(
+        self,
+        payload: RemoteProjectCatalogPublishRequest,
     ) -> RemoteProjectRecord: ...
 
     def get_project(self, *, project_id: str) -> RemoteProjectRecord: ...
@@ -228,6 +234,26 @@ class InMemoryProjectIndex:
                 reverse=True,
             )
         )
+
+    def publish_catalog(
+        self,
+        payload: RemoteProjectCatalogPublishRequest,
+    ) -> RemoteProjectRecord:
+        existing = self.get_project(project_id=payload.project_id)
+        updated = RemoteProjectRecord(
+            project_id=existing.project_id,
+            label=existing.label,
+            linked_at_ms=existing.linked_at_ms,
+            updated_at_ms=int(time.time() * 1000),
+            description=existing.description,
+            default_environment=existing.default_environment,
+            catalog_provider=payload.catalog_provider,
+            default_runs_dir=existing.default_runs_dir,
+            default_verify_spec=existing.default_verify_spec,
+            catalog_snapshot=payload.catalog_snapshot,
+        )
+        self._rows[payload.project_id] = updated
+        return updated
 
 
 class S3ArtifactStore:
@@ -613,6 +639,63 @@ class PostgresProjectIndex:
             catalog_snapshot_json=cast(str | None, row[9]),
         )
 
+    def publish_catalog(
+        self,
+        payload: RemoteProjectCatalogPublishRequest,
+    ) -> RemoteProjectRecord:
+        self._ensure_schema()
+        now_ms = int(time.time() * 1000)
+        snapshot_json = json.dumps(payload.catalog_snapshot.as_dict(), sort_keys=True)
+        with psycopg.connect(self.database_url) as conn:
+            row = conn.execute(
+                """
+                update remote_projects
+                set
+                    catalog_provider = %s,
+                    updated_at_ms = %s,
+                    catalog_snapshot_json = %s::jsonb,
+                    catalog_entry_count = %s,
+                    catalog_published_at_ms = %s,
+                    catalog_version = %s
+                where project_id = %s
+                returning
+                    project_id,
+                    label,
+                    description,
+                    default_environment,
+                    catalog_provider,
+                    default_runs_dir,
+                    default_verify_spec,
+                    linked_at_ms,
+                    updated_at_ms,
+                    catalog_snapshot_json::text
+                """,
+                (
+                    payload.catalog_provider,
+                    now_ms,
+                    snapshot_json,
+                    payload.catalog_snapshot.entry_count,
+                    payload.catalog_snapshot.published_at_ms,
+                    payload.catalog_snapshot.version,
+                    payload.project_id,
+                ),
+            ).fetchone()
+            conn.commit()
+        if row is None:
+            raise RemoteContractError(f"Unknown remote project {payload.project_id!r}.")
+        return _remote_project_from_row(
+            project_id=cast(str, row[0]),
+            label=cast(str, row[1]),
+            description=cast(str, row[2]),
+            default_environment=cast(str | None, row[3]),
+            catalog_provider=cast(str | None, row[4]),
+            default_runs_dir=cast(str | None, row[5]),
+            default_verify_spec=cast(str | None, row[6]),
+            linked_at_ms=cast(int, row[7]),
+            updated_at_ms=cast(int, row[8]),
+            catalog_snapshot_json=cast(str | None, row[9]),
+        )
+
     def list_projects(self) -> tuple[RemoteProjectRecord, ...]:
         self._ensure_schema()
         with psycopg.connect(self.database_url) as conn:
@@ -821,6 +904,12 @@ class RemoteProjectStore:
 
     def link_project(self, payload: RemoteProjectLinkRequest) -> RemoteProjectRecord:
         return self._project_index.upsert_project(payload)
+
+    def publish_catalog(
+        self,
+        payload: RemoteProjectCatalogPublishRequest,
+    ) -> RemoteProjectRecord:
+        return self._project_index.publish_catalog(payload)
 
     def get_project(self, *, project_id: str) -> RemoteProjectRecord:
         return self._project_index.get_project(project_id=project_id)

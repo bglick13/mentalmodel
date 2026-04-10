@@ -11,6 +11,7 @@ from mentalmodel.remote import (
     ProjectCatalogSnapshot,
     ProjectRegistration,
     RemoteContractError,
+    RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteProjectRecord,
     RunManifest,
@@ -158,6 +159,21 @@ class RemoteContractsTest(unittest.TestCase):
             RemoteProjectLinkRequest(
                 project_id="mentalmodel-examples",
                 label="Mentalmodel Examples",
+                catalog_snapshot=snapshot,
+            )
+
+    def test_remote_project_catalog_publish_request_rejects_mismatched_snapshot(self) -> None:
+        entry = default_dashboard_catalog()[0]
+        snapshot = ProjectCatalogSnapshot(
+            project_id="other-project",
+            provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+            published_at_ms=1000,
+            entries=(entry.as_dict(),),
+        )
+        with self.assertRaises(RemoteContractError):
+            RemoteProjectCatalogPublishRequest(
+                project_id="mentalmodel-examples",
+                catalog_provider="mentalmodel.ui.catalog:default_dashboard_catalog",
                 catalog_snapshot=snapshot,
             )
 

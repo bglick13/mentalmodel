@@ -25,6 +25,7 @@ from mentalmodel.remote.contracts import (
     ProjectCatalog,
     ProjectCatalogSnapshot,
     ProjectRegistration,
+    RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
 )
 from mentalmodel.remote.sync import build_run_bundle_upload
@@ -188,6 +189,137 @@ class DashboardApiTest(unittest.TestCase):
         )
         response = client.get("/api/remote/projects")
         self.assertEqual(response.status_code, 401)
+
+    def test_remote_catalog_entries_render_without_local_repo_imports(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        linked_entry = default_dashboard_catalog()[0]
+        remote_entry_payload = dict(linked_entry.as_dict())
+        remote_entry_payload["spec_id"] = "pangramanizer-smoke"
+        remote_entry_payload["label"] = "Pangramanizer Smoke"
+        remote_entry_payload["graph_id"] = "pangramanizer_training"
+        remote_entry_payload["invocation_name"] = "pangram_real_smoke"
+        remote_entry_payload["spec_path"] = "/srv/repos/pangramanizer/verification/real_smoke.toml"
+        project_store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                description="Training workflows",
+                default_environment="prod",
+                catalog_provider="pangramanizer.dashboard:catalog",
+                catalog_snapshot=ProjectCatalogSnapshot(
+                    project_id="pangramanizer",
+                    provider="pangramanizer.dashboard:catalog",
+                    published_at_ms=1000,
+                    entries=(remote_entry_payload,),
+                    default_entry_id="pangramanizer-smoke",
+                ),
+            )
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                remote_project_store=project_store,
+            )
+        )
+
+        catalog_response = client.get("/api/catalog")
+        self.assertEqual(catalog_response.status_code, 200)
+        entries = catalog_response.json()["entries"]
+        remote_entry = next(entry for entry in entries if entry["spec_id"] == "pangramanizer-smoke")
+        self.assertEqual(remote_entry["project_id"], "pangramanizer")
+        self.assertFalse(remote_entry["launch_enabled"])
+        self.assertTrue(remote_entry["metric_groups"])
+        self.assertTrue(remote_entry["pinned_nodes"])
+
+        graph_response = client.get("/api/catalog/pangramanizer-smoke/graph")
+        self.assertEqual(graph_response.status_code, 200)
+        graph_payload = graph_response.json()
+        self.assertEqual(graph_payload["graph"]["graph_id"], "pangramanizer_training")
+        self.assertEqual(graph_payload["graph"]["nodes"], [])
+
+        launch_response = client.post(
+            "/api/executions",
+            json={"spec_id": "pangramanizer-smoke"},
+        )
+        self.assertEqual(launch_response.status_code, 400)
+
+    def test_remote_backed_catalog_does_not_include_local_demo_entries(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        linked_entry = default_dashboard_catalog()[0]
+        remote_entry_payload = dict(linked_entry.as_dict())
+        remote_entry_payload["spec_id"] = "pangramanizer-smoke"
+        remote_entry_payload["label"] = "Pangramanizer Smoke"
+        remote_entry_payload["graph_id"] = "pangramanizer_training"
+        remote_entry_payload["invocation_name"] = "pangram_real_smoke"
+        remote_entry_payload["spec_path"] = "/srv/repos/pangramanizer/verification/real_smoke.toml"
+        project_store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                description="Training workflows",
+                default_environment="prod",
+                catalog_provider="pangramanizer.dashboard:catalog",
+                catalog_snapshot=ProjectCatalogSnapshot(
+                    project_id="pangramanizer",
+                    provider="pangramanizer.dashboard:catalog",
+                    published_at_ms=1000,
+                    entries=(remote_entry_payload,),
+                    default_entry_id="pangramanizer-smoke",
+                ),
+            )
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                remote_project_store=project_store,
+            )
+        )
+
+        catalog_response = client.get("/api/catalog")
+        self.assertEqual(catalog_response.status_code, 200)
+        spec_ids = {entry["spec_id"] for entry in catalog_response.json()["entries"]}
+        self.assertEqual(spec_ids, {"pangramanizer-smoke"})
+
+    def test_remote_catalog_publish_endpoint_updates_existing_snapshot(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                remote_project_store=project_store,
+                remote_api_key="test-key",
+            )
+        )
+        project_store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                catalog_provider="pangramanizer.dashboard:catalog",
+            )
+        )
+        entry = default_dashboard_catalog()[1]
+        response = client.post(
+            "/api/remote/projects/pangramanizer/catalog",
+            headers={"Authorization": "Bearer test-key"},
+            json=RemoteProjectCatalogPublishRequest(
+                project_id="pangramanizer",
+                catalog_provider="pangramanizer.dashboard:catalog",
+                catalog_snapshot=ProjectCatalogSnapshot(
+                    project_id="pangramanizer",
+                    provider="pangramanizer.dashboard:catalog",
+                    published_at_ms=2000,
+                    entries=(entry.as_dict(),),
+                    default_entry_id=entry.spec_id,
+                    version=2,
+                ),
+            ).as_dict(),
+        )
+        self.assertEqual(response.status_code, 200)
+        project = response.json()["project"]
+        self.assertEqual(project["catalog_version"], 2)
+        self.assertEqual(project["catalog_entry_count"], 1)
 
     def test_review_workflow_dashboard_api_launches_and_inspects_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

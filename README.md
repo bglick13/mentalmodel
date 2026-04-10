@@ -91,6 +91,7 @@ uv run mentalmodel replay --graph-id async_rl_demo
 uv run mentalmodel replay --graph-id async_rl_demo --frame-id steps[3]
 uv run mentalmodel remote link
 uv run mentalmodel remote status
+uv run mentalmodel remote publish-catalog
 uv run mentalmodel otel show-config
 uv run mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
 uv run mentalmodel runs list
@@ -225,9 +226,13 @@ Dashboard UI:
 - or point the backend at a Vite dev server and a custom catalog:
   - `uv run mentalmodel ui --frontend-dev-url http://127.0.0.1:5173 --catalog-entrypoint mypkg.dashboard:catalog`
 - the hosted-service direction now starts with repo-owned `mentalmodel.toml`
-  plus `uv run mentalmodel remote link` / `uv run mentalmodel remote status`
-  instead of requiring manual `workspace.toml` registration for the common
-  path
+  plus `uv run mentalmodel remote link` /
+  `uv run mentalmodel remote publish-catalog` /
+  `uv run mentalmodel remote status` instead of requiring manual
+  `workspace.toml` registration for the common path
+- hosted dashboard entries now come from remote catalog snapshots, so the
+  service can render pinned nodes, metric groups, and custom views without
+  importing the producer repo locally
 - the first proof workflow is `review_workflow`; the UI can launch either
   runtime environment, inspect the persisted graph, inspect node
   inputs/outputs, inspect invariant results, pivot from grouped metrics into
