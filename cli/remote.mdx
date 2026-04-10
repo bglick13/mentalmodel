@@ -158,6 +158,44 @@ If remote upload fails, the local `.runs` bundle is still intact and usable for
 inspection or replay. The command surfaces the upload failure explicitly so you
 can recover without guessing whether the local run was preserved.
 
+## Live execution flow
+
+In Phase 4, the same linked `mentalmodel verify --spec ...` path also streams
+live execution state to the remote service while the workflow is still running.
+
+That means the hosted dashboard can show:
+
+- a run row before the completed bundle exists
+- a live graph snapshot for the current run
+- live semantic records as they arrive
+- live spans
+- early numeric metrics derived from streamed node outputs
+- early invariant status derived from streamed records
+
+The important semantics are:
+
+- local `.runs` is still the canonical completed artifact
+- live streaming is best-effort and must never break local execution
+- the completed bundle upload is the authoritative closeout step
+- once the completed bundle lands, the dashboard should pivot back to the
+  persisted run view rather than treating the live session as canonical
+
+What that looks like operationally:
+
+1. `mentalmodel verify --spec ...` starts.
+2. The producer opens a remote live session for the linked project.
+3. Records and spans stream to the remote service in batches.
+4. The hosted dashboard lists the run immediately as a live run.
+5. Local `.runs` materialization completes.
+6. The completed bundle uploads.
+7. The remote live session is marked committed and the dashboard now reads the
+   persisted run as the source of truth.
+
+If live upload fails in the middle of execution, the workflow still keeps
+running locally and the final `.runs` bundle is still written. If the completed
+bundle upload succeeds, the hosted dashboard still receives the final canonical
+run even if some live updates were missed.
+
 ## `remote write-demo`
 
 Write a local remote-runs demo directory:

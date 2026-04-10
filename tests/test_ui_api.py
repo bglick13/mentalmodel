@@ -16,8 +16,10 @@ from mentalmodel.examples.async_rl.demo import build_program
 from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
+    InMemoryLiveSessionIndex,
     InMemoryManifestIndex,
     InMemoryProjectIndex,
+    RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
 )
@@ -25,6 +27,9 @@ from mentalmodel.remote.contracts import (
     ProjectCatalog,
     ProjectCatalogSnapshot,
     ProjectRegistration,
+    RemoteLiveSessionStartRequest,
+    RemoteLiveSessionStatus,
+    RemoteLiveSessionUpdateRequest,
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
 )
@@ -552,10 +557,13 @@ class DashboardApiTest(unittest.TestCase):
             remote_root = Path(remote_tmp)
             report = run_verification(build_program(), runs_dir=local_root)
             self.assertTrue(report.success)
+            self.assertIsNotNone(report.runtime.run_id)
+            run_id = report.runtime.run_id
+            assert run_id is not None
             upload = build_run_bundle_upload(
                 runs_dir=local_root,
                 graph_id="async_rl_demo",
-                run_id=report.runtime.run_id,
+                run_id=run_id,
                 project_id="mentalmodel-examples",
                 project_label="Mentalmodel Examples",
             )
@@ -1104,3 +1112,251 @@ class DashboardApiTest(unittest.TestCase):
                 run_id=persisted.runtime.run_id,
             )
             self.assertEqual(indexed.manifest.project_id, "pangramanizer-training")
+
+    def test_remote_live_session_appears_in_run_queries_before_bundle_upload(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+        entry = default_dashboard_catalog()[0]
+        remote_entry_payload = dict(entry.as_dict())
+        remote_entry_payload["spec_id"] = "pangramanizer-smoke"
+        remote_entry_payload["label"] = "Pangramanizer Smoke"
+        remote_entry_payload["graph_id"] = "pangramanizer_training"
+        remote_entry_payload["invocation_name"] = "pangram_real_smoke"
+        remote_entry_payload["spec_path"] = "/srv/repos/pangramanizer/verification/real_smoke.toml"
+        project_store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                description="Training workflows",
+                default_environment="prod",
+                catalog_provider="pangramanizer.dashboard:catalog",
+                catalog_snapshot=ProjectCatalogSnapshot(
+                    project_id="pangramanizer",
+                    provider="pangramanizer.dashboard:catalog",
+                    published_at_ms=1000,
+                    entries=(remote_entry_payload,),
+                    default_entry_id="pangramanizer-smoke",
+                ),
+            )
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                remote_project_store=project_store,
+                remote_live_session_store=live_store,
+                remote_api_key="test-key",
+            )
+        )
+
+        start_response = client.post(
+            "/api/remote/live/sessions/start",
+            headers={"Authorization": "Bearer test-key"},
+            json=RemoteLiveSessionStartRequest(
+                project_id="pangramanizer",
+                graph_id="pangramanizer_training",
+                run_id="run-live-123",
+                invocation_name="pangram_real_smoke",
+                environment_name="prod",
+                catalog_entry_id="pangramanizer-smoke",
+                started_at_ms=1000,
+                graph={
+                    "graph_id": "pangramanizer_training",
+                    "metadata": {},
+                    "nodes": [{"node_id": "source", "kind": "actor", "label": "Source"}],
+                    "edges": [],
+                },
+                analysis={"error_count": 0, "warning_count": 0, "findings": []},
+                runtime_default_profile_name="real",
+                runtime_profile_names=("real",),
+            ).as_dict(),
+        )
+        self.assertEqual(start_response.status_code, 200)
+        update_response = client.post(
+            "/api/remote/live/sessions/run-live-123",
+            headers={"Authorization": "Bearer test-key"},
+            json=RemoteLiveSessionUpdateRequest(
+                graph_id="pangramanizer_training",
+                run_id="run-live-123",
+                updated_at_ms=1100,
+                records=(
+                    {
+                        "record_id": "run-live-123:1",
+                        "run_id": "run-live-123",
+                        "node_id": "source",
+                        "frame_id": "root",
+                        "frame_path": ["root"],
+                        "loop_node_id": None,
+                        "iteration_index": None,
+                        "event_type": "node.succeeded",
+                        "sequence": 1,
+                        "timestamp_ms": 1100,
+                        "payload": {"output": {"reward": 1.0}},
+                    },
+                ),
+                spans=(
+                    {
+                        "span_id": "span-1:root:100:actor:source",
+                        "sequence": 1,
+                        "name": "actor:source",
+                        "start_time_ns": 100,
+                        "end_time_ns": 200,
+                        "duration_ns": 100,
+                        "attributes": {"mentalmodel.node.id": "source"},
+                        "frame_id": "root",
+                        "loop_node_id": None,
+                        "iteration_index": None,
+                        "error_type": None,
+                        "error_message": None,
+                    },
+                ),
+            ).as_dict(),
+        )
+        self.assertEqual(update_response.status_code, 200)
+
+        runs_response = client.get(
+            "/api/runs",
+            params={
+                "graph_id": "pangramanizer_training",
+                "invocation_name": "pangram_real_smoke",
+            },
+        )
+        self.assertEqual(runs_response.status_code, 200)
+        runs = runs_response.json()["runs"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["run_id"], "run-live-123")
+        self.assertEqual(runs[0]["source"], "remote-live")
+
+        overview = client.get("/api/runs/pangramanizer_training/run-live-123/overview")
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(overview.json()["summary"]["status"], "running")
+        self.assertTrue(overview.json()["metrics"])
+
+        records = client.get("/api/runs/pangramanizer_training/run-live-123/records")
+        self.assertEqual(records.status_code, 200)
+        self.assertEqual(len(records.json()["records"]), 1)
+
+    def test_completed_bundle_replaces_remote_live_handle_in_run_queries(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as local_tmp,
+            tempfile.TemporaryDirectory() as remote_tmp,
+        ):
+            local_root = Path(local_tmp)
+            remote_root = Path(remote_tmp)
+            report = run_verification(build_program(), runs_dir=local_root)
+            self.assertTrue(report.success)
+            self.assertIsNotNone(report.runtime.run_id)
+            run_id = report.runtime.run_id
+            assert run_id is not None
+            upload = build_run_bundle_upload(
+                runs_dir=local_root,
+                graph_id="async_rl_demo",
+                run_id=run_id,
+                project_id="mentalmodel-examples",
+                project_label="Mentalmodel Examples",
+            )
+            remote_store = RemoteRunStore(
+                manifest_index=InMemoryManifestIndex(),
+                artifact_store=InMemoryArtifactStore(),
+                cache_dir=remote_root,
+            )
+            live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+            project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+            project_store.link_project(
+                RemoteProjectLinkRequest(
+                    project_id="mentalmodel-examples",
+                    label="Mentalmodel Examples",
+                    catalog_provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+                )
+            )
+            client = TestClient(
+                create_dashboard_app(
+                    runs_dir=None,
+                    frontend_dist=None,
+                    remote_run_store=remote_store,
+                    remote_project_store=project_store,
+                    remote_live_session_store=live_store,
+                    remote_api_key="test-key",
+                )
+            )
+
+            start = client.post(
+                "/api/remote/live/sessions/start",
+                headers={"Authorization": "Bearer test-key"},
+                json=RemoteLiveSessionStartRequest(
+                    project_id="mentalmodel-examples",
+                    graph_id="async_rl_demo",
+                    run_id=run_id,
+                    invocation_name="async_rl_demo",
+                    environment_name="prod",
+                    started_at_ms=1000,
+                    graph={
+                        "graph_id": "async_rl_demo",
+                        "metadata": {},
+                        "nodes": [
+                            {
+                                "node_id": "prompt_sampler",
+                                "kind": "actor",
+                                "label": "Prompt Sampler",
+                            }
+                        ],
+                        "edges": [],
+                    },
+                    analysis={"error_count": 0, "warning_count": 0, "findings": []},
+                ).as_dict(),
+            )
+            self.assertEqual(start.status_code, 200)
+            update = client.post(
+                f"/api/remote/live/sessions/{run_id}",
+                headers={"Authorization": "Bearer test-key"},
+                json=RemoteLiveSessionUpdateRequest(
+                    graph_id="async_rl_demo",
+                    run_id=run_id,
+                    updated_at_ms=1100,
+                    status=RemoteLiveSessionStatus.RUNNING,
+                    records=(
+                        {
+                            "record_id": f"{run_id}:1",
+                            "run_id": run_id,
+                            "node_id": "prompt_sampler",
+                            "frame_id": "root",
+                            "frame_path": ["root"],
+                            "loop_node_id": None,
+                            "iteration_index": None,
+                            "event_type": "node.succeeded",
+                            "sequence": 1,
+                            "timestamp_ms": 1100,
+                            "payload": {"output": {"prompt_count": 8}},
+                        },
+                    ),
+                ).as_dict(),
+            )
+            self.assertEqual(update.status_code, 200)
+
+            before = client.get(
+                "/api/runs",
+                params={"graph_id": "async_rl_demo"},
+            )
+            self.assertEqual(before.status_code, 200)
+            self.assertEqual(before.json()["runs"][0]["source"], "remote-live")
+
+            ingest = client.post(
+                "/api/remote/runs",
+                headers={"Authorization": "Bearer test-key"},
+                json=upload.as_dict(),
+            )
+            self.assertEqual(ingest.status_code, 200)
+
+            after = client.get(
+                "/api/runs",
+                params={"graph_id": "async_rl_demo"},
+            )
+            self.assertEqual(after.status_code, 200)
+            runs = after.json()["runs"]
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["run_id"], run_id)
+            self.assertEqual(runs[0]["source"], "persisted")
+
+            overview = client.get(f"/api/runs/async_rl_demo/{run_id}/overview")
+            self.assertEqual(overview.status_code, 200)
+            self.assertEqual(overview.json()["summary"]["source"], "persisted")

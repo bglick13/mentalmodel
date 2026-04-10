@@ -59,6 +59,8 @@ def recorded_span_to_json(span: RecordedSpan) -> dict[str, JsonValue]:
     """Return a JSON-safe projection of one recorded span."""
 
     return {
+        "span_id": span.span_id,
+        "sequence": span.sequence,
         "name": span.name,
         "start_time_ns": span.start_time_ns,
         "end_time_ns": span.end_time_ns,

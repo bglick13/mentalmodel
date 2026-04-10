@@ -139,6 +139,8 @@ class FakeTracingAdapter:
         finally:
             self.spans.append(
                 RecordedSpan(
+                    span_id=f"{name}:{len(self.spans) + 1}",
+                    sequence=len(self.spans) + 1,
                     name=name,
                     start_time_ns=0,
                     end_time_ns=1,

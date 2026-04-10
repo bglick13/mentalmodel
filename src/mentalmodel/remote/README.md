@@ -16,6 +16,7 @@ primitives for remote-compatible run handling:
 - remote project records and catalog snapshot publication
 - dedicated catalog republish support for already linked projects
 - automatic completed-run upload from repo-linked `mentalmodel verify`
+- automatic live execution streaming from repo-linked `mentalmodel verify`
 - project-scoped catalog provider shape
 - canonical run bundle upload payloads
 - a deterministic file-backed remote ingest store
@@ -97,9 +98,16 @@ tests and local transition scenarios.
 9. `mentalmodel remote publish-catalog` republishes the hosted dashboard
    contract without relinking the whole project.
 10. In a linked repo, `mentalmodel verify` now writes the local canonical
-    `.runs` bundle first and then uploads that completed bundle automatically
-    through `POST /api/remote/runs`.
-11. `mentalmodel remote sync` remains the manual recovery and backfill path
+    `.runs` bundle first, but while the workflow is still running it also
+    streams live session state to the remote service.
+11. The hosted dashboard reads those live sessions through the normal run
+    inspection APIs until the final bundle arrives.
+12. After local materialization succeeds, `mentalmodel verify` uploads the
+    completed bundle automatically through `POST /api/remote/runs`.
+13. Completed bundle ingest marks the matching live session committed so the
+    dashboard can hand off cleanly from temporary live state to canonical
+    persisted inspection.
+14. `mentalmodel remote sync` remains the manual recovery and backfill path
     when automatic upload fails or older local bundles need to be published.
 
 ## Verification

@@ -27,6 +27,12 @@ if TYPE_CHECKING:
     from mentalmodel.runtime.recorder import ExecutionRecorder
 
 
+def generate_run_id() -> str:
+    """Generate one stable run identifier for local and remote execution flows."""
+
+    return f"run-{uuid4().hex}"
+
+
 class Clock:
     """Clock abstraction for runtime records and tests."""
 
@@ -68,9 +74,10 @@ class ExecutionContext:
         metrics: MetricEmitter,
         environment: RuntimeEnvironment = EMPTY_RUNTIME_ENVIRONMENT,
         invocation_name: str | None = None,
+        run_id: str | None = None,
     ) -> ExecutionContext:
         return cls(
-            run_id=f"run-{uuid4().hex}",
+            run_id=run_id or generate_run_id(),
             graph=graph,
             recorder=recorder,
             tracing=tracing,

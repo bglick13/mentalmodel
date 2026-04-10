@@ -151,3 +151,13 @@ The review workflow proof case should show:
 - loop frame ids like `ticket_review_loop[0]`
 - warning-severity invariant results attached to the loop body
 - root `queue_summary` outputs with `processed`, `escalations`, and `auto_publish`
+
+For a linked hosted project, the same dashboard should also show the live to
+completed handoff clearly:
+
+- a run can appear in the list before the final bundle exists
+- records, spans, metrics, and invariant status update from the live session
+- once the completed bundle is committed, the run detail pivots back to the
+  persisted `.runs` artifact as the canonical inspection surface
+- if live streaming drops temporarily, the final completed bundle still
+  preserves the authoritative run

@@ -11,9 +11,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from mentalmodel.core.interfaces import JsonValue
-from mentalmodel.remote.backend import RemoteBackendConfig, RemoteProjectStore, RemoteRunStore
+from mentalmodel.remote.backend import (
+    RemoteBackendConfig,
+    RemoteLiveSessionStore,
+    RemoteProjectStore,
+    RemoteRunStore,
+)
 from mentalmodel.remote.contracts import (
     ProjectCatalog,
+    RemoteLiveSessionStartRequest,
+    RemoteLiveSessionUpdateRequest,
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteRunUploadReceipt,
@@ -32,6 +39,7 @@ def create_dashboard_app(
     remote_backend_config: RemoteBackendConfig | None = None,
     remote_run_store: RemoteRunStore | None = None,
     remote_project_store: RemoteProjectStore | None = None,
+    remote_live_session_store: RemoteLiveSessionStore | None = None,
     remote_api_key: str | None = None,
 ) -> FastAPI:
     """Create the Phase 26 dashboard API and optional static frontend host."""
@@ -54,12 +62,22 @@ def create_dashboard_app(
             else RemoteProjectStore.from_config(remote_backend_config)
         )
     )
+    configured_remote_live_store = (
+        remote_live_session_store
+        if remote_live_session_store is not None
+        else (
+            None
+            if remote_backend_config is None
+            else RemoteLiveSessionStore.from_config(remote_backend_config)
+        )
+    )
     service = DashboardService(
         runs_dir=runs_dir,
         catalog_entries=catalog_entries,
         project_catalogs=project_catalogs,
         remote_run_store=configured_remote_store,
         remote_project_store=configured_remote_project_store,
+        remote_live_session_store=configured_remote_live_store,
     )
     ingest_store = (
         configured_remote_store
@@ -197,6 +215,12 @@ def create_dashboard_app(
                     invocation_name=upload.manifest.invocation_name,
                     uploaded_at_ms=uploaded_at_ms,
                 )
+            if configured_remote_live_store is not None:
+                configured_remote_live_store.mark_bundle_committed(
+                    graph_id=upload.manifest.graph_id,
+                    run_id=upload.manifest.run_id,
+                    committed_at_ms=uploaded_at_ms,
+                )
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RemoteRunUploadReceipt(
@@ -206,6 +230,50 @@ def create_dashboard_app(
             run_dir=str(run_dir),
             project_id=upload.manifest.project_id,
         ).as_dict()
+
+    @app.post("/api/remote/live/sessions/start", response_model=None)
+    def start_remote_live_session(
+        payload: Annotated[dict[str, object], Body()],
+        _auth: None = Depends(require_remote_auth),
+    ) -> object:
+        if configured_remote_live_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote live session start requires remote backend configuration.",
+            )
+        try:
+            request_payload = RemoteLiveSessionStartRequest.from_dict(payload)
+            if (
+                configured_remote_project_store is not None
+                and request_payload.project_id is not None
+            ):
+                configured_remote_project_store.get_project(
+                    project_id=request_payload.project_id
+                )
+            session = configured_remote_live_store.start_session(request_payload)
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"session": session.as_dict()}
+
+    @app.post("/api/remote/live/sessions/{run_id}", response_model=None)
+    def update_remote_live_session(
+        run_id: str,
+        payload: Annotated[dict[str, object], Body()],
+        _auth: None = Depends(require_remote_auth),
+    ) -> object:
+        if configured_remote_live_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote live session update requires remote backend configuration.",
+            )
+        try:
+            request_payload = RemoteLiveSessionUpdateRequest.from_dict(payload)
+            if request_payload.run_id != run_id:
+                raise ValueError("Live session path run_id does not match payload.")
+            session = configured_remote_live_store.apply_update(request_payload)
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"session": session.as_dict()}
 
     @app.post("/api/catalog/from-path", response_model=None)
     def catalog_from_path(

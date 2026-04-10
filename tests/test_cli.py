@@ -74,6 +74,48 @@ class CliWarningInvariant(InvariantChecker[dict[str, object], JsonValue]):
         )
 
 
+class RecordingCliLiveExecutionSink:
+    instances: list[RecordingCliLiveExecutionSink] = []
+
+    def __init__(
+        self,
+        config: object,
+        *,
+        run_id: str,
+        invocation_name: str | None,
+        project_id: str | None = None,
+        environment_name: str | None = None,
+        catalog_entry_id: str | None = None,
+        catalog_source: object | None = None,
+        runtime_default_profile_name: str | None = None,
+        runtime_profile_names: tuple[str, ...] = (),
+    ) -> None:
+        del config, invocation_name, project_id, environment_name, catalog_entry_id, catalog_source
+        self.run_id = run_id
+        self.runtime_default_profile_name = runtime_default_profile_name
+        self.runtime_profile_names = runtime_profile_names
+        self.started = False
+        self.record_count = 0
+        self.span_count = 0
+        self.completions: list[tuple[bool, str | None]] = []
+        type(self).instances.append(self)
+
+    def start(self, *, graph: object, analysis: object) -> None:
+        del graph, analysis
+        self.started = True
+
+    def emit_record(self, record: object) -> None:
+        del record
+        self.record_count += 1
+
+    def emit_span(self, span: object) -> None:
+        del span
+        self.span_count += 1
+
+    def complete(self, *, success: bool, error: str | None = None) -> None:
+        self.completions.append((success, error))
+
+
 def build_parameterized_program(
     *,
     group_size: int,
@@ -899,6 +941,65 @@ class CliTest(unittest.TestCase):
             self.assertEqual(upload["transport"], "service-api")
             self.assertEqual(upload["project_id"], "mentalmodel-examples")
             publish_run.assert_called_once()
+
+    def test_verify_auto_streams_live_execution_for_linked_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "mentalmodel.toml").write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "mentalmodel-examples"',
+                        'label = "Mentalmodel Examples"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                        "[runs]",
+                        'default_runs_dir = ".runs"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            RecordingCliLiveExecutionSink.instances.clear()
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.cli.RemoteServiceLiveExecutionSink",
+                    RecordingCliLiveExecutionSink,
+                ):
+                    with patch(
+                        "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
+                        return_value=CompletedRunPublishResult(
+                            transport="service-api",
+                            success=True,
+                            graph_id="async_rl_demo",
+                            run_id="run-uploaded",
+                            project_id="mentalmodel-examples",
+                            server_url="http://127.0.0.1:8765",
+                            remote_run_dir="/remote/async_rl_demo/run-uploaded",
+                            uploaded_at_ms=1000,
+                        ),
+                    ):
+                        with contextlib.chdir(root):
+                            with contextlib.redirect_stdout(stdout):
+                                exit_code = run_verify(
+                                    "mentalmodel.examples.async_rl.demo:build_program",
+                                    json_output=True,
+                                )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(RecordingCliLiveExecutionSink.instances), 1)
+            sink = RecordingCliLiveExecutionSink.instances[0]
+            self.assertTrue(sink.started)
+            self.assertGreater(sink.record_count, 0)
+            self.assertGreater(sink.span_count, 0)
+            self.assertEqual(sink.completions, [(True, None)])
 
     def test_verify_reports_remote_upload_failure_without_losing_local_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

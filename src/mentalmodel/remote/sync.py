@@ -4,16 +4,29 @@ import base64
 import json
 import time
 from pathlib import Path
+from typing import cast
 from urllib import request
 
+from mentalmodel.analysis import AnalysisReport
+from mentalmodel.ir.graph import IRGraph
+from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.export import execution_record_to_json, recorded_span_to_json
+from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.remote.contracts import (
     CatalogSource,
     RemoteContractError,
+    RemoteLiveSessionStartRequest,
+    RemoteLiveSessionStatus,
+    RemoteLiveSessionUpdateRequest,
     RemoteRunUploadReceipt,
     RunManifest,
 )
 from mentalmodel.remote.project_config import MentalModelProjectConfig
-from mentalmodel.remote.sinks import CompletedRunPublishResult, CompletedRunSink
+from mentalmodel.remote.sinks import (
+    CompletedRunPublishResult,
+    CompletedRunSink,
+    LiveExecutionSink,
+)
 from mentalmodel.remote.store import RunBundleUpload, UploadedArtifact
 from mentalmodel.runtime.runs import (
     build_run_manifest_from_summary,
@@ -194,6 +207,134 @@ def sync_runs_for_project(
     )
 
 
+class RemoteServiceLiveExecutionSink(LiveExecutionSink):
+    """Producer-side live streaming sink for the hosted remote service."""
+
+    def __init__(
+        self,
+        config: MentalModelProjectConfig,
+        *,
+        run_id: str,
+        invocation_name: str | None,
+        project_id: str | None = None,
+        environment_name: str | None = None,
+        catalog_entry_id: str | None = None,
+        catalog_source: CatalogSource | None = None,
+        runtime_default_profile_name: str | None = None,
+        runtime_profile_names: tuple[str, ...] = (),
+        batch_size: int = 25,
+    ) -> None:
+        self._config = config
+        self.run_id = run_id
+        self.project_id = project_id or config.project_id
+        self.environment_name = environment_name or config.default_environment
+        self.catalog_entry_id = catalog_entry_id
+        self.catalog_source = catalog_source
+        self.invocation_name = invocation_name
+        self.runtime_default_profile_name = runtime_default_profile_name
+        self.runtime_profile_names = runtime_profile_names
+        self.batch_size = max(1, batch_size)
+        self._graph_payload: dict[str, object] | None = None
+        self._analysis_payload: dict[str, object] | None = None
+        self._started = False
+        self._buffered_records: list[dict[str, object]] = []
+        self._buffered_spans: list[dict[str, object]] = []
+
+    @property
+    def server_url(self) -> str:
+        return self._config.server_url
+
+    def start(self, *, graph: IRGraph, analysis: AnalysisReport) -> None:
+        if self._started:
+            return
+        self._graph_payload = _graph_to_remote_payload(graph)
+        self._analysis_payload = _analysis_to_remote_payload(analysis)
+        try:
+            _request_json(
+                f"{self.server_url.rstrip('/')}/api/remote/live/sessions/start",
+                method="POST",
+                payload=RemoteLiveSessionStartRequest(
+                    graph_id=cast(str, self._graph_payload["graph_id"]),
+                    run_id=self.run_id,
+                    started_at_ms=int(time.time() * 1000),
+                    graph=self._graph_payload,
+                    analysis=self._analysis_payload,
+                    project_id=self.project_id,
+                    invocation_name=self.invocation_name,
+                    environment_name=self.environment_name,
+                    catalog_entry_id=self.catalog_entry_id,
+                    catalog_source=self.catalog_source,
+                    runtime_default_profile_name=self.runtime_default_profile_name,
+                    runtime_profile_names=self.runtime_profile_names,
+                ).as_dict(),
+                api_key=self._config.resolve_api_key(),
+            )
+            self._started = True
+        except Exception:
+            return
+
+    def emit_record(self, record: ExecutionRecord) -> None:
+        if not self._started:
+            return
+        self._buffered_records.append(
+            cast(dict[str, object], execution_record_to_json(record))
+        )
+        if len(self._buffered_records) >= self.batch_size:
+            self._flush()
+
+    def emit_span(self, span: RecordedSpan) -> None:
+        if not self._started:
+            return
+        self._buffered_spans.append(
+            cast(dict[str, object], recorded_span_to_json(span))
+        )
+        if len(self._buffered_spans) >= self.batch_size:
+            self._flush()
+
+    def complete(self, *, success: bool, error: str | None = None) -> None:
+        if not self._started:
+            return
+        self._flush(
+            status=(
+                RemoteLiveSessionStatus.SUCCEEDED
+                if success
+                else RemoteLiveSessionStatus.FAILED
+            ),
+            error=error,
+        )
+
+    def _flush(
+        self,
+        *,
+        status: RemoteLiveSessionStatus | None = None,
+        error: str | None = None,
+    ) -> None:
+        if not self._started:
+            return
+        if not self._buffered_records and not self._buffered_spans and status is None:
+            return
+        payload = RemoteLiveSessionUpdateRequest(
+            graph_id=cast(str, cast(dict[str, object], self._graph_payload)["graph_id"]),
+            run_id=self.run_id,
+            updated_at_ms=int(time.time() * 1000),
+            status=status,
+            error=error,
+            records=tuple(self._buffered_records),
+            spans=tuple(self._buffered_spans),
+        )
+        self._buffered_records = []
+        self._buffered_spans = []
+        try:
+            _request_json(
+                f"{self.server_url.rstrip('/')}/api/remote/live/sessions/{self.run_id}",
+                method="POST",
+                payload=payload.as_dict(),
+                api_key=self._config.resolve_api_key(),
+            )
+        except Exception:
+            return
+
+
 class RemoteServiceCompletedRunSink(CompletedRunSink):
     """Completed-run sink that publishes bundles through the hosted service API."""
 
@@ -299,3 +440,43 @@ def failed_completed_run_publish(
         uploaded_at_ms=uploaded_at_ms,
         error=str(error),
     )
+
+
+def _graph_to_remote_payload(graph: IRGraph) -> dict[str, object]:
+    return {
+        "graph_id": graph.graph_id,
+        "metadata": dict(graph.metadata),
+        "nodes": [
+            {
+                "node_id": node.node_id,
+                "kind": node.kind,
+                "label": node.label,
+                "metadata": dict(node.metadata),
+            }
+            for node in graph.nodes
+        ],
+        "edges": [
+            {
+                "source_node_id": edge.source_node_id,
+                "target_node_id": edge.target_node_id,
+                "target_port": edge.target_port,
+            }
+            for edge in graph.edges
+        ],
+    }
+
+
+def _analysis_to_remote_payload(analysis: AnalysisReport) -> dict[str, object]:
+    return {
+        "error_count": analysis.error_count,
+        "warning_count": analysis.warning_count,
+        "findings": [
+            {
+                "code": finding.code,
+                "severity": finding.severity,
+                "message": finding.message,
+                "node_id": finding.node_id,
+            }
+            for finding in analysis.findings
+        ],
+    }

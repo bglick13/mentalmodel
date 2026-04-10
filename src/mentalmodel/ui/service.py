@@ -25,10 +25,11 @@ from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import execution_record_to_json
 from mentalmodel.remote.backend import (
     RemoteCompletedRunSink,
+    RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
 )
-from mentalmodel.remote.contracts import ProjectCatalog
+from mentalmodel.remote.contracts import ProjectCatalog, RemoteLiveSessionRecord
 from mentalmodel.remote.workspace import (
     ProjectRunTarget,
     build_project_run_target,
@@ -229,11 +230,13 @@ class DashboardService:
         project_catalogs: Sequence[ProjectCatalog] | None = None,
         remote_run_store: RemoteRunStore | None = None,
         remote_project_store: RemoteProjectStore | None = None,
+        remote_live_session_store: RemoteLiveSessionStore | None = None,
         project_execution_worker: ProjectExecutionWorker | None = None,
     ) -> None:
         self.runs_dir = runs_dir
         self.remote_run_store = remote_run_store
         self.remote_project_store = remote_project_store
+        self.remote_live_session_store = remote_live_session_store
         self._project_execution_worker = (
             project_execution_worker
             if project_execution_worker is not None
@@ -467,6 +470,17 @@ class DashboardService:
             summary.run_id: persisted_run_handle(summary)
             for summary in summaries
         }
+        remote_live = {
+            handle.run_id: handle
+            for handle in (
+                self._remote_live_run_handle(session)
+                for session in self._matching_remote_live_sessions(
+                    graph_id=graph_id,
+                    invocation_name=invocation_name,
+                )
+            )
+            if handle is not None
+        }
         active = {
             handle.run_id: handle
             for handle in (
@@ -481,11 +495,12 @@ class DashboardService:
         merged: list[DashboardRunHandle] = []
         seen: set[str] = set()
         for summary in summaries:
-            active_handle = active.get(summary.run_id)
-            merged.append(
-                active_handle if active_handle is not None else persisted[summary.run_id]
-            )
+            merged.append(persisted[summary.run_id])
             seen.add(summary.run_id)
+        for run_id, handle in remote_live.items():
+            if run_id not in seen:
+                merged.append(handle)
+                seen.add(run_id)
         for run_id, handle in active.items():
             if run_id not in seen:
                 merged.append(handle)
@@ -499,6 +514,12 @@ class DashboardService:
             and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
         ):
             return self._graph_payload_for_entry(session.spec)
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return _graph_payload_from_live_session(remote_live)
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         graph = load_run_graph(
             runs_dir=history_runs_dir,
@@ -522,6 +543,22 @@ class DashboardService:
                 "graph": self._graph_payload_for_entry(session.spec),
                 "metrics": [],
                 "invariants": [],
+            }
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return {
+                "summary": self._remote_live_run_handle(remote_live).as_dict(),
+                "verification": None,
+                "graph": _graph_payload_from_live_session(remote_live),
+                "metrics": _as_json_list(
+                    _derive_numeric_metrics_from_live_records(remote_live.records)
+                ),
+                "invariants": _as_json_list(
+                    _invariants_from_live_records(remote_live.records)
+                ),
             }
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         summary = resolve_run_summary(
@@ -600,6 +637,16 @@ class DashboardService:
                 for record in session.records
                 if node_id is None or record.get("node_id") == node_id
             )
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return tuple(
+                cast(dict[str, JsonValue], record)
+                for record in remote_live.records
+                if node_id is None or record.get("node_id") == node_id
+            )
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_records(
             runs_dir=history_runs_dir,
@@ -627,6 +674,16 @@ class DashboardService:
                 for span in session.spans
                 if node_id is None or _span_node_id(span) == node_id
             )
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return tuple(
+                cast(dict[str, JsonValue], span)
+                for span in remote_live.spans
+                if node_id is None or _span_node_id(cast(dict[str, JsonValue], span)) == node_id
+            )
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_spans(
             runs_dir=history_runs_dir,
@@ -648,6 +705,19 @@ class DashboardService:
             and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
         ):
             return self._active_run_replay_payload(session, loop_node_id=loop_node_id)
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            return _live_run_replay_payload(
+                graph_id=graph_id,
+                run_id=run_id,
+                invocation_name=remote_live.invocation_name,
+                success=remote_live.status.value == "succeeded",
+                records=remote_live.records,
+                loop_node_id=loop_node_id,
+            )
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         report = build_replay_report(
             runs_dir=history_runs_dir,
@@ -697,6 +767,40 @@ class DashboardService:
                         session=session,
                         node_id=node_id,
                     )
+                ),
+            }
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            filtered_records = tuple(
+                cast(dict[str, JsonValue], record)
+                for record in remote_live.records
+                if record.get("node_id") == node_id
+                and (frame_id is None or record.get("frame_id") == frame_id)
+            )
+            return {
+                "node_id": node_id,
+                "frame_id": frame_id,
+                **_active_node_io_payload(
+                    records=filtered_records,
+                    node_id=node_id,
+                ),
+                "trace": {
+                    "records": list(filtered_records),
+                    "spans": [
+                        cast(dict[str, JsonValue], span)
+                        for span in remote_live.spans
+                        if _span_node_id(cast(dict[str, JsonValue], span)) == node_id
+                        and (
+                            frame_id is None
+                            or span.get("frame_id") == frame_id
+                        )
+                    ],
+                },
+                "available_frames": _as_json_list(
+                    _available_frames_from_records(records=filtered_records)
                 ),
             }
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
@@ -765,6 +869,19 @@ class DashboardService:
             )
         )
 
+    def _matching_remote_live_sessions(
+        self,
+        *,
+        graph_id: str | None = None,
+        invocation_name: str | None = None,
+    ) -> tuple[RemoteLiveSessionRecord, ...]:
+        if self.remote_live_session_store is None:
+            return ()
+        return self.remote_live_session_store.list_sessions(
+            graph_id=graph_id,
+            invocation_name=invocation_name,
+        )
+
     def _session_for_run(
         self,
         *,
@@ -775,6 +892,22 @@ class DashboardService:
             if session.run_id == run_id:
                 return session
         return None
+
+    def _remote_live_session_for_run(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> RemoteLiveSessionRecord | None:
+        if self.remote_live_session_store is None:
+            return None
+        try:
+            return self.remote_live_session_store.get_session(
+                graph_id=graph_id,
+                run_id=run_id,
+            )
+        except RunInspectionError:
+            return None
 
     def _active_run_handle(
         self,
@@ -811,6 +944,42 @@ class DashboardService:
             run_dir=session.run_artifacts_dir or "",
             source="active",
             execution_id=session.execution_id,
+            availability=DashboardRunAvailability(
+                summary=True,
+                records=bool(session.records),
+                spans=bool(session.spans),
+                replay=bool(session.records),
+                custom_views=False,
+            ),
+        )
+
+    def _remote_live_run_handle(
+        self,
+        session: RemoteLiveSessionRecord,
+    ) -> DashboardRunHandle:
+        return DashboardRunHandle(
+            schema_version=0,
+            graph_id=session.graph_id,
+            run_id=session.run_id,
+            created_at_ms=session.started_at_ms,
+            status=session.status.value,
+            success=(
+                True
+                if session.status.value == "succeeded"
+                else False if session.status.value == "failed" else None
+            ),
+            node_count=_graph_node_count(session.graph),
+            edge_count=_graph_edge_count(session.graph),
+            record_count=len(session.records),
+            output_count=_remote_live_output_count(session.records),
+            state_count=0,
+            invocation_name=session.invocation_name,
+            runtime_default_profile_name=session.runtime_default_profile_name,
+            runtime_profile_names=session.runtime_profile_names,
+            trace_mode="live",
+            trace_service_name="mentalmodel",
+            run_dir="",
+            source="remote-live",
             availability=DashboardRunAvailability(
                 summary=True,
                 records=bool(session.records),
@@ -1649,6 +1818,39 @@ def _metrics_from_output(
     return metrics
 
 
+def _derive_numeric_metrics_from_live_records(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, JsonValue]]:
+    metrics: list[dict[str, JsonValue]] = []
+    for record in records:
+        if record.get("event_type") != "node.succeeded":
+            continue
+        payload = record.get("payload")
+        node_id = record.get("node_id")
+        frame_id = record.get("frame_id")
+        if not isinstance(payload, dict) or not isinstance(node_id, str):
+            continue
+        output = payload.get("output")
+        if output is None:
+            continue
+        loop_node_id = record.get("loop_node_id")
+        iteration_index = record.get("iteration_index")
+        metrics.extend(
+            _metrics_from_output(
+                node_id=node_id,
+                output=_as_json_value(output),
+                frame_scope=RunFrameScope(
+                    frame_id=frame_id if isinstance(frame_id, str) else "root",
+                    loop_node_id=loop_node_id if isinstance(loop_node_id, str) else None,
+                    iteration_index=(
+                        iteration_index if isinstance(iteration_index, int) else None
+                    ),
+                ),
+            )
+        )
+    return metrics
+
+
 def _record_sequence(record: dict[str, JsonValue]) -> int:
     value = record.get("sequence")
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
@@ -1670,6 +1872,171 @@ def _span_node_id(span: dict[str, JsonValue]) -> str | None:
         return None
     value = attributes.get("mentalmodel.node.id")
     return value if isinstance(value, str) else None
+
+
+def _graph_node_count(graph: dict[str, object]) -> int:
+    nodes = graph.get("nodes")
+    return len(nodes) if isinstance(nodes, list) else 0
+
+
+def _graph_edge_count(graph: dict[str, object]) -> int:
+    edges = graph.get("edges")
+    return len(edges) if isinstance(edges, list) else 0
+
+
+def _remote_live_output_count(records: Sequence[dict[str, object]]) -> int:
+    return sum(1 for record in records if record.get("event_type") == "node.succeeded")
+
+
+def _graph_payload_from_live_session(
+    session: RemoteLiveSessionRecord,
+) -> dict[str, JsonValue]:
+    return _as_json_object(session.graph)
+
+
+def _live_run_replay_payload(
+    *,
+    graph_id: str,
+    run_id: str,
+    invocation_name: str | None,
+    success: bool,
+    records: Sequence[dict[str, object]],
+    loop_node_id: str | None,
+) -> dict[str, JsonValue]:
+    filtered_records = [
+        cast(dict[str, JsonValue], record)
+        for record in records
+        if loop_node_id is None or record.get("loop_node_id") == loop_node_id
+    ]
+    seen_frames: list[str] = []
+    node_summaries: dict[tuple[str, str], dict[str, JsonValue]] = {}
+    for record in filtered_records:
+        raw_frame_id = record.get("frame_id")
+        frame_id = raw_frame_id if isinstance(raw_frame_id, str) else "root"
+        if frame_id not in seen_frames:
+            seen_frames.append(frame_id)
+        raw_node_id = record.get("node_id")
+        node_id = raw_node_id if isinstance(raw_node_id, str) else "unknown"
+        raw_event_type = record.get("event_type")
+        event_type = raw_event_type if isinstance(raw_event_type, str) else "unknown"
+        key = (node_id, frame_id)
+        summary = node_summaries.setdefault(
+            key,
+            {
+                "node_id": node_id,
+                "frame_id": frame_id,
+                "loop_node_id": record.get("loop_node_id"),
+                "iteration_index": record.get("iteration_index"),
+                "succeeded": False,
+                "failed": False,
+                "invariant_status": None,
+                "invariant_passed": None,
+                "invariant_severity": None,
+                "last_event_type": event_type,
+            },
+        )
+        summary["last_event_type"] = event_type
+        if event_type == "node.succeeded":
+            summary["succeeded"] = True
+        elif event_type == "node.failed":
+            summary["failed"] = True
+        elif event_type == "invariant.checked":
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                passed = payload.get("passed")
+                severity = payload.get("severity")
+                summary["invariant_passed"] = passed if isinstance(passed, bool) else None
+                summary["invariant_severity"] = (
+                    severity if isinstance(severity, str) else None
+                )
+                summary["invariant_status"] = (
+                    "pass"
+                    if passed is True
+                    else "fail"
+                    if passed is False
+                    else None
+                )
+    return {
+        "graph_id": graph_id,
+        "run_id": run_id,
+        "invocation_name": invocation_name,
+        "success": success,
+        "event_count": len(filtered_records),
+        "node_count": len({record.get("node_id") for record in filtered_records}),
+        "frame_ids": _as_json_list(seen_frames),
+        "events": _as_json_list(filtered_records),
+        "node_summaries": _as_json_list(list(node_summaries.values())),
+    }
+
+
+def _invariants_from_live_records(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, JsonValue]]:
+    invariants: list[dict[str, JsonValue]] = []
+    for record in records:
+        if record.get("event_type") != "invariant.checked":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        passed = payload.get("passed")
+        severity = payload.get("severity")
+        node_id = record.get("node_id")
+        frame_id = record.get("frame_id")
+        loop_node_id = record.get("loop_node_id")
+        iteration_index = record.get("iteration_index")
+        invariants.append(
+            {
+                "node_id": node_id if isinstance(node_id, str) else None,
+                "frame_id": frame_id if isinstance(frame_id, str) else None,
+                "loop_node_id": (
+                    loop_node_id if isinstance(loop_node_id, str) else None
+                ),
+                "iteration_index": (
+                    iteration_index if isinstance(iteration_index, int) else None
+                ),
+                "status": (
+                    "pass"
+                    if passed is True
+                    else "fail"
+                    if passed is False
+                    else None
+                ),
+                "passed": passed if isinstance(passed, bool) else None,
+                "severity": severity if isinstance(severity, str) else None,
+            }
+        )
+    return invariants
+
+
+def _available_frames_from_records(
+    *,
+    records: Sequence[dict[str, JsonValue]],
+) -> list[dict[str, JsonValue]]:
+    seen: list[dict[str, JsonValue]] = []
+    seen_keys: set[tuple[str, str | None, int | None]] = set()
+    for record in records:
+        frame_id = record.get("frame_id")
+        if not isinstance(frame_id, str):
+            continue
+        loop_node_id = record.get("loop_node_id")
+        iteration_index = record.get("iteration_index")
+        key = (
+            frame_id,
+            loop_node_id if isinstance(loop_node_id, str) else None,
+            iteration_index if isinstance(iteration_index, int) else None,
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        seen.append(
+            {
+                "frame_id": frame_id,
+                "loop_node_id": key[1],
+                "iteration_index": key[2],
+            }
+        )
+    return seen
 
 
 def _active_node_io_payload(

@@ -18,10 +18,12 @@ from mentalmodel.remote import (
     CompletedRunPublishResult,
     CompletedRunSink,
     ExecutionRecordSink,
+    LiveExecutionSink,
     record_listener_for_sink,
 )
 from mentalmodel.remote.sync import failed_completed_run_publish
 from mentalmodel.runtime import AsyncExecutor, ExecutionRecorder, ExecutionResult
+from mentalmodel.runtime.context import generate_run_id
 from mentalmodel.runtime.events import INVARIANT_CHECKED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 from mentalmodel.runtime.recorder import RecordListener
@@ -168,6 +170,7 @@ def execute_program(
     *,
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
+    run_id: str | None = None,
 ) -> ExecutionResult:
     """Run one workflow through the deterministic async executor."""
 
@@ -177,6 +180,7 @@ def execute_program(
             program,
             environment=resolved_environment,
             invocation_name=invocation_name,
+            run_id=run_id,
         )
     )
 
@@ -193,18 +197,28 @@ def run_verification(
     span_listeners: Sequence[SpanListener] = (),
     record_sinks: Sequence[ExecutionRecordSink] = (),
     completed_run_sink: CompletedRunSink | None = None,
+    live_execution_sink: LiveExecutionSink | None = None,
+    run_id: str | None = None,
 ) -> VerificationReport:
     """Run static analysis, runtime execution, and property checks."""
 
     graph = lower_program(program)
     analysis = run_analysis(graph)
+    resolved_run_id = run_id or generate_run_id()
+    if live_execution_sink is not None:
+        live_execution_sink.start(graph=graph, analysis=analysis)
     runtime_capture = _capture_runtime(
         program,
         environment=environment,
         invocation_name=invocation_name,
+        run_id=resolved_run_id,
         record_listeners=record_listeners,
-        span_listeners=span_listeners,
+        span_listeners=(
+            tuple(span_listeners)
+            + (() if live_execution_sink is None else (live_execution_sink.emit_span,))
+        ),
         record_sinks=record_sinks,
+        live_execution_sink=live_execution_sink,
     )
     property_checks = (
         run_property_checks(module, program)
@@ -217,6 +231,11 @@ def run_verification(
         property_checks=property_checks,
     )
     if not persist_run_artifacts:
+        if live_execution_sink is not None:
+            live_execution_sink.complete(
+                success=runtime_capture.result.success,
+                error=runtime_capture.result.error,
+            )
         return report
 
     completed_run_upload: CompletedRunPublishResult | None = None
@@ -250,6 +269,11 @@ def run_verification(
                 manifest=artifacts.manifest,
                 error=exc,
             )
+    if live_execution_sink is not None:
+        live_execution_sink.complete(
+            success=runtime_capture.result.success,
+            error=runtime_capture.result.error,
+        )
     runtime = RuntimeVerificationResult(
         success=runtime_capture.result.success,
         record_count=runtime_capture.result.record_count,
@@ -278,18 +302,28 @@ def _capture_runtime(
     *,
     environment: RuntimeEnvironment | None = None,
     invocation_name: str | None = None,
+    run_id: str | None = None,
     record_listeners: Sequence[RecordListener] = (),
     span_listeners: Sequence[SpanListener] = (),
     record_sinks: Sequence[ExecutionRecordSink] = (),
+    live_execution_sink: LiveExecutionSink | None = None,
 ) -> RuntimeExecutionCapture:
-    sink_listeners = tuple(record_listener_for_sink(sink) for sink in record_sinks)
-    recorder = ExecutionRecorder(listeners=tuple(record_listeners) + sink_listeners)
+    record_sink_listeners = tuple(record_listener_for_sink(sink) for sink in record_sinks)
+    live_listeners: tuple[RecordListener, ...] = (
+        ()
+        if live_execution_sink is None
+        else (record_listener_for_sink(_LiveRecordSinkAdapter(live_execution_sink)),)
+    )
+    recorder = ExecutionRecorder(
+        listeners=tuple(record_listeners) + record_sink_listeners + live_listeners
+    )
     resolved_environment = environment or EMPTY_RUNTIME_ENVIRONMENT
     executor = AsyncExecutor(
         recorder=recorder,
         environment=resolved_environment,
         invocation_name=invocation_name,
         span_listeners=span_listeners,
+        run_id=run_id,
     )
     try:
         result = asyncio.run(
@@ -353,11 +387,13 @@ async def _run_executor(
     environment: RuntimeEnvironment,
     invocation_name: str | None,
     recorder: ExecutionRecorder | None = None,
+    run_id: str | None = None,
 ) -> ExecutionResult:
     executor = AsyncExecutor(
         recorder=recorder,
         environment=environment,
         invocation_name=invocation_name,
+        run_id=run_id,
     )
     return await _run_executor_with_instance(executor, program)
 
@@ -390,3 +426,11 @@ def _collect_invariant_failures(
             severity=severity,
         )
     return tuple(failures[node_id] for node_id in sorted(failures))
+
+
+@dataclass(slots=True, frozen=True)
+class _LiveRecordSinkAdapter:
+    sink: LiveExecutionSink
+
+    def emit(self, record: ExecutionRecord) -> None:
+        self.sink.emit_record(record)

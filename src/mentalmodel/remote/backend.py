@@ -5,7 +5,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
@@ -19,6 +19,10 @@ from mentalmodel.remote.contracts import (
     CatalogSource,
     ProjectCatalogSnapshot,
     RemoteContractError,
+    RemoteLiveSessionRecord,
+    RemoteLiveSessionStartRequest,
+    RemoteLiveSessionStatus,
+    RemoteLiveSessionUpdateRequest,
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteProjectRecord,
@@ -139,6 +143,35 @@ class ProjectIndex(Protocol):
     def get_project(self, *, project_id: str) -> RemoteProjectRecord: ...
 
     def list_projects(self) -> tuple[RemoteProjectRecord, ...]: ...
+
+
+class LiveSessionIndex(Protocol):
+    def upsert_session_start(
+        self,
+        payload: RemoteLiveSessionStartRequest,
+    ) -> RemoteLiveSessionRecord: ...
+
+    def apply_session_update(
+        self,
+        payload: RemoteLiveSessionUpdateRequest,
+    ) -> RemoteLiveSessionRecord: ...
+
+    def mark_bundle_committed(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        committed_at_ms: int,
+    ) -> RemoteLiveSessionRecord | None: ...
+
+    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord: ...
+
+    def list_sessions(
+        self,
+        *,
+        graph_id: str | None = None,
+        invocation_name: str | None = None,
+    ) -> tuple[RemoteLiveSessionRecord, ...]: ...
 
 
 class InMemoryArtifactStore:
@@ -315,6 +348,175 @@ class InMemoryProjectIndex:
         )
         self._rows[project_id] = updated
         return updated
+
+
+class InMemoryLiveSessionIndex:
+    """Deterministic live-session registry for tests and local service use."""
+
+    def __init__(self) -> None:
+        self._rows: dict[tuple[str, str], RemoteLiveSessionRecord] = {}
+
+    def upsert_session_start(
+        self,
+        payload: RemoteLiveSessionStartRequest,
+    ) -> RemoteLiveSessionRecord:
+        key = (payload.graph_id, payload.run_id)
+        existing = self._rows.get(key)
+        record = RemoteLiveSessionRecord(
+            graph_id=payload.graph_id,
+            run_id=payload.run_id,
+            started_at_ms=(
+                payload.started_at_ms
+                if existing is None
+                else existing.started_at_ms
+            ),
+            updated_at_ms=payload.started_at_ms,
+            status=(
+                RemoteLiveSessionStatus.RUNNING
+                if existing is None
+                else existing.status
+            ),
+            graph=dict(payload.graph),
+            analysis=dict(payload.analysis),
+            project_id=payload.project_id if existing is None else existing.project_id,
+            invocation_name=(
+                payload.invocation_name
+                if existing is None
+                else existing.invocation_name
+            ),
+            environment_name=(
+                payload.environment_name
+                if existing is None
+                else existing.environment_name
+            ),
+            catalog_entry_id=(
+                payload.catalog_entry_id
+                if existing is None
+                else existing.catalog_entry_id
+            ),
+            catalog_source=(
+                payload.catalog_source
+                if existing is None
+                else existing.catalog_source
+            ),
+            runtime_default_profile_name=payload.runtime_default_profile_name,
+            runtime_profile_names=payload.runtime_profile_names,
+            records=tuple() if existing is None else existing.records,
+            spans=tuple() if existing is None else existing.spans,
+            error=None if existing is None else existing.error,
+            finished_at_ms=None if existing is None else existing.finished_at_ms,
+            bundle_committed_at_ms=(
+                None if existing is None else existing.bundle_committed_at_ms
+            ),
+        )
+        self._rows[key] = record
+        return record
+
+    def apply_session_update(
+        self,
+        payload: RemoteLiveSessionUpdateRequest,
+    ) -> RemoteLiveSessionRecord:
+        existing = self.get_session(graph_id=payload.graph_id, run_id=payload.run_id)
+        merged_records = _merge_live_rows(
+            existing.records,
+            payload.records,
+            id_key="record_id",
+            order_key="sequence",
+        )
+        merged_spans = _merge_live_rows(
+            existing.spans,
+            payload.spans,
+            id_key="span_id",
+            order_key="sequence",
+        )
+        status = payload.status or existing.status
+        finished_at_ms = (
+            payload.updated_at_ms
+            if status in {
+                RemoteLiveSessionStatus.SUCCEEDED,
+                RemoteLiveSessionStatus.FAILED,
+            }
+            else existing.finished_at_ms
+        )
+        updated = RemoteLiveSessionRecord(
+            graph_id=existing.graph_id,
+            run_id=existing.run_id,
+            started_at_ms=existing.started_at_ms,
+            updated_at_ms=max(existing.updated_at_ms, payload.updated_at_ms),
+            status=status,
+            graph=existing.graph,
+            analysis=existing.analysis,
+            project_id=existing.project_id,
+            invocation_name=existing.invocation_name,
+            environment_name=existing.environment_name,
+            catalog_entry_id=existing.catalog_entry_id,
+            catalog_source=existing.catalog_source,
+            runtime_default_profile_name=existing.runtime_default_profile_name,
+            runtime_profile_names=existing.runtime_profile_names,
+            records=merged_records,
+            spans=merged_spans,
+            error=payload.error or existing.error,
+            finished_at_ms=finished_at_ms,
+            bundle_committed_at_ms=existing.bundle_committed_at_ms,
+        )
+        self._rows[(existing.graph_id, existing.run_id)] = updated
+        return updated
+
+    def mark_bundle_committed(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        committed_at_ms: int,
+    ) -> RemoteLiveSessionRecord | None:
+        existing = self._rows.get((graph_id, run_id))
+        if existing is None:
+            return None
+        updated = RemoteLiveSessionRecord(
+            graph_id=existing.graph_id,
+            run_id=existing.run_id,
+            started_at_ms=existing.started_at_ms,
+            updated_at_ms=max(existing.updated_at_ms, committed_at_ms),
+            status=existing.status,
+            graph=existing.graph,
+            analysis=existing.analysis,
+            project_id=existing.project_id,
+            invocation_name=existing.invocation_name,
+            environment_name=existing.environment_name,
+            catalog_entry_id=existing.catalog_entry_id,
+            catalog_source=existing.catalog_source,
+            runtime_default_profile_name=existing.runtime_default_profile_name,
+            runtime_profile_names=existing.runtime_profile_names,
+            records=existing.records,
+            spans=existing.spans,
+            error=existing.error,
+            finished_at_ms=existing.finished_at_ms,
+            bundle_committed_at_ms=committed_at_ms,
+        )
+        self._rows[(graph_id, run_id)] = updated
+        return updated
+
+    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord:
+        try:
+            return self._rows[(graph_id, run_id)]
+        except KeyError as exc:
+            raise RunInspectionError(
+                f"Remote live session {graph_id}/{run_id} was not found."
+            ) from exc
+
+    def list_sessions(
+        self,
+        *,
+        graph_id: str | None = None,
+        invocation_name: str | None = None,
+    ) -> tuple[RemoteLiveSessionRecord, ...]:
+        rows = list(self._rows.values())
+        if graph_id is not None:
+            rows = [row for row in rows if row.graph_id == graph_id]
+        if invocation_name is not None:
+            rows = [row for row in rows if row.invocation_name == invocation_name]
+        rows.sort(key=lambda row: (row.started_at_ms, row.run_id), reverse=True)
+        return tuple(rows)
 
 
 class S3ArtifactStore:
@@ -953,6 +1155,423 @@ class PostgresProjectIndex:
             self._schema_ready = True
 
 
+class PostgresLiveSessionIndex:
+    """Postgres-backed live session store for hosted in-progress run visibility."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
+
+    def upsert_session_start(
+        self,
+        payload: RemoteLiveSessionStartRequest,
+    ) -> RemoteLiveSessionRecord:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            conn.execute(
+                """
+                insert into remote_live_sessions (
+                    graph_id,
+                    run_id,
+                    project_id,
+                    invocation_name,
+                    environment_name,
+                    catalog_entry_id,
+                    catalog_source,
+                    runtime_default_profile_name,
+                    runtime_profile_names,
+                    started_at_ms,
+                    updated_at_ms,
+                    finished_at_ms,
+                    status,
+                    error,
+                    graph_json,
+                    analysis_json,
+                    bundle_committed_at_ms
+                )
+                values (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                    %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s
+                )
+                on conflict (graph_id, run_id) do update
+                set
+                    project_id = coalesce(remote_live_sessions.project_id, excluded.project_id),
+                    invocation_name = coalesce(
+                        remote_live_sessions.invocation_name,
+                        excluded.invocation_name
+                    ),
+                    environment_name = coalesce(
+                        remote_live_sessions.environment_name,
+                        excluded.environment_name
+                    ),
+                    catalog_entry_id = coalesce(
+                        remote_live_sessions.catalog_entry_id,
+                        excluded.catalog_entry_id
+                    ),
+                    catalog_source = coalesce(
+                        remote_live_sessions.catalog_source,
+                        excluded.catalog_source
+                    ),
+                    runtime_default_profile_name = excluded.runtime_default_profile_name,
+                    runtime_profile_names = excluded.runtime_profile_names,
+                    updated_at_ms = greatest(
+                        remote_live_sessions.updated_at_ms,
+                        excluded.updated_at_ms
+                    ),
+                    graph_json = excluded.graph_json,
+                    analysis_json = excluded.analysis_json
+                """,
+                (
+                    payload.graph_id,
+                    payload.run_id,
+                    payload.project_id,
+                    payload.invocation_name,
+                    payload.environment_name,
+                    payload.catalog_entry_id,
+                    None if payload.catalog_source is None else payload.catalog_source.value,
+                    payload.runtime_default_profile_name,
+                    json.dumps(list(payload.runtime_profile_names)),
+                    payload.started_at_ms,
+                    payload.started_at_ms,
+                    None,
+                    RemoteLiveSessionStatus.RUNNING.value,
+                    None,
+                    json.dumps(payload.graph, sort_keys=True),
+                    json.dumps(payload.analysis, sort_keys=True),
+                    None,
+                ),
+            )
+            conn.commit()
+        return self.get_session(graph_id=payload.graph_id, run_id=payload.run_id)
+
+    def apply_session_update(
+        self,
+        payload: RemoteLiveSessionUpdateRequest,
+    ) -> RemoteLiveSessionRecord:
+        self._ensure_schema()
+        existing = self.get_session(graph_id=payload.graph_id, run_id=payload.run_id)
+        with psycopg.connect(self.database_url) as conn:
+            if payload.records:
+                for row in payload.records:
+                    conn.execute(
+                        """
+                        insert into remote_live_records (
+                            graph_id,
+                            run_id,
+                            record_id,
+                            sequence,
+                            timestamp_ms,
+                            node_id,
+                            frame_id,
+                            payload_json
+                        )
+                        values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        on conflict (graph_id, run_id, record_id) do nothing
+                        """,
+                        (
+                            payload.graph_id,
+                            payload.run_id,
+                            _required_live_row_str(row, "record_id"),
+                            _optional_live_row_int(row, "sequence") or 0,
+                            _required_live_row_int(row, "timestamp_ms"),
+                            _required_live_row_str(row, "node_id"),
+                            _required_live_row_str(row, "frame_id"),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+            if payload.spans:
+                for row in payload.spans:
+                    conn.execute(
+                        """
+                        insert into remote_live_spans (
+                            graph_id,
+                            run_id,
+                            span_id,
+                            sequence,
+                            start_time_ns,
+                            node_id,
+                            payload_json
+                        )
+                        values (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                        on conflict (graph_id, run_id, span_id) do nothing
+                        """,
+                        (
+                            payload.graph_id,
+                            payload.run_id,
+                            _required_live_row_str(row, "span_id"),
+                            _optional_live_row_int(row, "sequence") or 0,
+                            _required_live_row_int(row, "start_time_ns"),
+                            _optional_span_node_id(row),
+                            json.dumps(row, sort_keys=True),
+                        ),
+                    )
+            next_status = payload.status or existing.status
+            finished_at_ms = (
+                payload.updated_at_ms
+                if next_status
+                in {
+                    RemoteLiveSessionStatus.SUCCEEDED,
+                    RemoteLiveSessionStatus.FAILED,
+                }
+                else existing.finished_at_ms
+            )
+            conn.execute(
+                """
+                update remote_live_sessions
+                set
+                    updated_at_ms = greatest(updated_at_ms, %s),
+                    status = %s,
+                    error = coalesce(%s, error),
+                    finished_at_ms = %s
+                where graph_id = %s and run_id = %s
+                """,
+                (
+                    payload.updated_at_ms,
+                    next_status.value,
+                    payload.error,
+                    finished_at_ms,
+                    payload.graph_id,
+                    payload.run_id,
+                ),
+            )
+            conn.commit()
+        return self.get_session(graph_id=payload.graph_id, run_id=payload.run_id)
+
+    def mark_bundle_committed(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        committed_at_ms: int,
+    ) -> RemoteLiveSessionRecord | None:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            cursor = conn.execute(
+                """
+                update remote_live_sessions
+                set
+                    updated_at_ms = greatest(updated_at_ms, %s),
+                    bundle_committed_at_ms = %s
+                where graph_id = %s and run_id = %s
+                returning graph_id
+                """,
+                (committed_at_ms, committed_at_ms, graph_id, run_id),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        return self.get_session(graph_id=graph_id, run_id=run_id)
+
+    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            row = conn.execute(
+                """
+                select
+                    graph_id,
+                    run_id,
+                    project_id,
+                    invocation_name,
+                    environment_name,
+                    catalog_entry_id,
+                    catalog_source,
+                    runtime_default_profile_name,
+                    runtime_profile_names,
+                    started_at_ms,
+                    updated_at_ms,
+                    finished_at_ms,
+                    status,
+                    error,
+                    graph_json,
+                    analysis_json,
+                    bundle_committed_at_ms
+                from remote_live_sessions
+                where graph_id = %s and run_id = %s
+                """,
+                (graph_id, run_id),
+            ).fetchone()
+            if row is None:
+                raise RunInspectionError(
+                    f"Remote live session {graph_id}/{run_id} was not found."
+                )
+            records = conn.execute(
+                """
+                select payload_json
+                from remote_live_records
+                where graph_id = %s and run_id = %s
+                order by sequence asc, timestamp_ms asc, record_id asc
+                """,
+                (graph_id, run_id),
+            ).fetchall()
+            spans = conn.execute(
+                """
+                select payload_json
+                from remote_live_spans
+                where graph_id = %s and run_id = %s
+                order by sequence asc, start_time_ns asc, span_id asc
+                """,
+                (graph_id, run_id),
+            ).fetchall()
+        return _remote_live_session_from_row(
+            row,
+            records=records,
+            spans=spans,
+        )
+
+    def list_sessions(
+        self,
+        *,
+        graph_id: str | None = None,
+        invocation_name: str | None = None,
+    ) -> tuple[RemoteLiveSessionRecord, ...]:
+        self._ensure_schema()
+        conditions: list[str] = []
+        params: list[object] = []
+        if graph_id is not None:
+            conditions.append("graph_id = %s")
+            params.append(graph_id)
+        if invocation_name is not None:
+            conditions.append("invocation_name = %s")
+            params.append(invocation_name)
+        where_clause = ""
+        if conditions:
+            where_clause = "where " + " and ".join(conditions)
+        with psycopg.connect(self.database_url) as conn:
+            rows = conn.execute(
+                f"""
+                select
+                    graph_id,
+                    run_id,
+                    project_id,
+                    invocation_name,
+                    environment_name,
+                    catalog_entry_id,
+                    catalog_source,
+                    runtime_default_profile_name,
+                    runtime_profile_names,
+                    started_at_ms,
+                    updated_at_ms,
+                    finished_at_ms,
+                    status,
+                    error,
+                    graph_json,
+                    analysis_json,
+                    bundle_committed_at_ms
+                from remote_live_sessions
+                {where_clause}
+                order by started_at_ms desc, run_id desc
+                """,
+                tuple(params),
+            ).fetchall()
+            results: list[RemoteLiveSessionRecord] = []
+            for row in rows:
+                session_graph_id = cast(str, row[0])
+                session_run_id = cast(str, row[1])
+                records = conn.execute(
+                    """
+                    select payload_json
+                    from remote_live_records
+                    where graph_id = %s and run_id = %s
+                    order by sequence asc, timestamp_ms asc, record_id asc
+                    """,
+                    (session_graph_id, session_run_id),
+                ).fetchall()
+                spans = conn.execute(
+                    """
+                    select payload_json
+                    from remote_live_spans
+                    where graph_id = %s and run_id = %s
+                    order by sequence asc, start_time_ns asc, span_id asc
+                    """,
+                    (session_graph_id, session_run_id),
+                ).fetchall()
+                results.append(
+                    _remote_live_session_from_row(
+                        row,
+                        records=records,
+                        spans=spans,
+                    )
+                )
+        return tuple(results)
+
+    def _ensure_schema(self) -> None:
+        if self._schema_ready:
+            return
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            with psycopg.connect(self.database_url) as conn:
+                conn.execute(
+                    """
+                    create table if not exists remote_live_sessions (
+                        graph_id text not null,
+                        run_id text not null,
+                        project_id text null,
+                        invocation_name text null,
+                        environment_name text null,
+                        catalog_entry_id text null,
+                        catalog_source text null,
+                        runtime_default_profile_name text null,
+                        runtime_profile_names jsonb not null default '[]'::jsonb,
+                        started_at_ms bigint not null,
+                        updated_at_ms bigint not null,
+                        finished_at_ms bigint null,
+                        status text not null,
+                        error text null,
+                        graph_json jsonb not null,
+                        analysis_json jsonb not null,
+                        bundle_committed_at_ms bigint null,
+                        primary key (graph_id, run_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    create table if not exists remote_live_records (
+                        graph_id text not null,
+                        run_id text not null,
+                        record_id text not null,
+                        sequence bigint not null,
+                        timestamp_ms bigint not null,
+                        node_id text not null,
+                        frame_id text not null,
+                        payload_json jsonb not null,
+                        primary key (graph_id, run_id, record_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    create table if not exists remote_live_spans (
+                        graph_id text not null,
+                        run_id text not null,
+                        span_id text not null,
+                        sequence bigint not null,
+                        start_time_ns bigint not null,
+                        node_id text null,
+                        payload_json jsonb not null,
+                        primary key (graph_id, run_id, span_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    "create index if not exists idx_remote_live_sessions_lookup "
+                    "on remote_live_sessions (graph_id, invocation_name, started_at_ms desc)"
+                )
+                conn.execute(
+                    "create index if not exists idx_remote_live_records_sequence "
+                    "on remote_live_records (graph_id, run_id, sequence asc)"
+                )
+                conn.execute(
+                    "create index if not exists idx_remote_live_spans_sequence "
+                    "on remote_live_spans (graph_id, run_id, sequence asc)"
+                )
+                conn.commit()
+            self._schema_ready = True
+
+
 class RemoteRunStore:
     """Remote ingest + historical read adapter for the minimal Phase 2 backend."""
 
@@ -1122,6 +1741,56 @@ class RemoteProjectStore:
 
     def list_projects(self) -> tuple[RemoteProjectRecord, ...]:
         return self._project_index.list_projects()
+
+
+class RemoteLiveSessionStore:
+    """Remote adapter for live in-progress run sessions."""
+
+    def __init__(self, *, live_session_index: LiveSessionIndex) -> None:
+        self._live_session_index = live_session_index
+
+    @classmethod
+    def from_config(cls, config: RemoteBackendConfig) -> RemoteLiveSessionStore:
+        return cls(live_session_index=PostgresLiveSessionIndex(config.database_url))
+
+    def start_session(
+        self,
+        payload: RemoteLiveSessionStartRequest,
+    ) -> RemoteLiveSessionRecord:
+        return self._live_session_index.upsert_session_start(payload)
+
+    def apply_update(
+        self,
+        payload: RemoteLiveSessionUpdateRequest,
+    ) -> RemoteLiveSessionRecord:
+        return self._live_session_index.apply_session_update(payload)
+
+    def mark_bundle_committed(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        committed_at_ms: int,
+    ) -> RemoteLiveSessionRecord | None:
+        return self._live_session_index.mark_bundle_committed(
+            graph_id=graph_id,
+            run_id=run_id,
+            committed_at_ms=committed_at_ms,
+        )
+
+    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord:
+        return self._live_session_index.get_session(graph_id=graph_id, run_id=run_id)
+
+    def list_sessions(
+        self,
+        *,
+        graph_id: str | None = None,
+        invocation_name: str | None = None,
+    ) -> tuple[RemoteLiveSessionRecord, ...]:
+        return self._live_session_index.list_sessions(
+            graph_id=graph_id,
+            invocation_name=invocation_name,
+        )
 
 
 class RemoteCompletedRunSink(CompletedRunSink):
@@ -1329,6 +1998,130 @@ def _remote_project_from_row(
         last_completed_run_id=last_completed_run_id,
         last_completed_run_invocation_name=last_completed_run_invocation_name,
     )
+
+
+def _remote_live_session_from_row(
+    row: Sequence[object],
+    *,
+    records: Sequence[Sequence[object]],
+    spans: Sequence[Sequence[object]],
+) -> RemoteLiveSessionRecord:
+    graph_json = json.loads(cast(str, row[14]))
+    analysis_json = json.loads(cast(str, row[15]))
+    if not isinstance(graph_json, dict):
+        raise RemoteContractError("Stored live session graph_json must be an object.")
+    if not isinstance(analysis_json, dict):
+        raise RemoteContractError("Stored live session analysis_json must be an object.")
+    normalized_records = tuple(
+        _json_object_from_db_payload(cast(str, record_row[0]), "remote_live_records.payload_json")
+        for record_row in records
+    )
+    normalized_spans = tuple(
+        _json_object_from_db_payload(cast(str, span_row[0]), "remote_live_spans.payload_json")
+        for span_row in spans
+    )
+    runtime_profile_names = json.loads(cast(str, row[8]))
+    if not isinstance(runtime_profile_names, list):
+        raise RemoteContractError(
+            "Stored live session runtime_profile_names must decode to a list."
+        )
+    return RemoteLiveSessionRecord(
+        graph_id=cast(str, row[0]),
+        run_id=cast(str, row[1]),
+        project_id=cast(str | None, row[2]),
+        invocation_name=cast(str | None, row[3]),
+        environment_name=cast(str | None, row[4]),
+        catalog_entry_id=cast(str | None, row[5]),
+        catalog_source=(
+            None if row[6] is None else CatalogSource(cast(str, row[6]))
+        ),
+        runtime_default_profile_name=cast(str | None, row[7]),
+        runtime_profile_names=tuple(
+            item for item in runtime_profile_names if isinstance(item, str)
+        ),
+        started_at_ms=cast(int, row[9]),
+        updated_at_ms=cast(int, row[10]),
+        finished_at_ms=cast(int | None, row[11]),
+        status=RemoteLiveSessionStatus(cast(str, row[12])),
+        error=cast(str | None, row[13]),
+        graph=cast(dict[str, object], graph_json),
+        analysis=cast(dict[str, object], analysis_json),
+        bundle_committed_at_ms=cast(int | None, row[16]),
+        records=normalized_records,
+        spans=normalized_spans,
+    )
+
+
+def _merge_live_rows(
+    existing: Sequence[dict[str, object]],
+    incoming: Sequence[dict[str, object]],
+    *,
+    id_key: str,
+    order_key: str,
+) -> tuple[dict[str, object], ...]:
+    merged: dict[str, dict[str, object]] = {}
+    anonymous: list[dict[str, object]] = []
+    for row in (*existing, *incoming):
+        raw_id = row.get(id_key)
+        if isinstance(raw_id, str) and raw_id:
+            merged[raw_id] = dict(row)
+            continue
+        anonymous.append(dict(row))
+    ordered = sorted(
+        merged.values(),
+        key=lambda row: (
+            _optional_live_row_int(row, order_key) or 0,
+            json.dumps(row, sort_keys=True),
+        ),
+    )
+    ordered.extend(
+        sorted(
+            anonymous,
+            key=lambda row: (
+                _optional_live_row_int(row, order_key) or 0,
+                json.dumps(row, sort_keys=True),
+            ),
+        )
+    )
+    return tuple(ordered)
+
+
+def _required_live_row_str(row: dict[str, object], key: str) -> str:
+    value = row.get(key)
+    if isinstance(value, str) and value:
+        return value
+    raise RemoteContractError(f"Live row {key!r} must be a non-empty string.")
+
+
+def _required_live_row_int(row: dict[str, object], key: str) -> int:
+    value = row.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    raise RemoteContractError(f"Live row {key!r} must be an integer.")
+
+
+def _optional_live_row_int(row: dict[str, object], key: str) -> int | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    raise RemoteContractError(f"Live row {key!r} must be an integer when present.")
+
+
+def _optional_span_node_id(row: dict[str, object]) -> str | None:
+    attributes = row.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    value = attributes.get("mentalmodel.node.id")
+    return value if isinstance(value, str) else None
+
+
+def _json_object_from_db_payload(raw: str, field_name: str) -> dict[str, object]:
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise RemoteContractError(f"Stored {field_name} must decode to an object.")
+    return cast(dict[str, object], payload)
 
 
 def _json_str(payload: dict[str, JsonValue], key: str) -> str:

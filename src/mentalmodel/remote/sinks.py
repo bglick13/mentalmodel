@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from mentalmodel.analysis import AnalysisReport
+from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.remote.contracts import RunManifest
 
 
@@ -78,6 +81,22 @@ class ExecutionRecordSink(Protocol):
         """Emit one semantic execution record."""
 
 
+class LiveExecutionSink(Protocol):
+    """Transport-neutral sink for one in-progress run's live execution stream."""
+
+    def start(self, *, graph: IRGraph, analysis: AnalysisReport) -> None:
+        """Open or refresh the remote live session before events stream."""
+
+    def emit_record(self, record: ExecutionRecord) -> None:
+        """Emit one semantic execution record."""
+
+    def emit_span(self, span: RecordedSpan) -> None:
+        """Emit one recorded span."""
+
+    def complete(self, *, success: bool, error: str | None = None) -> None:
+        """Flush and mark the live session terminal."""
+
+
 class NoOpCompletedRunSink:
     """Completed-run sink that intentionally does nothing."""
 
@@ -116,6 +135,23 @@ class NoOpExecutionRecordSink:
 
     def emit(self, record: ExecutionRecord) -> None:
         del record
+
+
+class NoOpLiveExecutionSink:
+    """Live execution sink that intentionally does nothing."""
+
+    def start(self, *, graph: IRGraph, analysis: AnalysisReport) -> None:
+        del graph, analysis
+        return None
+
+    def emit_record(self, record: ExecutionRecord) -> None:
+        del record
+
+    def emit_span(self, span: RecordedSpan) -> None:
+        del span
+
+    def complete(self, *, success: bool, error: str | None = None) -> None:
+        del success, error
 
 
 class CompositeExecutionRecordSink:

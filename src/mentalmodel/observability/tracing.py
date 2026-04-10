@@ -22,6 +22,8 @@ from mentalmodel.observability.config import TracingConfig, TracingMode, load_tr
 class RecordedSpan:
     """Serializable span data captured alongside OpenTelemetry spans."""
 
+    span_id: str
+    sequence: int
     name: str
     start_time_ns: int
     end_time_ns: int
@@ -45,6 +47,7 @@ class TracingAdapter:
     config: TracingConfig
     spans: list[RecordedSpan] = field(default_factory=list)
     listeners: Sequence[SpanListener] = field(default_factory=tuple)
+    _sequence: int = 0
 
     @property
     def sink_configured(self) -> bool:
@@ -73,7 +76,15 @@ class TracingAdapter:
                 raise
             finally:
                 if self.config.capture_local_spans:
+                    self._sequence += 1
                     recorded = RecordedSpan(
+                        span_id=_span_id(
+                            name=name,
+                            start_time_ns=start_time_ns,
+                            frame_id=_span_frame_id(attrs),
+                            sequence=self._sequence,
+                        ),
+                        sequence=self._sequence,
                         name=name,
                         start_time_ns=start_time_ns,
                         end_time_ns=time.time_ns(),
@@ -187,3 +198,13 @@ def _span_iteration_index(attributes: Mapping[str, str]) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _span_id(
+    *,
+    name: str,
+    start_time_ns: int,
+    frame_id: str,
+    sequence: int,
+) -> str:
+    return f"span-{sequence}:{frame_id}:{start_time_ns}:{name}"

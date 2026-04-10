@@ -46,6 +46,15 @@ class CatalogSource(StrEnum):
     SPEC_PATH = "spec-path"
 
 
+class RemoteLiveSessionStatus(StrEnum):
+    """Lifecycle state for one remotely streamed live run session."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 @dataclass(slots=True, frozen=True)
 class RunTraceSummary:
     """Stable trace-export summary attached to a canonical run manifest."""
@@ -765,6 +774,373 @@ class RemoteRunUploadReceipt:
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteLiveSessionStartRequest:
+    """Producer request that opens or refreshes one live remote run session."""
+
+    graph_id: str
+    run_id: str
+    started_at_ms: int
+    graph: dict[str, object]
+    analysis: dict[str, object]
+    project_id: str | None = None
+    invocation_name: str | None = None
+    environment_name: str | None = None
+    catalog_entry_id: str | None = None
+    catalog_source: CatalogSource | None = None
+    runtime_default_profile_name: str | None = None
+    runtime_profile_names: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.graph_id, "RemoteLiveSessionStartRequest.graph_id")
+        _require_identifier(self.run_id, "RemoteLiveSessionStartRequest.run_id")
+        _require_non_negative(
+            self.started_at_ms,
+            "RemoteLiveSessionStartRequest.started_at_ms",
+        )
+        if self.project_id is not None:
+            _require_identifier(self.project_id, "RemoteLiveSessionStartRequest.project_id")
+        if self.environment_name == "":
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.environment_name cannot be empty."
+            )
+        if self.catalog_entry_id == "":
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.catalog_entry_id cannot be empty."
+            )
+        if not isinstance(self.graph, dict):
+            raise RemoteContractError("RemoteLiveSessionStartRequest.graph must be an object.")
+        if not isinstance(self.analysis, dict):
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.analysis must be an object."
+            )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "graph_id": self.graph_id,
+            "run_id": self.run_id,
+            "started_at_ms": self.started_at_ms,
+            "graph": dict(self.graph),
+            "analysis": dict(self.analysis),
+            "project_id": self.project_id,
+            "invocation_name": self.invocation_name,
+            "environment_name": self.environment_name,
+            "catalog_entry_id": self.catalog_entry_id,
+            "catalog_source": (
+                None if self.catalog_source is None else self.catalog_source.value
+            ),
+            "runtime_default_profile_name": self.runtime_default_profile_name,
+            "runtime_profile_names": list(self.runtime_profile_names),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RemoteLiveSessionStartRequest:
+        graph_id = payload.get("graph_id")
+        run_id = payload.get("run_id")
+        started_at_ms = payload.get("started_at_ms")
+        graph = payload.get("graph")
+        analysis = payload.get("analysis")
+        runtime_profile_names = payload.get("runtime_profile_names", [])
+        if not isinstance(graph_id, str):
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.graph_id must be a string."
+            )
+        if not isinstance(run_id, str):
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.run_id must be a string."
+            )
+        if not isinstance(started_at_ms, int):
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.started_at_ms must be an integer."
+            )
+        if not isinstance(graph, dict):
+            raise RemoteContractError("RemoteLiveSessionStartRequest.graph must be an object.")
+        if not isinstance(analysis, dict):
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.analysis must be an object."
+            )
+        if not isinstance(runtime_profile_names, list) or any(
+            not isinstance(item, str) for item in runtime_profile_names
+        ):
+            raise RemoteContractError(
+                "RemoteLiveSessionStartRequest.runtime_profile_names must be a list of strings."
+            )
+        return cls(
+            graph_id=graph_id,
+            run_id=run_id,
+            started_at_ms=started_at_ms,
+            graph=dict(graph),
+            analysis=dict(analysis),
+            project_id=_optional_payload_str(payload, "project_id"),
+            invocation_name=_optional_payload_str(payload, "invocation_name"),
+            environment_name=_optional_payload_str(payload, "environment_name"),
+            catalog_entry_id=_optional_payload_str(payload, "catalog_entry_id"),
+            catalog_source=_optional_catalog_source(payload.get("catalog_source")),
+            runtime_default_profile_name=_optional_payload_str(
+                payload, "runtime_default_profile_name"
+            ),
+            runtime_profile_names=tuple(runtime_profile_names),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class RemoteLiveSessionUpdateRequest:
+    """Incremental producer update for one live remote run session."""
+
+    graph_id: str
+    run_id: str
+    updated_at_ms: int
+    status: RemoteLiveSessionStatus | None = None
+    error: str | None = None
+    records: tuple[dict[str, object], ...] = ()
+    spans: tuple[dict[str, object], ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.graph_id, "RemoteLiveSessionUpdateRequest.graph_id")
+        _require_identifier(self.run_id, "RemoteLiveSessionUpdateRequest.run_id")
+        _require_non_negative(
+            self.updated_at_ms,
+            "RemoteLiveSessionUpdateRequest.updated_at_ms",
+        )
+        if self.error == "":
+            raise RemoteContractError("RemoteLiveSessionUpdateRequest.error cannot be empty.")
+        for collection_name, rows in (("records", self.records), ("spans", self.spans)):
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise RemoteContractError(
+                        f"RemoteLiveSessionUpdateRequest.{collection_name} must contain objects."
+                    )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "graph_id": self.graph_id,
+            "run_id": self.run_id,
+            "updated_at_ms": self.updated_at_ms,
+            "status": None if self.status is None else self.status.value,
+            "error": self.error,
+            "records": [dict(row) for row in self.records],
+            "spans": [dict(row) for row in self.spans],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RemoteLiveSessionUpdateRequest:
+        graph_id = payload.get("graph_id")
+        run_id = payload.get("run_id")
+        updated_at_ms = payload.get("updated_at_ms")
+        raw_status = payload.get("status")
+        records = payload.get("records", [])
+        spans = payload.get("spans", [])
+        if not isinstance(graph_id, str):
+            raise RemoteContractError(
+                "RemoteLiveSessionUpdateRequest.graph_id must be a string."
+            )
+        if not isinstance(run_id, str):
+            raise RemoteContractError(
+                "RemoteLiveSessionUpdateRequest.run_id must be a string."
+            )
+        if not isinstance(updated_at_ms, int):
+            raise RemoteContractError(
+                "RemoteLiveSessionUpdateRequest.updated_at_ms must be an integer."
+            )
+        if raw_status is not None and not isinstance(raw_status, str):
+            raise RemoteContractError(
+                "RemoteLiveSessionUpdateRequest.status must be a string when present."
+            )
+        if not isinstance(records, list):
+            raise RemoteContractError(
+                "RemoteLiveSessionUpdateRequest.records must be a list."
+            )
+        if not isinstance(spans, list):
+            raise RemoteContractError(
+                "RemoteLiveSessionUpdateRequest.spans must be a list."
+            )
+        normalized_records: list[dict[str, object]] = []
+        for row in records:
+            if not isinstance(row, dict):
+                raise RemoteContractError(
+                    "RemoteLiveSessionUpdateRequest.records must contain objects."
+                )
+            normalized_records.append(dict(row))
+        normalized_spans: list[dict[str, object]] = []
+        for row in spans:
+            if not isinstance(row, dict):
+                raise RemoteContractError(
+                    "RemoteLiveSessionUpdateRequest.spans must contain objects."
+                )
+            normalized_spans.append(dict(row))
+        return cls(
+            graph_id=graph_id,
+            run_id=run_id,
+            updated_at_ms=updated_at_ms,
+            status=None if raw_status is None else RemoteLiveSessionStatus(raw_status),
+            error=_optional_payload_str(payload, "error"),
+            records=tuple(normalized_records),
+            spans=tuple(normalized_spans),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class RemoteLiveSessionRecord:
+    """Service-owned materialized in-progress run state."""
+
+    graph_id: str
+    run_id: str
+    started_at_ms: int
+    updated_at_ms: int
+    status: RemoteLiveSessionStatus
+    graph: dict[str, object]
+    analysis: dict[str, object]
+    project_id: str | None = None
+    invocation_name: str | None = None
+    environment_name: str | None = None
+    catalog_entry_id: str | None = None
+    catalog_source: CatalogSource | None = None
+    runtime_default_profile_name: str | None = None
+    runtime_profile_names: tuple[str, ...] = ()
+    records: tuple[dict[str, object], ...] = ()
+    spans: tuple[dict[str, object], ...] = ()
+    error: str | None = None
+    finished_at_ms: int | None = None
+    bundle_committed_at_ms: int | None = None
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.graph_id, "RemoteLiveSessionRecord.graph_id")
+        _require_identifier(self.run_id, "RemoteLiveSessionRecord.run_id")
+        _require_non_negative(self.started_at_ms, "RemoteLiveSessionRecord.started_at_ms")
+        _require_non_negative(self.updated_at_ms, "RemoteLiveSessionRecord.updated_at_ms")
+        if self.finished_at_ms is not None:
+            _require_non_negative(
+                self.finished_at_ms,
+                "RemoteLiveSessionRecord.finished_at_ms",
+            )
+        if self.bundle_committed_at_ms is not None:
+            _require_non_negative(
+                self.bundle_committed_at_ms,
+                "RemoteLiveSessionRecord.bundle_committed_at_ms",
+            )
+        if self.project_id is not None:
+            _require_identifier(self.project_id, "RemoteLiveSessionRecord.project_id")
+        if self.environment_name == "":
+            raise RemoteContractError(
+                "RemoteLiveSessionRecord.environment_name cannot be empty."
+            )
+        if self.catalog_entry_id == "":
+            raise RemoteContractError(
+                "RemoteLiveSessionRecord.catalog_entry_id cannot be empty."
+            )
+        if self.error == "":
+            raise RemoteContractError("RemoteLiveSessionRecord.error cannot be empty.")
+
+    @property
+    def latest_record_sequence(self) -> int:
+        latest = 0
+        for record in self.records:
+            raw = record.get("sequence")
+            if isinstance(raw, int) and not isinstance(raw, bool):
+                latest = max(latest, raw)
+        return latest
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "graph_id": self.graph_id,
+            "run_id": self.run_id,
+            "started_at_ms": self.started_at_ms,
+            "updated_at_ms": self.updated_at_ms,
+            "status": self.status.value,
+            "graph": dict(self.graph),
+            "analysis": dict(self.analysis),
+            "project_id": self.project_id,
+            "invocation_name": self.invocation_name,
+            "environment_name": self.environment_name,
+            "catalog_entry_id": self.catalog_entry_id,
+            "catalog_source": (
+                None if self.catalog_source is None else self.catalog_source.value
+            ),
+            "runtime_default_profile_name": self.runtime_default_profile_name,
+            "runtime_profile_names": list(self.runtime_profile_names),
+            "records": [dict(row) for row in self.records],
+            "spans": [dict(row) for row in self.spans],
+            "error": self.error,
+            "finished_at_ms": self.finished_at_ms,
+            "bundle_committed_at_ms": self.bundle_committed_at_ms,
+            "latest_record_sequence": self.latest_record_sequence,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RemoteLiveSessionRecord:
+        started_at_ms = payload.get("started_at_ms")
+        updated_at_ms = payload.get("updated_at_ms")
+        raw_status = payload.get("status")
+        graph = payload.get("graph")
+        analysis = payload.get("analysis")
+        records = payload.get("records", [])
+        spans = payload.get("spans", [])
+        runtime_profile_names = payload.get("runtime_profile_names", [])
+        if not isinstance(started_at_ms, int):
+            raise RemoteContractError(
+                "RemoteLiveSessionRecord.started_at_ms must be an integer."
+            )
+        if not isinstance(updated_at_ms, int):
+            raise RemoteContractError(
+                "RemoteLiveSessionRecord.updated_at_ms must be an integer."
+            )
+        if not isinstance(raw_status, str):
+            raise RemoteContractError("RemoteLiveSessionRecord.status must be a string.")
+        if not isinstance(graph, dict):
+            raise RemoteContractError("RemoteLiveSessionRecord.graph must be an object.")
+        if not isinstance(analysis, dict):
+            raise RemoteContractError("RemoteLiveSessionRecord.analysis must be an object.")
+        if not isinstance(records, list):
+            raise RemoteContractError("RemoteLiveSessionRecord.records must be a list.")
+        if not isinstance(spans, list):
+            raise RemoteContractError("RemoteLiveSessionRecord.spans must be a list.")
+        if not isinstance(runtime_profile_names, list) or any(
+            not isinstance(item, str) for item in runtime_profile_names
+        ):
+            raise RemoteContractError(
+                "RemoteLiveSessionRecord.runtime_profile_names must be a list of strings."
+            )
+        normalized_records: list[dict[str, object]] = []
+        for row in records:
+            if not isinstance(row, dict):
+                raise RemoteContractError(
+                    "RemoteLiveSessionRecord.records must contain objects."
+                )
+            normalized_records.append(dict(row))
+        normalized_spans: list[dict[str, object]] = []
+        for row in spans:
+            if not isinstance(row, dict):
+                raise RemoteContractError(
+                    "RemoteLiveSessionRecord.spans must contain objects."
+                )
+            normalized_spans.append(dict(row))
+        return cls(
+            graph_id=_required_payload_str(payload, "graph_id"),
+            run_id=_required_payload_str(payload, "run_id"),
+            started_at_ms=started_at_ms,
+            updated_at_ms=updated_at_ms,
+            status=RemoteLiveSessionStatus(raw_status),
+            graph=dict(graph),
+            analysis=dict(analysis),
+            project_id=_optional_payload_str(payload, "project_id"),
+            invocation_name=_optional_payload_str(payload, "invocation_name"),
+            environment_name=_optional_payload_str(payload, "environment_name"),
+            catalog_entry_id=_optional_payload_str(payload, "catalog_entry_id"),
+            catalog_source=_optional_catalog_source(payload.get("catalog_source")),
+            runtime_default_profile_name=_optional_payload_str(
+                payload, "runtime_default_profile_name"
+            ),
+            runtime_profile_names=tuple(runtime_profile_names),
+            records=tuple(normalized_records),
+            spans=tuple(normalized_spans),
+            error=_optional_payload_str(payload, "error"),
+            finished_at_ms=_optional_payload_int(payload, "finished_at_ms"),
+            bundle_committed_at_ms=_optional_payload_int(
+                payload, "bundle_committed_at_ms"
+            ),
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteProjectRecord:
     """Service-owned remote project record for one linked repo."""
 
@@ -1029,6 +1405,22 @@ def _optional_payload_str(payload: dict[str, object], key: str) -> str | None:
     if isinstance(value, str):
         return value
     raise RemoteContractError(f"{key!r} must be a string when present.")
+
+
+def _required_payload_str(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    if isinstance(value, str) and value:
+        return value
+    raise RemoteContractError(f"{key!r} must be a non-empty string.")
+
+
+def _optional_payload_int(payload: dict[str, object], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    raise RemoteContractError(f"{key!r} must be an integer when present.")
 
 
 def _required_payload_bool(payload: dict[str, object], key: str) -> bool:

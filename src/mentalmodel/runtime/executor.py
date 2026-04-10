@@ -73,6 +73,7 @@ class AsyncExecutor:
         environment: RuntimeEnvironment = EMPTY_RUNTIME_ENVIRONMENT,
         invocation_name: str | None = None,
         span_listeners: Sequence[SpanListener] = (),
+        run_id: str | None = None,
     ) -> None:
         self.max_concurrency = max(1, max_concurrency)
         self.recorder = recorder or ExecutionRecorder()
@@ -84,6 +85,7 @@ class AsyncExecutor:
         self.metrics = metrics or create_metric_emitter(config=metric_config)
         self.environment = environment
         self.invocation_name = invocation_name
+        self.run_id = run_id
 
     async def run(self, program: Workflow[NamedPrimitive]) -> ExecutionResult:
         compiled = compile_program(program)
@@ -94,6 +96,7 @@ class AsyncExecutor:
             metrics=self.metrics,
             environment=self.environment,
             invocation_name=self.invocation_name,
+            run_id=self.run_id,
         )
         emit_metric_batch(self.metrics, [run_started_observation(context.metric_context())])
         outputs: dict[str, RuntimeValue]

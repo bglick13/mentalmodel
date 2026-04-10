@@ -7,14 +7,19 @@ from pathlib import Path
 from mentalmodel.examples.async_rl.demo import build_program
 from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
+    InMemoryLiveSessionIndex,
     InMemoryManifestIndex,
     InMemoryProjectIndex,
     RemoteCompletedRunSink,
+    RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
 )
 from mentalmodel.remote.contracts import (
     ProjectCatalogSnapshot,
+    RemoteLiveSessionStartRequest,
+    RemoteLiveSessionStatus,
+    RemoteLiveSessionUpdateRequest,
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
 )
@@ -199,6 +204,85 @@ class RemoteStoreTest(unittest.TestCase):
         self.assertEqual(updated.last_completed_run_upload_at_ms, linked.linked_at_ms + 1)
         self.assertEqual(updated.last_completed_run_graph_id, "pangramanizer_training")
         self.assertEqual(updated.last_completed_run_id, "run-123")
+
+    def test_remote_live_session_store_tracks_records_and_bundle_commit(self) -> None:
+        store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+        started = store.start_session(
+            RemoteLiveSessionStartRequest(
+                project_id="pangramanizer",
+                graph_id="pangramanizer_training",
+                run_id="run-live-123",
+                invocation_name="pangram_real_smoke",
+                environment_name="prod",
+                started_at_ms=1000,
+                graph={
+                    "graph_id": "pangramanizer_training",
+                    "metadata": {},
+                    "nodes": [{"node_id": "source", "kind": "actor", "label": "Source"}],
+                    "edges": [],
+                },
+                analysis={"error_count": 0, "warning_count": 0, "findings": []},
+                runtime_default_profile_name="real",
+                runtime_profile_names=("real",),
+            )
+        )
+        self.assertEqual(started.status, RemoteLiveSessionStatus.RUNNING)
+        updated = store.apply_update(
+            RemoteLiveSessionUpdateRequest(
+                graph_id="pangramanizer_training",
+                run_id="run-live-123",
+                updated_at_ms=1100,
+                records=(
+                    {
+                        "record_id": "run-live-123:1",
+                        "run_id": "run-live-123",
+                        "node_id": "source",
+                        "frame_id": "root",
+                        "frame_path": ["root"],
+                        "loop_node_id": None,
+                        "iteration_index": None,
+                        "event_type": "node.succeeded",
+                        "sequence": 1,
+                        "timestamp_ms": 1100,
+                        "payload": {"output": {"reward": 1.0}},
+                    },
+                ),
+                spans=(
+                    {
+                        "span_id": "span-1:root:100:actor:source",
+                        "sequence": 1,
+                        "name": "actor:source",
+                        "start_time_ns": 100,
+                        "end_time_ns": 200,
+                        "duration_ns": 100,
+                        "attributes": {"mentalmodel.node.id": "source"},
+                        "frame_id": "root",
+                        "loop_node_id": None,
+                        "iteration_index": None,
+                        "error_type": None,
+                        "error_message": None,
+                    },
+                ),
+            )
+        )
+        self.assertEqual(len(updated.records), 1)
+        self.assertEqual(len(updated.spans), 1)
+        closed = store.apply_update(
+            RemoteLiveSessionUpdateRequest(
+                graph_id="pangramanizer_training",
+                run_id="run-live-123",
+                updated_at_ms=1200,
+                status=RemoteLiveSessionStatus.SUCCEEDED,
+            )
+        )
+        self.assertEqual(closed.status, RemoteLiveSessionStatus.SUCCEEDED)
+        committed = store.mark_bundle_committed(
+            graph_id="pangramanizer_training",
+            run_id="run-live-123",
+            committed_at_ms=1300,
+        )
+        assert committed is not None
+        self.assertEqual(committed.bundle_committed_at_ms, 1300)
 
 
 if __name__ == "__main__":

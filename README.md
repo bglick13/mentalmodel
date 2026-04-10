@@ -236,8 +236,14 @@ Dashboard UI:
   importing the producer repo locally
 - a linked repo uploads the completed run bundle automatically during normal
   `mentalmodel verify` execution after local `.runs` materialization succeeds
+- a linked repo now also streams live execution state during normal
+  `mentalmodel verify` execution, so the hosted dashboard can show records,
+  spans, metrics, and invariant progress before the final bundle lands
 - in a linked repo, `mentalmodel verify --spec ...` now uploads the completed
   run bundle automatically after local `.runs` materialization succeeds
+- the hosted dashboard treats the live session as a temporary bridge and
+  switches back to the persisted run view once the final completed bundle is
+  committed
 - `mentalmodel remote sync` remains available as the manual recovery and
   backfill path rather than the normal hosted operator flow
 - the first proof workflow is `review_workflow`; the UI can launch either

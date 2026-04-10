@@ -19,6 +19,7 @@ from mentalmodel.core.interfaces import NamedPrimitive
 from mentalmodel.core.workflow import Workflow
 from mentalmodel.docs import render_markdown_artifacts, render_mermaid
 from mentalmodel.doctor import DoctorStatus, build_doctor_report
+from mentalmodel.environment import RuntimeEnvironment
 from mentalmodel.errors import EntrypointLoadError, MentalModelError
 from mentalmodel.examples.agent_tool_use import (
     DEFAULT_OUTPUT_DIRNAME as AGENT_TOOL_USE_OUTPUT_DIRNAME,
@@ -73,6 +74,7 @@ from mentalmodel.remote.projects import (
 from mentalmodel.remote.sinks import CompletedRunPublishResult
 from mentalmodel.remote.sync import (
     RemoteServiceCompletedRunSink,
+    RemoteServiceLiveExecutionSink,
     sync_runs_for_project,
     sync_runs_to_server,
 )
@@ -85,6 +87,7 @@ from mentalmodel.remote.workspace import (
     upsert_project_registration,
     write_workspace_config,
 )
+from mentalmodel.runtime.context import generate_run_id
 from mentalmodel.runtime.replay import build_replay_report, build_run_diff
 from mentalmodel.runtime.runs import (
     apply_run_repairs,
@@ -503,6 +506,7 @@ def run_verify(
         configured_remote_run_store=configured_remote_run_store,
         run_target=run_target,
     )
+    live_run_id = generate_run_id()
     if _is_external_project_registration(project):
         payload = _run_external_verify(
             invocation=invocation,
@@ -515,6 +519,13 @@ def run_verify(
         environment = None
         if invocation.environment is not None:
             _, environment = load_runtime_environment_subject(invocation.environment)
+        live_execution_sink = _resolve_live_execution_sink(
+            linked_project_config=linked_project_config,
+            run_target=run_target,
+            invocation_name=invocation.invocation_name,
+            run_id=live_run_id,
+            environment=environment,
+        )
         report = run_verification(
             program,
             module=module,
@@ -522,6 +533,8 @@ def run_verify(
             environment=environment,
             invocation_name=invocation.invocation_name,
             completed_run_sink=completed_run_sink,
+            live_execution_sink=live_execution_sink,
+            run_id=live_run_id,
         )
         payload = report.as_dict()
 
@@ -703,6 +716,34 @@ def _resolve_completed_run_sink(
         environment_name=run_target.environment_name,
         catalog_entry_id=run_target.catalog_entry_id,
         catalog_source=run_target.catalog_source,
+    )
+
+
+def _resolve_live_execution_sink(
+    *,
+    linked_project_config: MentalModelProjectConfig | None,
+    run_target: ProjectRunTarget,
+    invocation_name: str | None,
+    run_id: str,
+    environment: RuntimeEnvironment | None,
+) -> RemoteServiceLiveExecutionSink | None:
+    if linked_project_config is None:
+        return None
+    runtime_profile_names: tuple[str, ...] = ()
+    runtime_default_profile_name: str | None = None
+    if environment is not None:
+        runtime_profile_names = environment.profile_names()
+        runtime_default_profile_name = environment.default_profile_name
+    return RemoteServiceLiveExecutionSink(
+        linked_project_config,
+        run_id=run_id,
+        invocation_name=invocation_name,
+        project_id=run_target.project_id,
+        environment_name=run_target.environment_name,
+        catalog_entry_id=run_target.catalog_entry_id,
+        catalog_source=run_target.catalog_source,
+        runtime_default_profile_name=runtime_default_profile_name,
+        runtime_profile_names=runtime_profile_names,
     )
 
 
