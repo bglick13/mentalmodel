@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from mentalmodel.remote.contracts import ArtifactDescriptor, RunManifest, RemoteContractError
+from mentalmodel.remote.contracts import ArtifactDescriptor, RemoteContractError, RunManifest
 
 RUNS_DIRNAME = ".runs"
 
@@ -92,8 +92,9 @@ class FileRemoteRunStore:
 
         missing = upload.manifest.missing_required_artifacts()
         if missing:
+            names = ", ".join(name.value for name in missing)
             raise RemoteContractError(
-                f"Run upload is missing required artifacts: {', '.join(name.value for name in missing)}."
+                f"Run upload is missing required artifacts: {names}."
             )
         artifact_map = {
             artifact.descriptor.logical_name: artifact for artifact in upload.artifacts

@@ -32,15 +32,15 @@ from mentalmodel.examples.runtime_environment.demo import (
     build_program as build_runtime_environment_program,
 )
 from mentalmodel.observability.export import write_json, write_jsonl
-from mentalmodel.remote import (
-    InMemoryArtifactStore,
-    InMemoryManifestIndex,
+from mentalmodel.remote.backend import InMemoryArtifactStore, InMemoryManifestIndex, RemoteRunStore
+from mentalmodel.remote.bootstrap import write_remote_demo
+from mentalmodel.remote.contracts import (
     ProjectCatalog,
+    ProjectCatalogSnapshot,
     ProjectRegistration,
-    RemoteRunStore,
+    RemoteProjectRecord,
     WorkspaceConfig,
 )
-from mentalmodel.remote.bootstrap import write_remote_demo
 from mentalmodel.remote.workspace import write_workspace_config
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.runs import list_run_summaries
@@ -250,6 +250,106 @@ class CliTest(unittest.TestCase):
             "mentalmodel.ui.catalog:default_dashboard_catalog",
         )
 
+    def test_remote_link_command_uses_repo_config_and_prints_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            spec_path = root / "verify.toml"
+            spec_path.write_text(
+                "[program]\nentrypoint = \"mentalmodel.examples.async_rl.demo:build_program\"\n",
+                encoding="utf-8",
+            )
+            config_path = root / "mentalmodel.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "pangramanizer"',
+                        'label = "Pangramanizer"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                        "[verify]",
+                        'default_spec = "verify.toml"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.cli.link_project_to_server",
+                    return_value=RemoteProjectRecord(
+                        project_id="pangramanizer",
+                        label="Pangramanizer",
+                        linked_at_ms=1000,
+                        updated_at_ms=1001,
+                        catalog_snapshot=ProjectCatalogSnapshot(
+                            project_id="pangramanizer",
+                            provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+                            published_at_ms=1000,
+                            entries=(),
+                        ),
+                    ),
+                ) as link_project:
+                    with contextlib.redirect_stdout(stdout):
+                        exit_code = main(
+                            ["remote", "link", "--config", str(config_path), "--json"]
+                        )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["project"]["project_id"], "pangramanizer")
+            link_project.assert_called_once()
+
+    def test_remote_status_command_reads_repo_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "mentalmodel.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "pangramanizer"',
+                        'label = "Pangramanizer"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.cli.fetch_remote_project_status",
+                    return_value=RemoteProjectRecord(
+                        project_id="pangramanizer",
+                        label="Pangramanizer",
+                        linked_at_ms=1000,
+                        updated_at_ms=1001,
+                    ),
+                ) as status_project:
+                    with contextlib.redirect_stdout(stdout):
+                        exit_code = main(
+                            ["remote", "status", "--config", str(config_path), "--json"]
+                        )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["project"]["project_id"], "pangramanizer")
+            status_project.assert_called_once()
+
     def test_ui_command_supports_frontend_dev_server_and_catalog_provider(self) -> None:
         with patch("mentalmodel.cli.create_dashboard_app", return_value=object()) as create_app:
             with patch("mentalmodel.cli.webbrowser.open") as open_browser:
@@ -420,6 +520,8 @@ class CliTest(unittest.TestCase):
             command = run_subprocess.call_args.args[0]
             self.assertEqual(command[:3], ["uv", "run", "--directory"])
             self.assertEqual(Path(command[3]).resolve(), project_root.resolve())
+            self.assertIsNotNone(persisted.runtime.run_id)
+            assert persisted.runtime.run_id is not None
             indexed = manifest_index.get_run(
                 graph_id="async_rl_demo",
                 run_id=persisted.runtime.run_id,

@@ -58,6 +58,13 @@ class DashboardRunHandle:
     )
 
     def as_dict(self) -> dict[str, JsonValue]:
+        availability: dict[str, JsonValue] = {
+            "summary": self.availability.summary,
+            "records": self.availability.records,
+            "spans": self.availability.spans,
+            "replay": self.availability.replay,
+            "custom_views": self.availability.custom_views,
+        }
         return {
             "schema_version": self.schema_version,
             "graph_id": self.graph_id,
@@ -78,7 +85,7 @@ class DashboardRunHandle:
             "run_dir": self.run_dir,
             "source": self.source,
             "execution_id": self.execution_id,
-            "availability": self.availability.as_dict(),
+            "availability": availability,
         }
 
 

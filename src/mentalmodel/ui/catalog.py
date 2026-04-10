@@ -171,7 +171,7 @@ def validate_dashboard_catalog(
     """Validate and normalize one dashboard catalog."""
 
     seen_spec_ids: set[str] = set()
-    seen_run_keys: set[tuple[str, str]] = set()
+    seen_run_keys: set[tuple[str | None, str, str]] = set()
     normalized: list[DashboardCatalogEntry] = []
     for entry in entries:
         if entry.spec_id in seen_spec_ids:

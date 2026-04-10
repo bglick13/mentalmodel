@@ -89,6 +89,8 @@ uv run mentalmodel verify --entrypoint mentalmodel.examples.async_rl.demo:build_
 uv run mentalmodel verify --spec src/mentalmodel/examples/runtime_environment/runtime_environment_demo.toml
 uv run mentalmodel replay --graph-id async_rl_demo
 uv run mentalmodel replay --graph-id async_rl_demo --frame-id steps[3]
+uv run mentalmodel remote link
+uv run mentalmodel remote status
 uv run mentalmodel otel show-config
 uv run mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
 uv run mentalmodel runs list
@@ -222,6 +224,10 @@ Dashboard UI:
   - `uv run mentalmodel ui --open-browser`
 - or point the backend at a Vite dev server and a custom catalog:
   - `uv run mentalmodel ui --frontend-dev-url http://127.0.0.1:5173 --catalog-entrypoint mypkg.dashboard:catalog`
+- the hosted-service direction now starts with repo-owned `mentalmodel.toml`
+  plus `uv run mentalmodel remote link` / `uv run mentalmodel remote status`
+  instead of requiring manual `workspace.toml` registration for the common
+  path
 - the first proof workflow is `review_workflow`; the UI can launch either
   runtime environment, inspect the persisted graph, inspect node
   inputs/outputs, inspect invariant results, pivot from grouped metrics into

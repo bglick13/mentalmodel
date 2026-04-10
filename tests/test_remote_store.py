@@ -5,14 +5,17 @@ import unittest
 from pathlib import Path
 
 from mentalmodel.examples.async_rl.demo import build_program
-from mentalmodel.remote import (
-    FileRemoteRunStore,
+from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
     InMemoryManifestIndex,
+    InMemoryProjectIndex,
     RemoteCompletedRunSink,
+    RemoteProjectStore,
     RemoteRunStore,
-    build_run_bundle_upload,
 )
+from mentalmodel.remote.contracts import ProjectCatalogSnapshot, RemoteProjectLinkRequest
+from mentalmodel.remote.store import FileRemoteRunStore
+from mentalmodel.remote.sync import build_run_bundle_upload
 from mentalmodel.testing import run_verification
 
 
@@ -26,6 +29,8 @@ class RemoteStoreTest(unittest.TestCase):
             remote_root = Path(remote_tmp)
             report = run_verification(build_program(), runs_dir=local_root)
             self.assertTrue(report.success)
+            self.assertIsNotNone(report.runtime.run_id)
+            assert report.runtime.run_id is not None
             upload = build_run_bundle_upload(
                 runs_dir=local_root,
                 graph_id="async_rl_demo",
@@ -52,6 +57,8 @@ class RemoteStoreTest(unittest.TestCase):
             cache_root = Path(cache_tmp)
             report = run_verification(build_program(), runs_dir=local_root)
             self.assertTrue(report.success)
+            self.assertIsNotNone(report.runtime.run_id)
+            assert report.runtime.run_id is not None
             upload = build_run_bundle_upload(
                 runs_dir=local_root,
                 graph_id="async_rl_demo",
@@ -84,6 +91,10 @@ class RemoteStoreTest(unittest.TestCase):
             cache_root = Path(cache_tmp)
             report = run_verification(build_program(), runs_dir=local_root)
             self.assertTrue(report.success)
+            self.assertIsNotNone(report.runtime.run_id)
+            self.assertIsNotNone(report.runtime.run_artifacts_dir)
+            assert report.runtime.run_id is not None
+            assert report.runtime.run_artifacts_dir is not None
             manifest_index = InMemoryManifestIndex()
             store = RemoteRunStore(
                 manifest_index=manifest_index,
@@ -108,6 +119,29 @@ class RemoteStoreTest(unittest.TestCase):
             )
             self.assertEqual(indexed.manifest.project_id, "mentalmodel-examples")
             self.assertEqual(indexed.manifest.project_label, "Mentalmodel Examples")
+
+    def test_remote_project_store_links_and_lists_projects(self) -> None:
+        store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        payload = RemoteProjectLinkRequest(
+            project_id="pangramanizer",
+            label="Pangramanizer",
+            default_environment="prod",
+            catalog_provider="pangramanizer.dashboard:catalog",
+            default_runs_dir=".runs",
+            default_verify_spec="verification/real_smoke.toml",
+            catalog_snapshot=ProjectCatalogSnapshot(
+                project_id="pangramanizer",
+                provider="pangramanizer.dashboard:catalog",
+                published_at_ms=1000,
+                entries=(),
+            ),
+        )
+        linked = store.link_project(payload)
+        self.assertEqual(linked.project_id, "pangramanizer")
+        self.assertTrue(linked.catalog_published)
+        listed = store.list_projects()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0].project_id, "pangramanizer")
 
 
 if __name__ == "__main__":

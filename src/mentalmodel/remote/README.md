@@ -1,7 +1,7 @@
 # mentalmodel.remote
 
 Remote runs data-plane package for contracts, sink seams, and the first bundle
-upload path.
+upload path, plus the first repo-owned project-link seam for the hosted model.
 
 ## Purpose
 
@@ -12,6 +12,8 @@ primitives for remote-compatible run handling:
 - named artifact descriptors
 - completed-run and execution-record sink interfaces
 - project/workspace registration
+- repo-owned `mentalmodel.toml` project config loading
+- remote project records and catalog snapshot publication
 - project-scoped catalog provider shape
 - canonical run bundle upload payloads
 - a deterministic file-backed remote ingest store
@@ -40,12 +42,19 @@ tests and local transition scenarios.
 - `ExecutionRecordSink`
 - `CompletedRunSink`
 - `ProjectRegistration`
+- `RemoteProjectLinkRequest`
+- `RemoteProjectRecord`
+- `ProjectCatalogSnapshot`
 - `ProjectCatalog`
 - `WorkspaceConfig`
+- `MentalModelProjectConfig`
 - `RunBundleUpload`
 - `RemoteBackendConfig`
+- `RemoteProjectStore`
 - `RemoteRunStore`
 - `FileRemoteRunStore`
+- `load_project_config`
+- `link_project_to_server`
 - `build_run_bundle_upload`
 - `sync_runs_to_server`
 - `load_workspace_config`
@@ -76,6 +85,9 @@ tests and local transition scenarios.
 6. `FileRemoteRunStore.ingest(...)` remains available as a deterministic fallback.
 7. `mentalmodel remote write-demo` generates a workspace registry plus helper
    scripts for one local multi-project stack.
+8. `mentalmodel remote link` reads repo-owned `mentalmodel.toml`, resolves the
+   configured catalog provider, and publishes a remote project record plus the
+   current catalog snapshot.
 
 ## Verification
 

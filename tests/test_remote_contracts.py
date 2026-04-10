@@ -8,8 +8,11 @@ from mentalmodel.remote import (
     ArtifactName,
     CatalogSource,
     ProjectCatalog,
+    ProjectCatalogSnapshot,
     ProjectRegistration,
     RemoteContractError,
+    RemoteProjectLinkRequest,
+    RemoteProjectRecord,
     RunManifest,
     RunManifestStatus,
     RunTraceSummary,
@@ -131,6 +134,51 @@ class RemoteContractsTest(unittest.TestCase):
                 entries=(entry,),
                 default_entry_id="not-real",
             )
+
+    def test_project_catalog_snapshot_validates_entries(self) -> None:
+        entry = default_dashboard_catalog()[0]
+        snapshot = ProjectCatalogSnapshot(
+            project_id="mentalmodel-examples",
+            provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+            published_at_ms=1000,
+            entries=(entry.as_dict(),),
+            default_entry_id=entry.spec_id,
+        )
+        self.assertEqual(snapshot.entry_count, 1)
+
+    def test_remote_project_link_request_rejects_mismatched_snapshot(self) -> None:
+        entry = default_dashboard_catalog()[0]
+        snapshot = ProjectCatalogSnapshot(
+            project_id="other-project",
+            provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+            published_at_ms=1000,
+            entries=(entry.as_dict(),),
+        )
+        with self.assertRaises(RemoteContractError):
+            RemoteProjectLinkRequest(
+                project_id="mentalmodel-examples",
+                label="Mentalmodel Examples",
+                catalog_snapshot=snapshot,
+            )
+
+    def test_remote_project_record_exposes_catalog_status(self) -> None:
+        entry = default_dashboard_catalog()[0]
+        snapshot = ProjectCatalogSnapshot(
+            project_id="mentalmodel-examples",
+            provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+            published_at_ms=1000,
+            entries=(entry.as_dict(),),
+        )
+        record = RemoteProjectRecord(
+            project_id="mentalmodel-examples",
+            label="Mentalmodel Examples",
+            linked_at_ms=1000,
+            updated_at_ms=1001,
+            catalog_snapshot=snapshot,
+        )
+        self.assertTrue(record.catalog_published)
+        self.assertEqual(record.catalog_entry_count, 1)
+        self.assertEqual(record.catalog_published_at_ms, 1000)
 
 
 if __name__ == "__main__":

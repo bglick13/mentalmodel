@@ -23,7 +23,12 @@ from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import execution_record_to_json
-from mentalmodel.remote import ProjectCatalog, RemoteCompletedRunSink, RemoteRunStore
+from mentalmodel.remote.backend import (
+    RemoteCompletedRunSink,
+    RemoteProjectStore,
+    RemoteRunStore,
+)
+from mentalmodel.remote.contracts import ProjectCatalog
 from mentalmodel.remote.workspace import (
     ProjectRunTarget,
     build_project_run_target,
@@ -222,10 +227,12 @@ class DashboardService:
         catalog_entries: Sequence[DashboardCatalogEntry] | None = None,
         project_catalogs: Sequence[ProjectCatalog] | None = None,
         remote_run_store: RemoteRunStore | None = None,
+        remote_project_store: RemoteProjectStore | None = None,
         project_execution_worker: ProjectExecutionWorker | None = None,
     ) -> None:
         self.runs_dir = runs_dir
         self.remote_run_store = remote_run_store
+        self.remote_project_store = remote_project_store
         self._project_execution_worker = (
             project_execution_worker
             if project_execution_worker is not None
@@ -252,7 +259,9 @@ class DashboardService:
 
     def list_projects(self) -> tuple[dict[str, JsonValue], ...]:
         projects: list[dict[str, JsonValue]] = []
+        seen_project_ids: set[str] = set()
         for project_catalog in self._project_catalogs:
+            seen_project_ids.add(project_catalog.project.project_id)
             projects.append(
                 {
                     "project_id": project_catalog.project.project_id,
@@ -269,8 +278,44 @@ class DashboardService:
                     "default_entry_id": project_catalog.default_entry_id,
                     "tags": list(project_catalog.project.tags),
                     "enabled": project_catalog.project.enabled,
+                    "source": "workspace",
+                    "default_environment": project_catalog.project.default_environment,
+                    "catalog_provider": project_catalog.project.catalog_provider,
+                    "catalog_published": True,
+                    "catalog_published_at_ms": None,
+                    "catalog_version": None,
                 }
             )
+        if self.remote_project_store is not None:
+            for project in self.remote_project_store.list_projects():
+                if project.project_id in seen_project_ids:
+                    continue
+                projects.append(
+                    {
+                        "project_id": project.project_id,
+                        "label": project.label,
+                        "root_dir": None,
+                        "runs_dir": project.default_runs_dir,
+                        "description": project.description,
+                        "catalog_entry_count": project.catalog_entry_count,
+                        "default_entry_id": (
+                            None
+                            if project.catalog_snapshot is None
+                            else project.catalog_snapshot.default_entry_id
+                        ),
+                        "tags": [],
+                        "enabled": True,
+                        "source": "remote",
+                        "default_environment": project.default_environment,
+                        "catalog_provider": project.catalog_provider,
+                        "catalog_published": project.catalog_published,
+                        "catalog_published_at_ms": project.catalog_published_at_ms,
+                        "catalog_version": project.catalog_version,
+                        "linked_at_ms": project.linked_at_ms,
+                        "updated_at_ms": project.updated_at_ms,
+                        "default_verify_spec": project.default_verify_spec,
+                    }
+                )
         return tuple(projects)
 
     def _resolve_entry(self, spec_id: str) -> DashboardCatalogEntry:
@@ -488,7 +533,10 @@ class DashboardService:
     ) -> dict[str, JsonValue]:
         entry = self._resolve_entry(spec_id)
         view = _resolve_custom_view(entry, view_id)
-        history_runs_dir = self._history_runs_dir(graph_id=entry.graph_id, run_id=run_id)
+        history_runs_dir = self._require_history_runs_dir(
+            graph_id=entry.graph_id,
+            run_id=run_id,
+        )
         evaluated = evaluate_custom_view(
             runs_dir=history_runs_dir,
             graph_id=entry.graph_id,
@@ -777,18 +825,14 @@ class DashboardService:
         seen_frames: list[str] = []
         node_summaries: dict[tuple[str, str], dict[str, JsonValue]] = {}
         for record in records:
-            frame_id = (
-                record.get("frame_id")
-                if isinstance(record.get("frame_id"), str)
-                else "root"
-            )
+            raw_frame_id = record.get("frame_id")
+            frame_id = raw_frame_id if isinstance(raw_frame_id, str) else "root"
             if frame_id not in seen_frames:
                 seen_frames.append(frame_id)
-            node_id = (
-                record.get("node_id")
-                if isinstance(record.get("node_id"), str)
-                else "unknown"
-            )
+            raw_node_id = record.get("node_id")
+            node_id = raw_node_id if isinstance(raw_node_id, str) else "unknown"
+            raw_event_type = record.get("event_type")
+            event_type = raw_event_type if isinstance(raw_event_type, str) else "unknown"
             key = (node_id, frame_id)
             node_summaries[key] = {
                 "node_id": node_id,
@@ -800,7 +844,7 @@ class DashboardService:
                 "invariant_status": None,
                 "invariant_passed": None,
                 "invariant_severity": None,
-                "last_event_type": record.get("event_type") or "unknown",
+                "last_event_type": event_type,
             }
         return {
             "graph_id": session.spec.graph_id,
@@ -809,9 +853,9 @@ class DashboardService:
             "success": session.status == "succeeded",
             "event_count": len(records),
             "node_count": len({record.get("node_id") for record in records}),
-            "frame_ids": seen_frames,
-            "events": records,
-            "node_summaries": list(node_summaries.values()),
+            "frame_ids": _as_json_list(seen_frames),
+            "events": _as_json_list(records),
+            "node_summaries": _as_json_list(list(node_summaries.values())),
         }
 
     def _active_available_frames(
@@ -857,23 +901,23 @@ class DashboardService:
             )
             if external_project is not None:
                 session.mark_running()
-                report = self._run_external_verification(
+                external_report = self._run_external_verification(
                     session.spec,
                     external_project.project.root_dir,
                     session=session,
                     run_target=run_target,
                 )
                 self._publish_completed_external_run(
-                    report,
+                    external_report,
                     run_target=run_target,
                 )
-                session.mark_completed_from_payload(report)
+                session.mark_completed_from_payload(external_report)
                 return
             module, program = load_workflow_subject(invocation.program)
             environment = None
             if invocation.environment is not None:
                 _, environment = load_runtime_environment_subject(invocation.environment)
-            report = run_verification(
+            verification_report = run_verification(
                 program,
                 module=module,
                 runs_dir=run_target.runs_dir,
@@ -882,7 +926,7 @@ class DashboardService:
                 record_listeners=(session.on_record,),
                 completed_run_sink=self._completed_run_sink(run_target),
             )
-            session.mark_completed(report)
+            session.mark_completed(verification_report)
         except Exception as exc:  # pragma: no cover - guarded by API tests
             session.mark_failed(f"{type(exc).__name__}: {exc}")
 
@@ -1215,7 +1259,7 @@ class DashboardService:
         node_id: str,
     ) -> list[dict[str, JsonValue]]:
         replay = build_replay_report(
-            runs_dir=self._history_runs_dir(graph_id=graph_id, run_id=run_id),
+            runs_dir=self._require_history_runs_dir(graph_id=graph_id, run_id=run_id),
             graph_id=graph_id,
             run_id=run_id,
         )
@@ -1367,7 +1411,7 @@ class DashboardService:
             "until_ms": until_ms,
             "graph_id": graph_id,
             "invocation_name": invocation_name,
-            "buckets": buckets,
+            "buckets": _as_json_list(buckets),
             "runs_scanned": len(summaries),
         }
 
@@ -1383,6 +1427,14 @@ class DashboardService:
             return self.runs_dir
         self.remote_run_store.materialize_run(graph_id=graph_id, run_id=run_id)
         return self.remote_run_store.runs_root
+
+    def _require_history_runs_dir(self, *, graph_id: str, run_id: str) -> Path:
+        runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
+        if runs_dir is None:
+            raise DashboardCatalogError(
+                f"No runs directory is available for {graph_id!r}/{run_id!r}."
+            )
+        return runs_dir
 
 
 def _graph_to_payload(graph: IRGraph) -> dict[str, JsonValue]:
@@ -1446,7 +1498,7 @@ def _empty_timeseries(
         "until_ms": until_ms,
         "graph_id": graph_id,
         "invocation_name": invocation_name,
-        "buckets": buckets,
+        "buckets": _as_json_list(buckets),
         "runs_scanned": 0,
     }
 

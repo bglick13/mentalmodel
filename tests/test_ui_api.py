@@ -14,14 +14,20 @@ from fastapi.testclient import TestClient
 
 from mentalmodel.examples.async_rl.demo import build_program
 from mentalmodel.observability.export import write_json, write_jsonl
-from mentalmodel.remote import (
+from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
     InMemoryManifestIndex,
-    ProjectCatalog,
-    ProjectRegistration,
+    InMemoryProjectIndex,
+    RemoteProjectStore,
     RemoteRunStore,
-    build_run_bundle_upload,
 )
+from mentalmodel.remote.contracts import (
+    ProjectCatalog,
+    ProjectCatalogSnapshot,
+    ProjectRegistration,
+    RemoteProjectLinkRequest,
+)
+from mentalmodel.remote.sync import build_run_bundle_upload
 from mentalmodel.runtime.runs import RUN_SCHEMA_VERSION
 from mentalmodel.testing import run_verification
 from mentalmodel.ui.api import create_dashboard_app
@@ -127,6 +133,61 @@ class DashboardApiTest(unittest.TestCase):
         self.assertEqual(entries[0]["default_loop_node_id"], "ticket_review_loop")
         self.assertTrue(entries[0]["metric_groups"])
         self.assertTrue(entries[0]["pinned_nodes"])
+
+    def test_remote_project_link_endpoint_persists_project_and_lists_it(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                remote_project_store=project_store,
+                remote_api_key="test-key",
+            )
+        )
+        entry = default_dashboard_catalog()[0]
+        response = client.post(
+            "/api/remote/projects/link",
+            headers={"Authorization": "Bearer test-key"},
+            json=RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                description="Training workflows",
+                default_environment="prod",
+                catalog_provider="pangramanizer.dashboard:catalog",
+                default_runs_dir=".runs",
+                default_verify_spec="verification/real_smoke.toml",
+                catalog_snapshot=ProjectCatalogSnapshot(
+                    project_id="pangramanizer",
+                    provider="pangramanizer.dashboard:catalog",
+                    published_at_ms=1000,
+                    entries=(entry.as_dict(),),
+                    default_entry_id=entry.spec_id,
+                ),
+            ).as_dict(),
+        )
+        self.assertEqual(response.status_code, 200)
+        project = response.json()["project"]
+        self.assertEqual(project["project_id"], "pangramanizer")
+        self.assertTrue(project["catalog_published"])
+        projects_response = client.get("/api/projects")
+        self.assertEqual(projects_response.status_code, 200)
+        projects = projects_response.json()["projects"]
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["project_id"], "pangramanizer")
+        self.assertEqual(projects[0]["source"], "remote")
+
+    def test_remote_project_endpoints_require_auth_when_configured(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                remote_project_store=project_store,
+                remote_api_key="test-key",
+            )
+        )
+        response = client.get("/api/remote/projects")
+        self.assertEqual(response.status_code, 401)
 
     def test_review_workflow_dashboard_api_launches_and_inspects_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -857,6 +918,8 @@ class DashboardApiTest(unittest.TestCase):
             self.assertEqual(runs_response.status_code, 200)
             runs = runs_response.json()["runs"]
             self.assertEqual(len(runs), 1)
+            self.assertIsNotNone(persisted.runtime.run_id)
+            assert persisted.runtime.run_id is not None
             indexed = manifest_index.get_run(
                 graph_id="async_rl_demo",
                 run_id=persisted.runtime.run_id,

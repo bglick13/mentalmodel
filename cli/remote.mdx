@@ -9,11 +9,98 @@ data plane.
 ## Commands
 
 ```bash
+uv run mentalmodel remote link
+uv run mentalmodel remote status
 uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
 uv run mentalmodel remote doctor --workspace-config /tmp/mentalmodel-remote/workspace.toml
 uv run mentalmodel remote up --output-dir /tmp/mentalmodel-remote --open-browser
 uv run mentalmodel remote sync --server-url http://127.0.0.1:8765
 ```
+
+## Repo-linked hosted path
+
+Phase 1 introduces a repo-owned service config in `mentalmodel.toml`.
+
+Illustrative shape:
+
+```toml
+[project]
+project_id = "pangramanizer"
+label = "Pangramanizer"
+
+[remote]
+server_url = "https://mentalmodel.example.com"
+api_key_env = "MENTALMODEL_API_KEY"
+default_environment = "prod"
+
+[catalog]
+provider = "pangramanizer.mentalmodel_training.dashboard:catalog"
+publish_on_link = true
+
+[runs]
+default_runs_dir = ".runs"
+
+[verify]
+default_spec = "pangramanizer/mentalmodel_training/verification/real_smoke.toml"
+```
+
+The common hosted setup flow is now:
+
+```bash
+uv run mentalmodel remote link
+uv run mentalmodel remote status
+```
+
+`remote link` discovers `mentalmodel.toml`, resolves the repo-owned catalog
+provider, registers the project remotely, and publishes the current catalog
+snapshot. `remote status` asks the remote service for the linked project record
+so you can confirm:
+
+- which project is linked
+- which server it is linked to
+- whether a catalog snapshot is published
+- how many catalog entries are currently stored remotely
+
+This is intentionally separate from the older `workspace.toml` path. The local
+workspace registry is still useful for localhost and offline development, but
+the hosted direction is now repo-owned config plus remote project records.
+
+## `remote link`
+
+Link the current repo-owned project to a remote service:
+
+```bash
+uv run mentalmodel remote link
+uv run mentalmodel remote link --config /Users/ben/repos/pangramanizer/mentalmodel.toml
+```
+
+What it does:
+
+- discovers or reads `mentalmodel.toml`
+- validates the repo-owned config contract
+- resolves the configured API token from the configured env var
+- loads the Python catalog provider and serializes a catalog snapshot
+- `POST`s the linked project record to the remote service
+
+How to use that:
+
+1. Add `mentalmodel.toml` to the repo root.
+2. Set the configured API key environment variable.
+3. Run `mentalmodel remote link`.
+4. Open the hosted dashboard or use `mentalmodel remote status` to confirm the
+   project is now known remotely.
+
+## `remote status`
+
+Read the linked project record back from the remote service:
+
+```bash
+uv run mentalmodel remote status
+uv run mentalmodel remote status --config /Users/ben/repos/pangramanizer/mentalmodel.toml
+```
+
+Use this when you want to confirm the Phase 1 hosted seam before thinking about
+run upload or live streaming.
 
 ## `remote write-demo`
 

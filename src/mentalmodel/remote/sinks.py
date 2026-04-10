@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -58,7 +58,9 @@ class CompositeExecutionRecordSink:
             sink.emit(record)
 
 
-def record_listener_for_sink(sink: ExecutionRecordSink):
+def record_listener_for_sink(
+    sink: ExecutionRecordSink,
+) -> Callable[[ExecutionRecord], None]:
     """Adapt one execution-record sink to the recorder listener callback shape."""
 
     def _listener(record: ExecutionRecord) -> None:

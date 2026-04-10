@@ -10,14 +10,17 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol, cast
 
-import boto3
+import boto3  # type: ignore[import-untyped]
 import psycopg
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
 from mentalmodel.remote.contracts import (
     CatalogSource,
+    ProjectCatalogSnapshot,
     RemoteContractError,
+    RemoteProjectLinkRequest,
+    RemoteProjectRecord,
     RunManifest,
     RunManifestStatus,
 )
@@ -111,6 +114,17 @@ class ManifestIndex(Protocol):
     ) -> tuple[IndexedRemoteRun, ...]: ...
 
 
+class ProjectIndex(Protocol):
+    def upsert_project(
+        self,
+        payload: RemoteProjectLinkRequest,
+    ) -> RemoteProjectRecord: ...
+
+    def get_project(self, *, project_id: str) -> RemoteProjectRecord: ...
+
+    def list_projects(self) -> tuple[RemoteProjectRecord, ...]: ...
+
+
 class InMemoryArtifactStore:
     """Deterministic artifact store for tests."""
 
@@ -170,6 +184,50 @@ class InMemoryManifestIndex:
             reverse=True,
         )
         return tuple(rows)
+
+
+class InMemoryProjectIndex:
+    """Deterministic remote project registry for tests."""
+
+    def __init__(self) -> None:
+        self._rows: dict[str, RemoteProjectRecord] = {}
+
+    def upsert_project(
+        self,
+        payload: RemoteProjectLinkRequest,
+    ) -> RemoteProjectRecord:
+        now_ms = int(time.time() * 1000)
+        existing = self._rows.get(payload.project_id)
+        linked_at_ms = now_ms if existing is None else existing.linked_at_ms
+        record = RemoteProjectRecord(
+            project_id=payload.project_id,
+            label=payload.label,
+            linked_at_ms=linked_at_ms,
+            updated_at_ms=now_ms,
+            description=payload.description,
+            default_environment=payload.default_environment,
+            catalog_provider=payload.catalog_provider,
+            default_runs_dir=payload.default_runs_dir,
+            default_verify_spec=payload.default_verify_spec,
+            catalog_snapshot=payload.catalog_snapshot,
+        )
+        self._rows[payload.project_id] = record
+        return record
+
+    def get_project(self, *, project_id: str) -> RemoteProjectRecord:
+        try:
+            return self._rows[project_id]
+        except KeyError as exc:
+            raise RemoteContractError(f"Unknown remote project {project_id!r}.") from exc
+
+    def list_projects(self) -> tuple[RemoteProjectRecord, ...]:
+        return tuple(
+            sorted(
+                self._rows.values(),
+                key=lambda record: (record.updated_at_ms, record.project_id),
+                reverse=True,
+            )
+        )
 
 
 class S3ArtifactStore:
@@ -413,6 +471,216 @@ class PostgresManifestIndex:
             self._schema_ready = True
 
 
+class PostgresProjectIndex:
+    """Postgres-backed remote project registry for the hosted service path."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
+
+    def upsert_project(
+        self,
+        payload: RemoteProjectLinkRequest,
+    ) -> RemoteProjectRecord:
+        self._ensure_schema()
+        now_ms = int(time.time() * 1000)
+        snapshot_json = (
+            None
+            if payload.catalog_snapshot is None
+            else json.dumps(payload.catalog_snapshot.as_dict(), sort_keys=True)
+        )
+        with psycopg.connect(self.database_url) as conn:
+            row = conn.execute(
+                """
+                insert into remote_projects (
+                    project_id,
+                    label,
+                    description,
+                    default_environment,
+                    catalog_provider,
+                    default_runs_dir,
+                    default_verify_spec,
+                    linked_at_ms,
+                    updated_at_ms,
+                    catalog_snapshot_json,
+                    catalog_entry_count,
+                    catalog_published_at_ms,
+                    catalog_version
+                )
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                on conflict (project_id) do update
+                set
+                    label = excluded.label,
+                    description = excluded.description,
+                    default_environment = excluded.default_environment,
+                    catalog_provider = excluded.catalog_provider,
+                    default_runs_dir = excluded.default_runs_dir,
+                    default_verify_spec = excluded.default_verify_spec,
+                    updated_at_ms = excluded.updated_at_ms,
+                    catalog_snapshot_json = excluded.catalog_snapshot_json,
+                    catalog_entry_count = excluded.catalog_entry_count,
+                    catalog_published_at_ms = excluded.catalog_published_at_ms,
+                    catalog_version = excluded.catalog_version
+                returning
+                    project_id,
+                    label,
+                    description,
+                    default_environment,
+                    catalog_provider,
+                    default_runs_dir,
+                    default_verify_spec,
+                    linked_at_ms,
+                    updated_at_ms,
+                    catalog_snapshot_json::text
+                """,
+                (
+                    payload.project_id,
+                    payload.label,
+                    payload.description,
+                    payload.default_environment,
+                    payload.catalog_provider,
+                    payload.default_runs_dir,
+                    payload.default_verify_spec,
+                    now_ms,
+                    now_ms,
+                    snapshot_json,
+                    (
+                        0
+                        if payload.catalog_snapshot is None
+                        else payload.catalog_snapshot.entry_count
+                    ),
+                    (
+                        None
+                        if payload.catalog_snapshot is None
+                        else payload.catalog_snapshot.published_at_ms
+                    ),
+                    (
+                        None
+                        if payload.catalog_snapshot is None
+                        else payload.catalog_snapshot.version
+                    ),
+                ),
+            ).fetchone()
+            conn.commit()
+        assert row is not None
+        return _remote_project_from_row(
+            project_id=cast(str, row[0]),
+            label=cast(str, row[1]),
+            description=cast(str, row[2]),
+            default_environment=cast(str | None, row[3]),
+            catalog_provider=cast(str | None, row[4]),
+            default_runs_dir=cast(str | None, row[5]),
+            default_verify_spec=cast(str | None, row[6]),
+            linked_at_ms=cast(int, row[7]),
+            updated_at_ms=cast(int, row[8]),
+            catalog_snapshot_json=cast(str | None, row[9]),
+        )
+
+    def get_project(self, *, project_id: str) -> RemoteProjectRecord:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            row = conn.execute(
+                """
+                select
+                    project_id,
+                    label,
+                    description,
+                    default_environment,
+                    catalog_provider,
+                    default_runs_dir,
+                    default_verify_spec,
+                    linked_at_ms,
+                    updated_at_ms,
+                    catalog_snapshot_json::text
+                from remote_projects
+                where project_id = %s
+                """,
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            raise RemoteContractError(f"Unknown remote project {project_id!r}.")
+        return _remote_project_from_row(
+            project_id=cast(str, row[0]),
+            label=cast(str, row[1]),
+            description=cast(str, row[2]),
+            default_environment=cast(str | None, row[3]),
+            catalog_provider=cast(str | None, row[4]),
+            default_runs_dir=cast(str | None, row[5]),
+            default_verify_spec=cast(str | None, row[6]),
+            linked_at_ms=cast(int, row[7]),
+            updated_at_ms=cast(int, row[8]),
+            catalog_snapshot_json=cast(str | None, row[9]),
+        )
+
+    def list_projects(self) -> tuple[RemoteProjectRecord, ...]:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            rows = conn.execute(
+                """
+                select
+                    project_id,
+                    label,
+                    description,
+                    default_environment,
+                    catalog_provider,
+                    default_runs_dir,
+                    default_verify_spec,
+                    linked_at_ms,
+                    updated_at_ms,
+                    catalog_snapshot_json::text
+                from remote_projects
+                order by updated_at_ms desc, project_id desc
+                """
+            ).fetchall()
+        return tuple(
+            _remote_project_from_row(
+                project_id=cast(str, row[0]),
+                label=cast(str, row[1]),
+                description=cast(str, row[2]),
+                default_environment=cast(str | None, row[3]),
+                catalog_provider=cast(str | None, row[4]),
+                default_runs_dir=cast(str | None, row[5]),
+                default_verify_spec=cast(str | None, row[6]),
+                linked_at_ms=cast(int, row[7]),
+                updated_at_ms=cast(int, row[8]),
+                catalog_snapshot_json=cast(str | None, row[9]),
+            )
+            for row in rows
+        )
+
+    def _ensure_schema(self) -> None:
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            with psycopg.connect(self.database_url) as conn:
+                conn.execute(
+                    """
+                    create table if not exists remote_projects (
+                        project_id text primary key,
+                        label text not null,
+                        description text not null,
+                        default_environment text,
+                        catalog_provider text,
+                        default_runs_dir text,
+                        default_verify_spec text,
+                        linked_at_ms bigint not null,
+                        updated_at_ms bigint not null,
+                        catalog_snapshot_json jsonb,
+                        catalog_entry_count integer not null default 0,
+                        catalog_published_at_ms bigint,
+                        catalog_version integer
+                    )
+                    """
+                )
+                conn.execute(
+                    "create index if not exists idx_remote_projects_updated_at "
+                    "on remote_projects (updated_at_ms desc)"
+                )
+                conn.commit()
+            self._schema_ready = True
+
+
 class RemoteRunStore:
     """Remote ingest + historical read adapter for the minimal Phase 2 backend."""
 
@@ -539,6 +807,26 @@ class RemoteRunStore:
                 )
             target.write_bytes(content)
         return run_dir
+
+
+class RemoteProjectStore:
+    """Remote project registry adapter for the hosted service path."""
+
+    def __init__(self, *, project_index: ProjectIndex) -> None:
+        self._project_index = project_index
+
+    @classmethod
+    def from_config(cls, config: RemoteBackendConfig) -> RemoteProjectStore:
+        return cls(project_index=PostgresProjectIndex(config.database_url))
+
+    def link_project(self, payload: RemoteProjectLinkRequest) -> RemoteProjectRecord:
+        return self._project_index.upsert_project(payload)
+
+    def get_project(self, *, project_id: str) -> RemoteProjectRecord:
+        return self._project_index.get_project(project_id=project_id)
+
+    def list_projects(self) -> tuple[RemoteProjectRecord, ...]:
+        return self._project_index.list_projects()
 
 
 class RemoteCompletedRunSink(CompletedRunSink):
@@ -689,6 +977,40 @@ def _indexed_run_from_row(
             for key, value in summary_payload.items()
         },
         artifact_prefix=artifact_prefix,
+    )
+
+
+def _remote_project_from_row(
+    *,
+    project_id: str,
+    label: str,
+    description: str,
+    default_environment: str | None,
+    catalog_provider: str | None,
+    default_runs_dir: str | None,
+    default_verify_spec: str | None,
+    linked_at_ms: int,
+    updated_at_ms: int,
+    catalog_snapshot_json: str | None,
+) -> RemoteProjectRecord:
+    snapshot = None
+    if catalog_snapshot_json not in (None, ""):
+        raw_snapshot = cast(str, catalog_snapshot_json)
+        decoded = json.loads(raw_snapshot)
+        if not isinstance(decoded, dict):
+            raise RemoteContractError("Stored project catalog snapshot must be an object.")
+        snapshot = ProjectCatalogSnapshot.from_dict(cast(dict[str, object], decoded))
+    return RemoteProjectRecord(
+        project_id=project_id,
+        label=label,
+        description=description,
+        default_environment=default_environment,
+        catalog_provider=catalog_provider,
+        default_runs_dir=default_runs_dir,
+        default_verify_spec=default_verify_spec,
+        linked_at_ms=linked_at_ms,
+        updated_at_ms=updated_at_ms,
+        catalog_snapshot=snapshot,
     )
 
 

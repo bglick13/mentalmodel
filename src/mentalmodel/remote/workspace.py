@@ -5,6 +5,7 @@ import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from mentalmodel.remote.contracts import (
     CatalogSource,
@@ -129,7 +130,7 @@ def build_project_run_target(
         else (
             catalog_source
             if isinstance(catalog_source, CatalogSource)
-            else CatalogSource(catalog_source)
+            else CatalogSource(cast(str, catalog_source))
         )
     )
     if project is None:

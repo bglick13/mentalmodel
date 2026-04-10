@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeGuard
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
@@ -440,7 +441,7 @@ def _add_warning(
     warnings.append(message)
 
 
-def _is_json_value(value: object) -> bool:
+def _is_json_value(value: object) -> TypeGuard[JsonValue]:
     if value is None or isinstance(value, (str, int, float, bool)):
         return True
     if isinstance(value, list):

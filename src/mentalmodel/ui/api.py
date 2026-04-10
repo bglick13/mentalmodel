@@ -1,21 +1,18 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from mentalmodel.core.interfaces import JsonValue
-from mentalmodel.remote import (
-    FileRemoteRunStore,
-    ProjectCatalog,
-    RemoteBackendConfig,
-    RemoteRunStore,
-    RunBundleUpload,
-)
+from mentalmodel.remote.backend import RemoteBackendConfig, RemoteProjectStore, RemoteRunStore
+from mentalmodel.remote.contracts import ProjectCatalog, RemoteProjectLinkRequest
+from mentalmodel.remote.store import FileRemoteRunStore, RunBundleUpload
 from mentalmodel.ui.catalog import DashboardCatalogEntry
 from mentalmodel.ui.service import DashboardService
 
@@ -28,6 +25,8 @@ def create_dashboard_app(
     project_catalogs: tuple[ProjectCatalog, ...] | None = None,
     remote_backend_config: RemoteBackendConfig | None = None,
     remote_run_store: RemoteRunStore | None = None,
+    remote_project_store: RemoteProjectStore | None = None,
+    remote_api_key: str | None = None,
 ) -> FastAPI:
     """Create the Phase 26 dashboard API and optional static frontend host."""
 
@@ -40,11 +39,21 @@ def create_dashboard_app(
             else RemoteRunStore.from_config(remote_backend_config)
         )
     )
+    configured_remote_project_store = (
+        remote_project_store
+        if remote_project_store is not None
+        else (
+            None
+            if remote_backend_config is None
+            else RemoteProjectStore.from_config(remote_backend_config)
+        )
+    )
     service = DashboardService(
         runs_dir=runs_dir,
         catalog_entries=catalog_entries,
         project_catalogs=project_catalogs,
         remote_run_store=configured_remote_store,
+        remote_project_store=configured_remote_project_store,
     )
     ingest_store = (
         configured_remote_store
@@ -58,6 +67,16 @@ def create_dashboard_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    required_api_key = remote_api_key or os.environ.get("MENTALMODEL_REMOTE_API_KEY")
+
+    def require_remote_auth(
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> None:
+        if required_api_key in (None, ""):
+            return
+        expected = f"Bearer {required_api_key}"
+        if authorization != expected:
+            raise HTTPException(status_code=401, detail="Unauthorized remote API request.")
 
     @app.get("/api/health")
     def health() -> object:
@@ -71,9 +90,59 @@ def create_dashboard_app(
     def list_projects() -> object:
         return {"projects": list(service.list_projects())}
 
+    @app.post("/api/remote/projects/link", response_model=None)
+    def link_remote_project(
+        payload: Annotated[dict[str, object], Body()],
+        _auth: None = Depends(require_remote_auth),
+    ) -> object:
+        if configured_remote_project_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote project link requires remote backend configuration.",
+            )
+        try:
+            request_payload = RemoteProjectLinkRequest.from_dict(payload)
+            project = configured_remote_project_store.link_project(request_payload)
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"project": project.as_dict(include_catalog_snapshot=True)}
+
+    @app.get("/api/remote/projects", response_model=None)
+    def list_remote_projects(
+        _auth: None = Depends(require_remote_auth),
+    ) -> object:
+        if configured_remote_project_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote project listing requires remote backend configuration.",
+            )
+        return {
+            "projects": [
+                project.as_dict(include_catalog_snapshot=False)
+                for project in configured_remote_project_store.list_projects()
+            ]
+        }
+
+    @app.get("/api/remote/projects/{project_id}", response_model=None)
+    def get_remote_project(
+        project_id: str,
+        _auth: None = Depends(require_remote_auth),
+    ) -> object:
+        if configured_remote_project_store is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Remote project status requires remote backend configuration.",
+            )
+        try:
+            project = configured_remote_project_store.get_project(project_id=project_id)
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"project": project.as_dict(include_catalog_snapshot=True)}
+
     @app.post("/api/remote/runs", response_model=None)
     def ingest_remote_run(
         payload: Annotated[dict[str, object], Body()],
+        _auth: None = Depends(require_remote_auth),
     ) -> object:
         if ingest_store is None:
             raise HTTPException(

@@ -219,7 +219,11 @@ class RunManifest:
                 raise RemoteContractError(
                     "RunManifest.completed_at_ms cannot be earlier than created_at_ms."
                 )
-        if self.status in {RunManifestStatus.SEALED, RunManifestStatus.INDEXED, RunManifestStatus.FAILED}:
+        if self.status in {
+            RunManifestStatus.SEALED,
+            RunManifestStatus.INDEXED,
+            RunManifestStatus.FAILED,
+        }:
             if self.completed_at_ms is None:
                 raise RemoteContractError(
                     "Terminal RunManifest statuses require completed_at_ms."
@@ -391,7 +395,7 @@ class ProjectCatalog:
     """Resolved catalog metadata for one registered project."""
 
     project: ProjectRegistration
-    entries: tuple["DashboardCatalogEntry", ...] = ()
+    entries: tuple[DashboardCatalogEntry, ...] = ()
     description: str = ""
     default_entry_id: str | None = None
 
@@ -402,7 +406,7 @@ class ProjectCatalog:
         object.__setattr__(
             self,
             "entries",
-            cast(tuple["DashboardCatalogEntry", ...], normalized),
+            normalized,
         )
         if self.default_entry_id is not None:
             entry_ids = {entry.spec_id for entry in normalized}
@@ -417,6 +421,370 @@ class ProjectCatalogProvider(Protocol):
 
     def __call__(self) -> ProjectCatalog:
         """Return one validated project catalog."""
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectCatalogSnapshot:
+    """Serialized hosted-dashboard contract for one linked project."""
+
+    project_id: str
+    provider: str
+    published_at_ms: int
+    entries: tuple[dict[str, object], ...] = ()
+    description: str = ""
+    default_entry_id: str | None = None
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.project_id, "ProjectCatalogSnapshot.project_id")
+        if not self.provider:
+            raise RemoteContractError("ProjectCatalogSnapshot.provider cannot be empty.")
+        _require_non_negative(
+            self.published_at_ms,
+            "ProjectCatalogSnapshot.published_at_ms",
+        )
+        if self.version < 1:
+            raise RemoteContractError("ProjectCatalogSnapshot.version must be >= 1.")
+        entry_ids: set[str] = set()
+        for entry in self.entries:
+            if not isinstance(entry, dict):
+                raise RemoteContractError(
+                    "ProjectCatalogSnapshot.entries must contain JSON-object entries."
+                )
+            spec_id = entry.get("spec_id")
+            label = entry.get("label")
+            graph_id = entry.get("graph_id")
+            invocation_name = entry.get("invocation_name")
+            if not isinstance(spec_id, str) or not spec_id:
+                raise RemoteContractError(
+                    "ProjectCatalogSnapshot entries require a non-empty spec_id."
+                )
+            if spec_id in entry_ids:
+                raise RemoteContractError(
+                    f"Duplicate ProjectCatalogSnapshot spec_id {spec_id!r}."
+                )
+            entry_ids.add(spec_id)
+            if not isinstance(label, str) or not label:
+                raise RemoteContractError(
+                    "ProjectCatalogSnapshot entries require a non-empty label."
+                )
+            if not isinstance(graph_id, str) or not graph_id:
+                raise RemoteContractError(
+                    "ProjectCatalogSnapshot entries require a non-empty graph_id."
+                )
+            if not isinstance(invocation_name, str) or not invocation_name:
+                raise RemoteContractError(
+                    "ProjectCatalogSnapshot entries require a non-empty invocation_name."
+                )
+        if self.default_entry_id is not None and self.default_entry_id not in entry_ids:
+            raise RemoteContractError(
+                "ProjectCatalogSnapshot.default_entry_id must reference one of the entries."
+            )
+
+    @property
+    def entry_count(self) -> int:
+        return len(self.entries)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "project_id": self.project_id,
+            "provider": self.provider,
+            "published_at_ms": self.published_at_ms,
+            "entries": [dict(entry) for entry in self.entries],
+            "description": self.description,
+            "default_entry_id": self.default_entry_id,
+            "version": self.version,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> ProjectCatalogSnapshot:
+        project_id = payload.get("project_id")
+        provider = payload.get("provider")
+        published_at_ms = payload.get("published_at_ms")
+        entries = payload.get("entries", [])
+        description = payload.get("description", "")
+        default_entry_id = payload.get("default_entry_id")
+        version = payload.get("version", 1)
+        if not isinstance(project_id, str):
+            raise RemoteContractError("ProjectCatalogSnapshot.project_id must be a string.")
+        if not isinstance(provider, str):
+            raise RemoteContractError("ProjectCatalogSnapshot.provider must be a string.")
+        if not isinstance(published_at_ms, int):
+            raise RemoteContractError(
+                "ProjectCatalogSnapshot.published_at_ms must be an integer."
+            )
+        if not isinstance(entries, list):
+            raise RemoteContractError("ProjectCatalogSnapshot.entries must be a list.")
+        if not isinstance(description, str):
+            raise RemoteContractError("ProjectCatalogSnapshot.description must be a string.")
+        if default_entry_id is not None and not isinstance(default_entry_id, str):
+            raise RemoteContractError(
+                "ProjectCatalogSnapshot.default_entry_id must be a string when present."
+            )
+        if not isinstance(version, int):
+            raise RemoteContractError("ProjectCatalogSnapshot.version must be an integer.")
+        normalized_entries: list[dict[str, object]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise RemoteContractError(
+                    "ProjectCatalogSnapshot.entries must contain JSON-object entries."
+                )
+            normalized_entries.append(dict(entry))
+        return cls(
+            project_id=project_id,
+            provider=provider,
+            published_at_ms=published_at_ms,
+            entries=tuple(normalized_entries),
+            description=description,
+            default_entry_id=default_entry_id,
+            version=version,
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class RemoteProjectLinkRequest:
+    """Repo-owned project declaration sent to the remote service."""
+
+    project_id: str
+    label: str
+    description: str = ""
+    default_environment: str | None = None
+    catalog_provider: str | None = None
+    default_runs_dir: str | None = None
+    default_verify_spec: str | None = None
+    catalog_snapshot: ProjectCatalogSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.project_id, "RemoteProjectLinkRequest.project_id")
+        if not self.label:
+            raise RemoteContractError("RemoteProjectLinkRequest.label cannot be empty.")
+        if self.default_environment == "":
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.default_environment cannot be empty."
+            )
+        if self.catalog_provider == "":
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.catalog_provider cannot be empty."
+            )
+        if self.default_runs_dir == "":
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.default_runs_dir cannot be empty."
+            )
+        if self.default_verify_spec == "":
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.default_verify_spec cannot be empty."
+            )
+        if (
+            self.catalog_snapshot is not None
+            and self.catalog_snapshot.project_id != self.project_id
+        ):
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.catalog_snapshot project_id mismatch."
+            )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "project_id": self.project_id,
+            "label": self.label,
+            "description": self.description,
+            "default_environment": self.default_environment,
+            "catalog_provider": self.catalog_provider,
+            "default_runs_dir": self.default_runs_dir,
+            "default_verify_spec": self.default_verify_spec,
+            "catalog_snapshot": (
+                None if self.catalog_snapshot is None else self.catalog_snapshot.as_dict()
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RemoteProjectLinkRequest:
+        project_id = payload.get("project_id")
+        label = payload.get("label")
+        description = payload.get("description", "")
+        default_environment = payload.get("default_environment")
+        catalog_provider = payload.get("catalog_provider")
+        default_runs_dir = payload.get("default_runs_dir")
+        default_verify_spec = payload.get("default_verify_spec")
+        snapshot_payload = payload.get("catalog_snapshot")
+        if not isinstance(project_id, str):
+            raise RemoteContractError("RemoteProjectLinkRequest.project_id must be a string.")
+        if not isinstance(label, str):
+            raise RemoteContractError("RemoteProjectLinkRequest.label must be a string.")
+        if not isinstance(description, str):
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.description must be a string."
+            )
+        if default_environment is not None and not isinstance(default_environment, str):
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.default_environment must be a string when present."
+            )
+        if catalog_provider is not None and not isinstance(catalog_provider, str):
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.catalog_provider must be a string when present."
+            )
+        if default_runs_dir is not None and not isinstance(default_runs_dir, str):
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.default_runs_dir must be a string when present."
+            )
+        if default_verify_spec is not None and not isinstance(default_verify_spec, str):
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.default_verify_spec must be a string when present."
+            )
+        if snapshot_payload is not None and not isinstance(snapshot_payload, dict):
+            raise RemoteContractError(
+                "RemoteProjectLinkRequest.catalog_snapshot must be a JSON object when present."
+            )
+        return cls(
+            project_id=project_id,
+            label=label,
+            description=description,
+            default_environment=default_environment,
+            catalog_provider=catalog_provider,
+            default_runs_dir=default_runs_dir,
+            default_verify_spec=default_verify_spec,
+            catalog_snapshot=(
+                None
+                if snapshot_payload is None
+                else ProjectCatalogSnapshot.from_dict(snapshot_payload)
+            ),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class RemoteProjectRecord:
+    """Service-owned remote project record for one linked repo."""
+
+    project_id: str
+    label: str
+    linked_at_ms: int
+    updated_at_ms: int
+    description: str = ""
+    default_environment: str | None = None
+    catalog_provider: str | None = None
+    default_runs_dir: str | None = None
+    default_verify_spec: str | None = None
+    catalog_snapshot: ProjectCatalogSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.project_id, "RemoteProjectRecord.project_id")
+        if not self.label:
+            raise RemoteContractError("RemoteProjectRecord.label cannot be empty.")
+        _require_non_negative(self.linked_at_ms, "RemoteProjectRecord.linked_at_ms")
+        _require_non_negative(self.updated_at_ms, "RemoteProjectRecord.updated_at_ms")
+        if self.updated_at_ms < self.linked_at_ms:
+            raise RemoteContractError(
+                "RemoteProjectRecord.updated_at_ms cannot be earlier than linked_at_ms."
+            )
+        if self.default_environment == "":
+            raise RemoteContractError("RemoteProjectRecord.default_environment cannot be empty.")
+        if self.catalog_provider == "":
+            raise RemoteContractError("RemoteProjectRecord.catalog_provider cannot be empty.")
+        if self.default_runs_dir == "":
+            raise RemoteContractError("RemoteProjectRecord.default_runs_dir cannot be empty.")
+        if self.default_verify_spec == "":
+            raise RemoteContractError("RemoteProjectRecord.default_verify_spec cannot be empty.")
+        if (
+            self.catalog_snapshot is not None
+            and self.catalog_snapshot.project_id != self.project_id
+        ):
+            raise RemoteContractError("RemoteProjectRecord.catalog_snapshot project_id mismatch.")
+
+    @property
+    def catalog_published(self) -> bool:
+        return self.catalog_snapshot is not None
+
+    @property
+    def catalog_entry_count(self) -> int:
+        return 0 if self.catalog_snapshot is None else self.catalog_snapshot.entry_count
+
+    @property
+    def catalog_published_at_ms(self) -> int | None:
+        return None if self.catalog_snapshot is None else self.catalog_snapshot.published_at_ms
+
+    @property
+    def catalog_version(self) -> int | None:
+        return None if self.catalog_snapshot is None else self.catalog_snapshot.version
+
+    def as_dict(self, *, include_catalog_snapshot: bool = False) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "project_id": self.project_id,
+            "label": self.label,
+            "description": self.description,
+            "default_environment": self.default_environment,
+            "catalog_provider": self.catalog_provider,
+            "default_runs_dir": self.default_runs_dir,
+            "default_verify_spec": self.default_verify_spec,
+            "linked_at_ms": self.linked_at_ms,
+            "updated_at_ms": self.updated_at_ms,
+            "catalog_published": self.catalog_published,
+            "catalog_entry_count": self.catalog_entry_count,
+            "catalog_published_at_ms": self.catalog_published_at_ms,
+            "catalog_version": self.catalog_version,
+        }
+        if include_catalog_snapshot:
+            payload["catalog_snapshot"] = (
+                None if self.catalog_snapshot is None else self.catalog_snapshot.as_dict()
+            )
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RemoteProjectRecord:
+        project_id = payload.get("project_id")
+        label = payload.get("label")
+        linked_at_ms = payload.get("linked_at_ms")
+        updated_at_ms = payload.get("updated_at_ms")
+        description = payload.get("description", "")
+        default_environment = payload.get("default_environment")
+        catalog_provider = payload.get("catalog_provider")
+        default_runs_dir = payload.get("default_runs_dir")
+        default_verify_spec = payload.get("default_verify_spec")
+        snapshot_payload = payload.get("catalog_snapshot")
+        if not isinstance(project_id, str):
+            raise RemoteContractError("RemoteProjectRecord.project_id must be a string.")
+        if not isinstance(label, str):
+            raise RemoteContractError("RemoteProjectRecord.label must be a string.")
+        if not isinstance(linked_at_ms, int):
+            raise RemoteContractError("RemoteProjectRecord.linked_at_ms must be an integer.")
+        if not isinstance(updated_at_ms, int):
+            raise RemoteContractError("RemoteProjectRecord.updated_at_ms must be an integer.")
+        if not isinstance(description, str):
+            raise RemoteContractError("RemoteProjectRecord.description must be a string.")
+        if default_environment is not None and not isinstance(default_environment, str):
+            raise RemoteContractError(
+                "RemoteProjectRecord.default_environment must be a string when present."
+            )
+        if catalog_provider is not None and not isinstance(catalog_provider, str):
+            raise RemoteContractError(
+                "RemoteProjectRecord.catalog_provider must be a string when present."
+            )
+        if default_runs_dir is not None and not isinstance(default_runs_dir, str):
+            raise RemoteContractError(
+                "RemoteProjectRecord.default_runs_dir must be a string when present."
+            )
+        if default_verify_spec is not None and not isinstance(default_verify_spec, str):
+            raise RemoteContractError(
+                "RemoteProjectRecord.default_verify_spec must be a string when present."
+            )
+        if snapshot_payload is not None and not isinstance(snapshot_payload, dict):
+            raise RemoteContractError(
+                "RemoteProjectRecord.catalog_snapshot must be a JSON object when present."
+            )
+        return cls(
+            project_id=project_id,
+            label=label,
+            linked_at_ms=linked_at_ms,
+            updated_at_ms=updated_at_ms,
+            description=description,
+            default_environment=default_environment,
+            catalog_provider=catalog_provider,
+            default_runs_dir=default_runs_dir,
+            default_verify_spec=default_verify_spec,
+            catalog_snapshot=(
+                None
+                if snapshot_payload is None
+                else ProjectCatalogSnapshot.from_dict(snapshot_payload)
+            ),
+        )
 
 
 @dataclass(slots=True, frozen=True)

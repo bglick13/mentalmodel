@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from urllib import request
 
-from mentalmodel.remote.contracts import CatalogSource, RunManifest, RemoteContractError
+from mentalmodel.remote.contracts import CatalogSource, RemoteContractError, RunManifest
 from mentalmodel.remote.store import RunBundleUpload, UploadedArtifact
 from mentalmodel.runtime.runs import (
     build_run_manifest_from_summary,
@@ -94,6 +94,7 @@ def sync_runs_to_server(
 ) -> tuple[RunManifest, ...]:
     """Sync one or more local run bundles to the remote ingest API."""
 
+    uploads: tuple[RunBundleUpload, ...]
     if run_id is not None:
         uploads = (
             build_run_bundle_upload(

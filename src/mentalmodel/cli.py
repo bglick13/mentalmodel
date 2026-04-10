@@ -52,21 +52,28 @@ from mentalmodel.invocation import (
 )
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.observability import load_tracing_config, write_otel_demo
-from mentalmodel.remote import (
-    CatalogSource,
+from mentalmodel.remote.backend import (
     RemoteBackendConfig,
     RemoteCompletedRunSink,
     RemoteRunStore,
-    find_project_registration,
-    load_workspace_config,
-    sync_runs_to_server,
 )
 from mentalmodel.remote.bootstrap import build_remote_doctor_report, write_remote_demo
-from mentalmodel.remote.contracts import ProjectRegistration, WorkspaceConfig
+from mentalmodel.remote.contracts import CatalogSource, ProjectRegistration, WorkspaceConfig
+from mentalmodel.remote.project_config import (
+    load_discovered_project_config,
+    load_project_config,
+)
+from mentalmodel.remote.projects import (
+    fetch_remote_project_status,
+    link_project_to_server,
+)
+from mentalmodel.remote.sync import sync_runs_to_server
 from mentalmodel.remote.workspace import (
     ProjectRunTarget,
     build_project_run_target,
+    find_project_registration,
     find_project_registration_for_path,
+    load_workspace_config,
     upsert_project_registration,
     write_workspace_config,
 )
@@ -85,7 +92,7 @@ from mentalmodel.runtime.runs import (
 from mentalmodel.skills import build_install_plan, install_skills
 from mentalmodel.testing import execute_program, run_verification
 from mentalmodel.ui.api import create_dashboard_app
-from mentalmodel.ui.catalog import load_dashboard_catalog_subject
+from mentalmodel.ui.catalog import DashboardCatalogEntry, load_dashboard_catalog_subject
 from mentalmodel.ui.workspace import load_project_catalog_subject, workspace_project_catalogs
 
 DEFAULT_VERIFY_ENTRYPOINT = "mentalmodel.examples.async_rl.demo:build_program"
@@ -305,7 +312,7 @@ def run_ui(
 
     import uvicorn
 
-    catalog_entries: tuple[object, ...] | None = None
+    catalog_entries: tuple[DashboardCatalogEntry, ...] | None = None
     project_catalogs = None
     if workspace_config is not None:
         workspace = load_workspace_config(workspace_config)
@@ -874,6 +881,90 @@ def run_remote_sync(
             manifest.run_id,
             manifest.project_id or "",
         )
+    Console().print(table)
+    return 0
+
+
+def run_remote_link(
+    *,
+    config: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Link one repo-owned mentalmodel project to a remote service."""
+
+    project_config = (
+        load_project_config(config)
+        if config is not None
+        else load_discovered_project_config()
+    )
+    project = link_project_to_server(project_config)
+    payload = {
+        "config_path": str(project_config.config_path),
+        "repo_root": str(project_config.repo_root),
+        "server_url": project_config.server_url,
+        "project": project.as_dict(include_catalog_snapshot=True),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel remote link")
+    table.add_column("Project")
+    table.add_column("Server")
+    table.add_column("Catalog")
+    table.add_row(
+        project.project_id,
+        project_config.server_url,
+        (
+            f"published ({project.catalog_entry_count} entries)"
+            if project.catalog_published
+            else "not published"
+        ),
+    )
+    Console().print(table)
+    return 0
+
+
+def run_remote_status(
+    *,
+    config: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Read remote project link status for one repo-owned mentalmodel project."""
+
+    project_config = (
+        load_project_config(config)
+        if config is not None
+        else load_discovered_project_config()
+    )
+    project = fetch_remote_project_status(project_config)
+    payload = {
+        "config_path": str(project_config.config_path),
+        "repo_root": str(project_config.repo_root),
+        "server_url": project_config.server_url,
+        "project": project.as_dict(include_catalog_snapshot=False),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    table = Table(title="mentalmodel remote status")
+    table.add_column("Project")
+    table.add_column("Server")
+    table.add_column("Linked")
+    table.add_column("Updated")
+    table.add_column("Catalog")
+    table.add_row(
+        project.project_id,
+        project_config.server_url,
+        str(project.linked_at_ms),
+        str(project.updated_at_ms),
+        (
+            f"published ({project.catalog_entry_count} entries)"
+            if project.catalog_published
+            else "not published"
+        ),
+    )
     Console().print(table)
     return 0
 
@@ -2281,6 +2372,20 @@ def build_parser() -> argparse.ArgumentParser:
     remote_subparsers = remote.add_subparsers(dest="remote_command")
     remote_subparsers.required = True
 
+    remote_link = remote_subparsers.add_parser(
+        "link",
+        help="Link the current repo-owned mentalmodel project to a remote service.",
+    )
+    remote_link.add_argument("--config", type=Path)
+    remote_link.add_argument("--json", action="store_true", help="Emit JSON output.")
+
+    remote_status = remote_subparsers.add_parser(
+        "status",
+        help="Read remote link status for the current repo-owned project.",
+    )
+    remote_status.add_argument("--config", type=Path)
+    remote_status.add_argument("--json", action="store_true", help="Emit JSON output.")
+
     remote_sync = remote_subparsers.add_parser(
         "sync",
         help="Sync persisted local runs to the remote ingest API.",
@@ -2569,6 +2674,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     json_output=args.json,
                 )
         if args.command == "remote":
+            if args.remote_command == "link":
+                return run_remote_link(
+                    config=args.config,
+                    json_output=args.json,
+                )
+            if args.remote_command == "status":
+                return run_remote_status(
+                    config=args.config,
+                    json_output=args.json,
+                )
             if args.remote_command == "sync":
                 return run_remote_sync(
                     server_url=args.server_url,

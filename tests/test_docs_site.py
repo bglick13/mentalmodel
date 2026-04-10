@@ -90,3 +90,15 @@ class DocsSiteTest(unittest.TestCase):
         self.assertIn("review_workflow", guide)
         self.assertIn("graph.json", guide)
         self.assertIn("dev:stack", guide)
+
+    def test_remote_docs_cover_repo_linked_phase_one(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        remote_page = (repo_root / "cli" / "remote.mdx").read_text(encoding="utf-8")
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("mentalmodel.toml", remote_page)
+        self.assertIn("mentalmodel remote link", remote_page)
+        self.assertIn("mentalmodel remote status", remote_page)
+        self.assertIn("repo-owned", remote_page)
+        self.assertIn("mentalmodel remote link", readme)
+        self.assertIn("mentalmodel remote status", readme)
