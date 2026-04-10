@@ -25,7 +25,7 @@ from mentalmodel.remote.contracts import (
     RunManifest,
     RunManifestStatus,
 )
-from mentalmodel.remote.sinks import CompletedRunSink
+from mentalmodel.remote.sinks import CompletedRunPublishResult, CompletedRunSink
 from mentalmodel.remote.store import RunBundleUpload
 from mentalmodel.remote.sync import build_run_bundle_upload_from_run_dir
 from mentalmodel.runtime.runs import (
@@ -126,6 +126,16 @@ class ProjectIndex(Protocol):
         payload: RemoteProjectCatalogPublishRequest,
     ) -> RemoteProjectRecord: ...
 
+    def record_completed_run_upload(
+        self,
+        *,
+        project_id: str,
+        graph_id: str,
+        run_id: str,
+        invocation_name: str | None,
+        uploaded_at_ms: int,
+    ) -> RemoteProjectRecord: ...
+
     def get_project(self, *, project_id: str) -> RemoteProjectRecord: ...
 
     def list_projects(self) -> tuple[RemoteProjectRecord, ...]: ...
@@ -216,6 +226,24 @@ class InMemoryProjectIndex:
             default_runs_dir=payload.default_runs_dir,
             default_verify_spec=payload.default_verify_spec,
             catalog_snapshot=payload.catalog_snapshot,
+            last_completed_run_upload_at_ms=(
+                None
+                if existing is None
+                else existing.last_completed_run_upload_at_ms
+            ),
+            last_completed_run_graph_id=(
+                None
+                if existing is None
+                else existing.last_completed_run_graph_id
+            ),
+            last_completed_run_id=(
+                None if existing is None else existing.last_completed_run_id
+            ),
+            last_completed_run_invocation_name=(
+                None
+                if existing is None
+                else existing.last_completed_run_invocation_name
+            ),
         )
         self._rows[payload.project_id] = record
         return record
@@ -251,8 +279,41 @@ class InMemoryProjectIndex:
             default_runs_dir=existing.default_runs_dir,
             default_verify_spec=existing.default_verify_spec,
             catalog_snapshot=payload.catalog_snapshot,
+            last_completed_run_upload_at_ms=existing.last_completed_run_upload_at_ms,
+            last_completed_run_graph_id=existing.last_completed_run_graph_id,
+            last_completed_run_id=existing.last_completed_run_id,
+            last_completed_run_invocation_name=existing.last_completed_run_invocation_name,
         )
         self._rows[payload.project_id] = updated
+        return updated
+
+    def record_completed_run_upload(
+        self,
+        *,
+        project_id: str,
+        graph_id: str,
+        run_id: str,
+        invocation_name: str | None,
+        uploaded_at_ms: int,
+    ) -> RemoteProjectRecord:
+        existing = self.get_project(project_id=project_id)
+        updated = RemoteProjectRecord(
+            project_id=existing.project_id,
+            label=existing.label,
+            linked_at_ms=existing.linked_at_ms,
+            updated_at_ms=uploaded_at_ms,
+            description=existing.description,
+            default_environment=existing.default_environment,
+            catalog_provider=existing.catalog_provider,
+            default_runs_dir=existing.default_runs_dir,
+            default_verify_spec=existing.default_verify_spec,
+            catalog_snapshot=existing.catalog_snapshot,
+            last_completed_run_upload_at_ms=uploaded_at_ms,
+            last_completed_run_graph_id=graph_id,
+            last_completed_run_id=run_id,
+            last_completed_run_invocation_name=invocation_name,
+        )
+        self._rows[project_id] = updated
         return updated
 
 
@@ -532,9 +593,15 @@ class PostgresProjectIndex:
                     catalog_snapshot_json,
                     catalog_entry_count,
                     catalog_published_at_ms,
-                    catalog_version
+                    catalog_version,
+                    last_completed_run_upload_at_ms,
+                    last_completed_run_graph_id,
+                    last_completed_run_id,
+                    last_completed_run_invocation_name
                 )
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                values (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s
+                )
                 on conflict (project_id) do update
                 set
                     label = excluded.label,
@@ -558,7 +625,11 @@ class PostgresProjectIndex:
                     default_verify_spec,
                     linked_at_ms,
                     updated_at_ms,
-                    catalog_snapshot_json::text
+                    catalog_snapshot_json::text,
+                    last_completed_run_upload_at_ms,
+                    last_completed_run_graph_id,
+                    last_completed_run_id,
+                    last_completed_run_invocation_name
                 """,
                 (
                     payload.project_id,
@@ -586,6 +657,10 @@ class PostgresProjectIndex:
                         if payload.catalog_snapshot is None
                         else payload.catalog_snapshot.version
                     ),
+                    None,
+                    None,
+                    None,
+                    None,
                 ),
             ).fetchone()
             conn.commit()
@@ -601,6 +676,10 @@ class PostgresProjectIndex:
             linked_at_ms=cast(int, row[7]),
             updated_at_ms=cast(int, row[8]),
             catalog_snapshot_json=cast(str | None, row[9]),
+            last_completed_run_upload_at_ms=cast(int | None, row[10]),
+            last_completed_run_graph_id=cast(str | None, row[11]),
+            last_completed_run_id=cast(str | None, row[12]),
+            last_completed_run_invocation_name=cast(str | None, row[13]),
         )
 
     def get_project(self, *, project_id: str) -> RemoteProjectRecord:
@@ -618,7 +697,11 @@ class PostgresProjectIndex:
                     default_verify_spec,
                     linked_at_ms,
                     updated_at_ms,
-                    catalog_snapshot_json::text
+                    catalog_snapshot_json::text,
+                    last_completed_run_upload_at_ms,
+                    last_completed_run_graph_id,
+                    last_completed_run_id,
+                    last_completed_run_invocation_name
                 from remote_projects
                 where project_id = %s
                 """,
@@ -637,6 +720,10 @@ class PostgresProjectIndex:
             linked_at_ms=cast(int, row[7]),
             updated_at_ms=cast(int, row[8]),
             catalog_snapshot_json=cast(str | None, row[9]),
+            last_completed_run_upload_at_ms=cast(int | None, row[10]),
+            last_completed_run_graph_id=cast(str | None, row[11]),
+            last_completed_run_id=cast(str | None, row[12]),
+            last_completed_run_invocation_name=cast(str | None, row[13]),
         )
 
     def publish_catalog(
@@ -668,7 +755,11 @@ class PostgresProjectIndex:
                     default_verify_spec,
                     linked_at_ms,
                     updated_at_ms,
-                    catalog_snapshot_json::text
+                    catalog_snapshot_json::text,
+                    last_completed_run_upload_at_ms,
+                    last_completed_run_graph_id,
+                    last_completed_run_id,
+                    last_completed_run_invocation_name
                 """,
                 (
                     payload.catalog_provider,
@@ -694,6 +785,10 @@ class PostgresProjectIndex:
             linked_at_ms=cast(int, row[7]),
             updated_at_ms=cast(int, row[8]),
             catalog_snapshot_json=cast(str | None, row[9]),
+            last_completed_run_upload_at_ms=cast(int | None, row[10]),
+            last_completed_run_graph_id=cast(str | None, row[11]),
+            last_completed_run_id=cast(str | None, row[12]),
+            last_completed_run_invocation_name=cast(str | None, row[13]),
         )
 
     def list_projects(self) -> tuple[RemoteProjectRecord, ...]:
@@ -711,7 +806,11 @@ class PostgresProjectIndex:
                     default_verify_spec,
                     linked_at_ms,
                     updated_at_ms,
-                    catalog_snapshot_json::text
+                    catalog_snapshot_json::text,
+                    last_completed_run_upload_at_ms,
+                    last_completed_run_graph_id,
+                    last_completed_run_id,
+                    last_completed_run_invocation_name
                 from remote_projects
                 order by updated_at_ms desc, project_id desc
                 """
@@ -728,8 +827,78 @@ class PostgresProjectIndex:
                 linked_at_ms=cast(int, row[7]),
                 updated_at_ms=cast(int, row[8]),
                 catalog_snapshot_json=cast(str | None, row[9]),
+                last_completed_run_upload_at_ms=cast(int | None, row[10]),
+                last_completed_run_graph_id=cast(str | None, row[11]),
+                last_completed_run_id=cast(str | None, row[12]),
+                last_completed_run_invocation_name=cast(str | None, row[13]),
             )
             for row in rows
+        )
+
+    def record_completed_run_upload(
+        self,
+        *,
+        project_id: str,
+        graph_id: str,
+        run_id: str,
+        invocation_name: str | None,
+        uploaded_at_ms: int,
+    ) -> RemoteProjectRecord:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            row = conn.execute(
+                """
+                update remote_projects
+                set
+                    updated_at_ms = %s,
+                    last_completed_run_upload_at_ms = %s,
+                    last_completed_run_graph_id = %s,
+                    last_completed_run_id = %s,
+                    last_completed_run_invocation_name = %s
+                where project_id = %s
+                returning
+                    project_id,
+                    label,
+                    description,
+                    default_environment,
+                    catalog_provider,
+                    default_runs_dir,
+                    default_verify_spec,
+                    linked_at_ms,
+                    updated_at_ms,
+                    catalog_snapshot_json::text,
+                    last_completed_run_upload_at_ms,
+                    last_completed_run_graph_id,
+                    last_completed_run_id,
+                    last_completed_run_invocation_name
+                """,
+                (
+                    uploaded_at_ms,
+                    uploaded_at_ms,
+                    graph_id,
+                    run_id,
+                    invocation_name,
+                    project_id,
+                ),
+            ).fetchone()
+            conn.commit()
+        if row is None:
+            raise RemoteContractError(f"Unknown remote project {project_id!r}.")
+        return _remote_project_from_row(
+            project_id=cast(str, row[0]),
+            label=cast(str, row[1]),
+            description=cast(str, row[2]),
+            default_environment=cast(str | None, row[3]),
+            catalog_provider=cast(str | None, row[4]),
+            default_runs_dir=cast(str | None, row[5]),
+            default_verify_spec=cast(str | None, row[6]),
+            linked_at_ms=cast(int, row[7]),
+            updated_at_ms=cast(int, row[8]),
+            catalog_snapshot_json=cast(str | None, row[9]),
+            last_completed_run_upload_at_ms=cast(int | None, row[10]),
+            last_completed_run_graph_id=cast(str | None, row[11]),
+            last_completed_run_id=cast(str | None, row[12]),
+            last_completed_run_invocation_name=cast(str | None, row[13]),
         )
 
     def _ensure_schema(self) -> None:
@@ -752,9 +921,29 @@ class PostgresProjectIndex:
                         catalog_snapshot_json jsonb,
                         catalog_entry_count integer not null default 0,
                         catalog_published_at_ms bigint,
-                        catalog_version integer
+                        catalog_version integer,
+                        last_completed_run_upload_at_ms bigint,
+                        last_completed_run_graph_id text,
+                        last_completed_run_id text,
+                        last_completed_run_invocation_name text
                     )
                     """
+                )
+                conn.execute(
+                    "alter table remote_projects add column if not exists "
+                    "last_completed_run_upload_at_ms bigint"
+                )
+                conn.execute(
+                    "alter table remote_projects add column if not exists "
+                    "last_completed_run_graph_id text"
+                )
+                conn.execute(
+                    "alter table remote_projects add column if not exists "
+                    "last_completed_run_id text"
+                )
+                conn.execute(
+                    "alter table remote_projects add column if not exists "
+                    "last_completed_run_invocation_name text"
                 )
                 conn.execute(
                     "create index if not exists idx_remote_projects_updated_at "
@@ -911,6 +1100,23 @@ class RemoteProjectStore:
     ) -> RemoteProjectRecord:
         return self._project_index.publish_catalog(payload)
 
+    def record_completed_run_upload(
+        self,
+        *,
+        project_id: str,
+        graph_id: str,
+        run_id: str,
+        invocation_name: str | None,
+        uploaded_at_ms: int,
+    ) -> RemoteProjectRecord:
+        return self._project_index.record_completed_run_upload(
+            project_id=project_id,
+            graph_id=graph_id,
+            run_id=run_id,
+            invocation_name=invocation_name,
+            uploaded_at_ms=uploaded_at_ms,
+        )
+
     def get_project(self, *, project_id: str) -> RemoteProjectRecord:
         return self._project_index.get_project(project_id=project_id)
 
@@ -938,11 +1144,16 @@ class RemoteCompletedRunSink(CompletedRunSink):
         self.catalog_entry_id = catalog_entry_id
         self.catalog_source = catalog_source
 
-    def publish(self, *, manifest: RunManifest, run_dir: Path) -> None:
+    def publish(
+        self,
+        *,
+        manifest: RunManifest,
+        run_dir: Path,
+    ) -> CompletedRunPublishResult:
         del manifest
-        self.publish_run_dir(run_dir)
+        return self.publish_run_dir(run_dir)
 
-    def publish_run_dir(self, run_dir: Path) -> Path:
+    def publish_run_dir(self, run_dir: Path) -> CompletedRunPublishResult:
         upload = build_run_bundle_upload_from_run_dir(
             run_dir=run_dir,
             project_id=self.project_id,
@@ -951,7 +1162,16 @@ class RemoteCompletedRunSink(CompletedRunSink):
             catalog_entry_id=self.catalog_entry_id,
             catalog_source=self.catalog_source,
         )
-        return self._remote_run_store.ingest(upload)
+        remote_run_dir = self._remote_run_store.ingest(upload)
+        return CompletedRunPublishResult(
+            transport="direct-store",
+            success=True,
+            graph_id=upload.manifest.graph_id,
+            run_id=upload.manifest.run_id,
+            project_id=upload.manifest.project_id,
+            remote_run_dir=str(remote_run_dir),
+            uploaded_at_ms=int(time.time() * 1000),
+        )
 
 
 def _validated_artifact_payloads(upload: RunBundleUpload) -> dict[str, bytes]:
@@ -1081,6 +1301,10 @@ def _remote_project_from_row(
     linked_at_ms: int,
     updated_at_ms: int,
     catalog_snapshot_json: str | None,
+    last_completed_run_upload_at_ms: int | None,
+    last_completed_run_graph_id: str | None,
+    last_completed_run_id: str | None,
+    last_completed_run_invocation_name: str | None,
 ) -> RemoteProjectRecord:
     snapshot = None
     if catalog_snapshot_json not in (None, ""):
@@ -1100,6 +1324,10 @@ def _remote_project_from_row(
         linked_at_ms=linked_at_ms,
         updated_at_ms=updated_at_ms,
         catalog_snapshot=snapshot,
+        last_completed_run_upload_at_ms=last_completed_run_upload_at_ms,
+        last_completed_run_graph_id=last_completed_run_graph_id,
+        last_completed_run_id=last_completed_run_id,
+        last_completed_run_invocation_name=last_completed_run_invocation_name,
     )
 
 

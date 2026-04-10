@@ -179,6 +179,27 @@ class RemoteStoreTest(unittest.TestCase):
         self.assertEqual(published.catalog_version, 2)
         self.assertEqual(published.catalog_entry_count, 1)
 
+    def test_remote_project_store_records_last_completed_run_upload(self) -> None:
+        store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        linked = store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                default_environment="prod",
+                catalog_provider="pangramanizer.dashboard:catalog",
+            )
+        )
+        updated = store.record_completed_run_upload(
+            project_id="pangramanizer",
+            graph_id="pangramanizer_training",
+            run_id="run-123",
+            invocation_name="pangram_real_smoke",
+            uploaded_at_ms=linked.linked_at_ms + 1,
+        )
+        self.assertEqual(updated.last_completed_run_upload_at_ms, linked.linked_at_ms + 1)
+        self.assertEqual(updated.last_completed_run_graph_id, "pangramanizer_training")
+        self.assertEqual(updated.last_completed_run_id, "run-123")
+
 
 if __name__ == "__main__":
     unittest.main()

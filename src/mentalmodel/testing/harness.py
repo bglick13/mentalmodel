@@ -15,10 +15,12 @@ from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import write_json
 from mentalmodel.observability.tracing import RecordedSpan, SpanListener
 from mentalmodel.remote import (
+    CompletedRunPublishResult,
     CompletedRunSink,
     ExecutionRecordSink,
     record_listener_for_sink,
 )
+from mentalmodel.remote.sync import failed_completed_run_publish
 from mentalmodel.runtime import AsyncExecutor, ExecutionRecorder, ExecutionResult
 from mentalmodel.runtime.events import INVARIANT_CHECKED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
@@ -50,6 +52,7 @@ class RuntimeVerificationResult:
     run_artifacts_dir: str | None = None
     invocation_name: str | None = None
     error: str | None = None
+    completed_run_upload: CompletedRunPublishResult | None = None
     invariant_failures: tuple[RuntimeInvariantFailure, ...] = ()
 
     @property
@@ -115,6 +118,11 @@ class VerificationReport:
                 "run_artifacts_dir": self.runtime.run_artifacts_dir,
                 "invocation_name": self.runtime.invocation_name,
                 "error": self.runtime.error,
+                "completed_run_upload": (
+                    None
+                    if self.runtime.completed_run_upload is None
+                    else self.runtime.completed_run_upload.as_dict()
+                ),
                 "warning_invariant_failures": [
                     failure.as_dict()
                     for failure in self.runtime.warning_invariant_failures
@@ -211,6 +219,7 @@ def run_verification(
     if not persist_run_artifacts:
         return report
 
+    completed_run_upload: CompletedRunPublishResult | None = None
     artifacts = write_run_artifacts(
         graph=graph,
         run_id=runtime_capture.result.run_id or "run-failed",
@@ -230,10 +239,17 @@ def run_verification(
         runtime_profile_names=runtime_capture.runtime_profile_names,
     )
     if completed_run_sink is not None:
-        completed_run_sink.publish(
-            manifest=artifacts.manifest,
-            run_dir=artifacts.run_dir,
-        )
+        try:
+            completed_run_upload = completed_run_sink.publish(
+                manifest=artifacts.manifest,
+                run_dir=artifacts.run_dir,
+            )
+        except Exception as exc:
+            completed_run_upload = failed_completed_run_publish(
+                transport=type(completed_run_sink).__name__,
+                manifest=artifacts.manifest,
+                error=exc,
+            )
     runtime = RuntimeVerificationResult(
         success=runtime_capture.result.success,
         record_count=runtime_capture.result.record_count,
@@ -243,6 +259,7 @@ def run_verification(
         run_artifacts_dir=str(artifacts.run_dir),
         invocation_name=runtime_capture.result.invocation_name,
         error=runtime_capture.result.error,
+        completed_run_upload=completed_run_upload,
         invariant_failures=runtime_capture.result.invariant_failures,
     )
     final_report = VerificationReport(

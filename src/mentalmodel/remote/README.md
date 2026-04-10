@@ -15,6 +15,7 @@ primitives for remote-compatible run handling:
 - repo-owned `mentalmodel.toml` project config loading
 - remote project records and catalog snapshot publication
 - dedicated catalog republish support for already linked projects
+- automatic completed-run upload from repo-linked `mentalmodel verify`
 - project-scoped catalog provider shape
 - canonical run bundle upload payloads
 - a deterministic file-backed remote ingest store
@@ -54,6 +55,8 @@ tests and local transition scenarios.
 - `RemoteBackendConfig`
 - `RemoteProjectStore`
 - `RemoteRunStore`
+- `RemoteRunUploadReceipt`
+- `RemoteServiceCompletedRunSink`
 - `FileRemoteRunStore`
 - `load_project_config`
 - `link_project_to_server`
@@ -93,6 +96,11 @@ tests and local transition scenarios.
    current catalog snapshot.
 9. `mentalmodel remote publish-catalog` republishes the hosted dashboard
    contract without relinking the whole project.
+10. In a linked repo, `mentalmodel verify` now writes the local canonical
+    `.runs` bundle first and then uploads that completed bundle automatically
+    through `POST /api/remote/runs`.
+11. `mentalmodel remote sync` remains the manual recovery and backfill path
+    when automatic upload fails or older local bundles need to be published.
 
 ## Verification
 

@@ -62,6 +62,7 @@ so you can confirm:
 - which server it is linked to
 - whether a catalog snapshot is published
 - how many catalog entries are currently stored remotely
+- which completed run was uploaded most recently
 
 This is intentionally separate from the older `workspace.toml` path. The local
 workspace registry is still useful for localhost and offline development, but
@@ -132,6 +133,30 @@ run upload or live streaming.
 
 The status payload now also surfaces catalog version and publish metadata, so
 you can confirm that the hosted dashboard is looking at the expected snapshot.
+In Phase 3 it also surfaces the last successful completed-run upload, so you
+can verify that normal `mentalmodel verify` executions are arriving remotely.
+
+## Normal completed-run flow
+
+In a linked repo, the normal operator path is now just:
+
+```bash
+uv run mentalmodel verify --spec path/to/spec.toml
+```
+
+When `mentalmodel.toml` is present and linked:
+
+- the workflow still writes the canonical local `.runs` bundle
+- after local bundle materialization succeeds, the completed run uploads to the
+  remote service automatically
+- `mentalmodel verify --json` includes `runtime.completed_run_upload` so you can
+  correlate the local bundle path with the remote run record
+- `mentalmodel remote status` reflects the most recent successful completed-run
+  upload
+
+If remote upload fails, the local `.runs` bundle is still intact and usable for
+inspection or replay. The command surfaces the upload failure explicitly so you
+can recover without guessing whether the local run was preserved.
 
 ## `remote write-demo`
 
@@ -200,8 +225,12 @@ Sync one or more persisted local runs into the remote ingest API:
 
 ```bash
 uv run mentalmodel remote sync \
-  --server-url http://127.0.0.1:8765 \
   --runs-dir /tmp/mentalmodel-runs
+
+uv run mentalmodel remote sync \
+  --config /Users/ben/repos/pangramanizer/mentalmodel.toml \
+  --graph-id async_rl_demo \
+  --run-id run-123
 
 uv run mentalmodel remote sync \
   --server-url http://127.0.0.1:8765 \
@@ -221,13 +250,21 @@ uv run mentalmodel remote sync \
 - resolves one or more persisted local run bundles from `.runs`
 - builds a canonical `RunManifest` plus artifact descriptors for each run
 - uploads each run bundle to `POST /api/remote/runs`
-- returns the synced run manifests in table or JSON form
+- returns the synced remote upload receipts in table or JSON form
 
 The current remote backend is intentionally minimal and deterministic. The API
 stores run manifests in Postgres and artifact blobs in S3-compatible object
 storage. The dashboard read path materializes remote bundles into a local cache
 so the existing historical inspection APIs can keep using the current run
 inspection helpers.
+
+Treat `remote sync` as the manual recovery path now, not the normal hosted
+workflow. Use it when:
+
+- a linked `verify` run uploaded locally but the remote publish step failed
+- you want to backfill older local runs into the hosted service
+- you are operating against a local stack that is not using the repo-linked
+  automatic path
 
 For local development and deterministic tests, the older file-backed store still
 exists as a fallback. It is no longer the intended Phase 2 backend.
@@ -256,7 +293,8 @@ uv run mentalmodel verify \
   --runs-dir /tmp/local-runs
 ```
 
-4. Sync the local run into that stack:
+4. Sync the local run into that stack manually if you are testing the recovery
+   path:
 
 ```bash
 uv run mentalmodel remote sync \

@@ -16,6 +16,7 @@ from mentalmodel.remote.contracts import (
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteProjectRecord,
+    RemoteRunUploadReceipt,
     RunManifest,
     RunManifestStatus,
     RunTraceSummary,
@@ -23,6 +24,7 @@ from mentalmodel.remote.contracts import (
     validate_workspace_config,
 )
 from mentalmodel.remote.sinks import (
+    CompletedRunPublishResult,
     CompletedRunSink,
     CompositeCompletedRunSink,
     CompositeExecutionRecordSink,
@@ -50,6 +52,7 @@ __all__ = [
     "RemoteProjectCatalogPublishRequest",
     "RemoteProjectLinkRequest",
     "RemoteProjectRecord",
+    "RemoteRunUploadReceipt",
     "RunManifest",
     "RunManifestStatus",
     "RunTraceSummary",
@@ -66,6 +69,7 @@ __all__ = [
     "fetch_remote_project_status",
     "publish_catalog_to_server",
     "CompletedRunSink",
+    "CompletedRunPublishResult",
     "ExecutionRecordSink",
     "NoOpCompletedRunSink",
     "CompositeCompletedRunSink",
@@ -84,6 +88,9 @@ __all__ = [
     "FileRemoteRunStore",
     "build_run_bundle_upload",
     "build_run_bundle_upload_from_run_dir",
+    "RemoteServiceCompletedRunSink",
+    "failed_completed_run_publish",
+    "sync_runs_for_project",
     "sync_runs_to_server",
     "WorkspaceConfig",
     "validate_workspace_config",
@@ -149,6 +156,15 @@ _LAZY_EXPORTS = {
         "build_run_bundle_upload_from_run_dir",
     ),
     "sync_runs_to_server": ("mentalmodel.remote.sync", "sync_runs_to_server"),
+    "sync_runs_for_project": ("mentalmodel.remote.sync", "sync_runs_for_project"),
+    "RemoteServiceCompletedRunSink": (
+        "mentalmodel.remote.sync",
+        "RemoteServiceCompletedRunSink",
+    ),
+    "failed_completed_run_publish": (
+        "mentalmodel.remote.sync",
+        "failed_completed_run_publish",
+    ),
 }
 
 

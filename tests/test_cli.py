@@ -41,6 +41,7 @@ from mentalmodel.remote.contracts import (
     RemoteProjectRecord,
     WorkspaceConfig,
 )
+from mentalmodel.remote.sinks import CompletedRunPublishResult
 from mentalmodel.remote.workspace import write_workspace_config
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.runs import list_run_summaries
@@ -339,6 +340,9 @@ class CliTest(unittest.TestCase):
                         label="Pangramanizer",
                         linked_at_ms=1000,
                         updated_at_ms=1001,
+                        last_completed_run_upload_at_ms=2000,
+                        last_completed_run_graph_id="pangramanizer_training",
+                        last_completed_run_id="run-123",
                     ),
                 ) as status_project:
                     with contextlib.redirect_stdout(stdout):
@@ -348,6 +352,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["project"]["project_id"], "pangramanizer")
+            self.assertEqual(payload["project"]["last_completed_run_id"], "run-123")
             status_project.assert_called_once()
 
     def test_remote_publish_catalog_command_reads_repo_config(self) -> None:
@@ -777,6 +782,50 @@ class CliTest(unittest.TestCase):
         self.assertEqual(args.graph_id, "async_rl_demo")
         self.assertEqual(args.project_id, "mentalmodel-examples")
 
+    def test_remote_sync_command_uses_repo_config_when_server_url_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "mentalmodel.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "pangramanizer"',
+                        'label = "Pangramanizer"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                        "[runs]",
+                        'default_runs_dir = ".runs"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch("mentalmodel.cli.sync_runs_for_project", return_value=()) as sync_runs:
+                    with contextlib.redirect_stdout(stdout):
+                        exit_code = main(
+                            [
+                                "remote",
+                                "sync",
+                                "--config",
+                                str(config_path),
+                                "--json",
+                            ]
+                        )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["server_url"], "http://127.0.0.1:8765")
+            sync_runs.assert_called_once()
+
     def test_remote_sync_command_emits_json(self) -> None:
         with patch("mentalmodel.cli.sync_runs_to_server") as sync_runs:
             sync_runs.return_value = ()
@@ -795,6 +844,107 @@ class CliTest(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["server_url"], "http://127.0.0.1:8765")
         self.assertEqual(payload["count"], 0)
+
+    def test_verify_auto_uploads_completed_run_for_linked_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "mentalmodel.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "mentalmodel-examples"',
+                        'label = "Mentalmodel Examples"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                        "[runs]",
+                        'default_runs_dir = ".runs"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
+                    return_value=CompletedRunPublishResult(
+                        transport="service-api",
+                        success=True,
+                        graph_id="async_rl_demo",
+                        run_id="run-uploaded",
+                        project_id="mentalmodel-examples",
+                        server_url="http://127.0.0.1:8765",
+                        remote_run_dir="/remote/async_rl_demo/run-uploaded",
+                        uploaded_at_ms=1000,
+                    ),
+                ) as publish_run:
+                    with contextlib.chdir(root):
+                        with contextlib.redirect_stdout(stdout):
+                            exit_code = run_verify(
+                                "mentalmodel.examples.async_rl.demo:build_program",
+                                json_output=True,
+                            )
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            runtime = cast(dict[str, object], payload["runtime"])
+            upload = cast(dict[str, object], runtime["completed_run_upload"])
+            self.assertEqual(upload["transport"], "service-api")
+            self.assertEqual(upload["project_id"], "mentalmodel-examples")
+            publish_run.assert_called_once()
+
+    def test_verify_reports_remote_upload_failure_without_losing_local_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "mentalmodel.toml").write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "mentalmodel-examples"',
+                        'label = "Mentalmodel Examples"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "publish_on_link = false",
+                        "",
+                        "[runs]",
+                        'default_runs_dir = ".runs"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
+                    side_effect=RuntimeError("remote unavailable"),
+                ):
+                    with contextlib.chdir(root):
+                        with contextlib.redirect_stdout(stdout):
+                            exit_code = run_verify(
+                                "mentalmodel.examples.async_rl.demo:build_program",
+                                json_output=True,
+                            )
+            self.assertEqual(exit_code, 1)
+            payload = json.loads(stdout.getvalue())
+            runtime = cast(dict[str, object], payload["runtime"])
+            self.assertTrue(payload["success"])
+            self.assertTrue(Path(cast(str, runtime["run_artifacts_dir"])).exists())
+            upload = cast(dict[str, object], runtime["completed_run_upload"])
+            self.assertFalse(upload["success"])
+            self.assertIn("remote unavailable", cast(str, upload["error"]))
 
     def test_remote_write_demo_command_writes_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

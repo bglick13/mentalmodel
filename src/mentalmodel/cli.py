@@ -60,6 +60,8 @@ from mentalmodel.remote.backend import (
 from mentalmodel.remote.bootstrap import build_remote_doctor_report, write_remote_demo
 from mentalmodel.remote.contracts import CatalogSource, ProjectRegistration, WorkspaceConfig
 from mentalmodel.remote.project_config import (
+    MentalModelProjectConfig,
+    discover_project_config_path,
     load_discovered_project_config,
     load_project_config,
 )
@@ -68,7 +70,12 @@ from mentalmodel.remote.projects import (
     link_project_to_server,
     publish_catalog_to_server,
 )
-from mentalmodel.remote.sync import sync_runs_to_server
+from mentalmodel.remote.sinks import CompletedRunPublishResult
+from mentalmodel.remote.sync import (
+    RemoteServiceCompletedRunSink,
+    sync_runs_for_project,
+    sync_runs_to_server,
+)
 from mentalmodel.remote.workspace import (
     ProjectRunTarget,
     build_project_run_target,
@@ -448,8 +455,19 @@ def run_verify(
         project_id=project_id,
         spec_path=spec_path,
     )
+    linked_project_config = _resolve_linked_project_config(spec_path=spec_path)
+    if (
+        project is not None
+        and linked_project_config is not None
+        and project.project_id != linked_project_config.project_id
+    ):
+        raise MentalModelError(
+            "Workspace project registration and repo-linked mentalmodel.toml disagree "
+            f"about project identity ({project.project_id!r} vs "
+            f"{linked_project_config.project_id!r})."
+        )
     configured_remote_run_store = remote_run_store
-    if configured_remote_run_store is None:
+    if configured_remote_run_store is None and linked_project_config is None:
         remote_backend_config = _resolve_remote_backend_config(
             database_url=remote_database_url,
             object_store_bucket=remote_object_store_bucket,
@@ -466,6 +484,8 @@ def run_verify(
             else RemoteRunStore.from_config(remote_backend_config)
         )
     fallback_runs_dir = invocation.runs_dir
+    if fallback_runs_dir is None and linked_project_config is not None:
+        fallback_runs_dir = linked_project_config.default_runs_dir
     if fallback_runs_dir is None and configured_remote_run_store is not None:
         fallback_runs_dir = configured_remote_run_store.cache_dir
     run_target = build_project_run_target(
@@ -473,17 +493,15 @@ def run_verify(
         fallback_runs_dir=fallback_runs_dir,
         catalog_source=CatalogSource.SPEC_PATH if spec_path is not None else None,
     )
-    completed_run_sink = (
-        None
-        if configured_remote_run_store is None
-        else RemoteCompletedRunSink(
-            configured_remote_run_store,
-            project_id=run_target.project_id,
-            project_label=run_target.project_label,
-            environment_name=run_target.environment_name,
-            catalog_entry_id=run_target.catalog_entry_id,
-            catalog_source=run_target.catalog_source,
+    if project is None and linked_project_config is not None:
+        run_target = _run_target_with_linked_project_metadata(
+            run_target,
+            linked_project_config,
         )
+    completed_run_sink = _resolve_completed_run_sink(
+        linked_project_config=linked_project_config,
+        configured_remote_run_store=configured_remote_run_store,
+        run_target=run_target,
     )
     if _is_external_project_registration(project):
         payload = _run_external_verify(
@@ -509,7 +527,7 @@ def run_verify(
 
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload.get("success") is True else 1
+        return 0 if _verify_payload_success(payload) else 1
 
     console = Console()
     summary = Table(title="mentalmodel verify summary")
@@ -517,6 +535,7 @@ def run_verify(
     summary.add_column("Static Errors", justify="right")
     summary.add_column("Warnings", justify="right")
     summary.add_column("Runtime", justify="right")
+    summary.add_column("Upload", justify="right")
     summary.add_column("Warning Invariants", justify="right")
     summary.add_column("Property Checks", justify="right")
     analysis_payload = cast(dict[str, object], payload["analysis"])
@@ -530,11 +549,21 @@ def run_verify(
         list[dict[str, object]],
         runtime_payload.get("error_invariant_failures", []),
     )
+    completed_run_upload = cast(
+        dict[str, object] | None,
+        runtime_payload.get("completed_run_upload"),
+    )
+    upload_status = (
+        ""
+        if completed_run_upload is None
+        else ("pass" if completed_run_upload.get("success") is True else "fail")
+    )
     summary.add_row(
         cast(str, payload["graph_id"]),
         str(cast(int, analysis_payload["error_count"])),
         str(cast(int, analysis_payload["warning_count"])),
         "pass" if runtime_payload["success"] is True else "fail",
+        upload_status,
         str(len(warning_invariant_failures)),
         str(len(property_checks_payload)),
     )
@@ -548,6 +577,7 @@ def run_verify(
     runtime_table.add_column("Invocation")
     runtime_table.add_column("Warning Invariants", justify="right")
     runtime_table.add_column("Run Artifacts")
+    runtime_table.add_column("Upload")
     runtime_table.add_column("Error")
     runtime_table.add_row(
         "yes" if runtime_payload["success"] is True else "no",
@@ -557,9 +587,33 @@ def run_verify(
         cast(str | None, runtime_payload.get("invocation_name")) or "",
         str(len(warning_invariant_failures)),
         cast(str | None, runtime_payload.get("run_artifacts_dir")) or "",
+        upload_status or "",
         cast(str | None, runtime_payload.get("error")) or "",
     )
     console.print(runtime_table)
+
+    if completed_run_upload is not None:
+        upload_table = Table(title="Completed Run Upload")
+        upload_table.add_column("Transport")
+        upload_table.add_column("Project")
+        upload_table.add_column("Run")
+        upload_table.add_column("Uploaded At")
+        upload_table.add_column("Remote Location")
+        upload_table.add_column("Error")
+        upload_table.add_row(
+            cast(str, completed_run_upload["transport"]),
+            cast(str | None, completed_run_upload.get("project_id")) or "",
+            "/".join(
+                (
+                    cast(str, completed_run_upload["graph_id"]),
+                    cast(str, completed_run_upload["run_id"]),
+                )
+            ),
+            str(cast(int | None, completed_run_upload.get("uploaded_at_ms")) or ""),
+            cast(str | None, completed_run_upload.get("remote_run_dir")) or "",
+            cast(str | None, completed_run_upload.get("error")) or "",
+        )
+        console.print(upload_table)
 
     invariant_failures = warning_invariant_failures + error_invariant_failures
     if invariant_failures:
@@ -593,7 +647,7 @@ def run_verify(
     else:
         console.print("[yellow]No property checks discovered.[/yellow]")
 
-    return 0 if payload.get("success") is True else 1
+    return 0 if _verify_payload_success(payload) else 1
 
 
 def _resolve_verify_project_registration(
@@ -614,6 +668,68 @@ def _resolve_verify_project_registration(
     return find_project_registration_for_path(workspace.projects, spec_path)
 
 
+def _resolve_linked_project_config(
+    *,
+    spec_path: Path | None,
+) -> MentalModelProjectConfig | None:
+    start = None if spec_path is None else spec_path.parent
+    config_path = discover_project_config_path(start)
+    if config_path is None:
+        return None
+    return load_project_config(config_path)
+
+
+def _resolve_completed_run_sink(
+    *,
+    linked_project_config: MentalModelProjectConfig | None,
+    configured_remote_run_store: RemoteRunStore | None,
+    run_target: ProjectRunTarget,
+) -> RemoteCompletedRunSink | RemoteServiceCompletedRunSink | None:
+    if linked_project_config is not None:
+        return RemoteServiceCompletedRunSink(
+            linked_project_config,
+            project_id=run_target.project_id,
+            project_label=run_target.project_label,
+            environment_name=run_target.environment_name,
+            catalog_entry_id=run_target.catalog_entry_id,
+            catalog_source=run_target.catalog_source,
+        )
+    if configured_remote_run_store is None:
+        return None
+    return RemoteCompletedRunSink(
+        configured_remote_run_store,
+        project_id=run_target.project_id,
+        project_label=run_target.project_label,
+        environment_name=run_target.environment_name,
+        catalog_entry_id=run_target.catalog_entry_id,
+        catalog_source=run_target.catalog_source,
+    )
+
+
+def _run_target_with_linked_project_metadata(
+    run_target: ProjectRunTarget,
+    linked_project_config: MentalModelProjectConfig,
+) -> ProjectRunTarget:
+    return ProjectRunTarget(
+        runs_dir=run_target.runs_dir,
+        project_id=linked_project_config.project_id,
+        project_label=linked_project_config.label,
+        environment_name=linked_project_config.default_environment,
+        catalog_entry_id=run_target.catalog_entry_id,
+        catalog_source=run_target.catalog_source,
+    )
+
+
+def _verify_payload_success(payload: dict[str, object]) -> bool:
+    if payload.get("success") is not True:
+        return False
+    runtime_payload = cast(dict[str, object], payload["runtime"])
+    completed_run_upload = runtime_payload.get("completed_run_upload")
+    if not isinstance(completed_run_upload, dict):
+        return True
+    return completed_run_upload.get("success") is True
+
+
 def _is_external_project_registration(project: ProjectRegistration | None) -> bool:
     if project is None:
         return False
@@ -626,7 +742,7 @@ def _run_external_verify(
     invocation: VerifyInvocationSpec,
     project: ProjectRegistration,
     run_target: ProjectRunTarget,
-    completed_run_sink: RemoteCompletedRunSink | None,
+    completed_run_sink: RemoteCompletedRunSink | RemoteServiceCompletedRunSink | None,
 ) -> dict[str, object]:
     runs_dir = run_target.runs_dir or invocation.runs_dir
     command = [
@@ -659,7 +775,33 @@ def _run_external_verify(
         if isinstance(runtime_payload, dict):
             run_artifacts_dir = runtime_payload.get("run_artifacts_dir")
             if isinstance(run_artifacts_dir, str) and run_artifacts_dir:
-                completed_run_sink.publish_run_dir(Path(run_artifacts_dir))
+                run_dir = Path(run_artifacts_dir)
+                upload_result: dict[str, object] | CompletedRunPublishResult
+                try:
+                    upload_result = completed_run_sink.publish_run_dir(run_dir)
+                except Exception as exc:
+                    existing_upload = runtime_payload.get("completed_run_upload")
+                    if isinstance(existing_upload, dict):
+                        upload_result = existing_upload
+                    else:
+                        upload_result = {
+                            "transport": type(completed_run_sink).__name__,
+                            "success": False,
+                            "graph_id": run_dir.parent.name,
+                            "run_id": run_dir.name,
+                            "project_id": run_target.project_id,
+                            "server_url": None,
+                            "remote_run_dir": None,
+                            "uploaded_at_ms": None,
+                            "error": str(exc),
+                        }
+                        if isinstance(completed_run_sink, RemoteServiceCompletedRunSink):
+                            upload_result["transport"] = "service-api"
+                            upload_result["server_url"] = completed_run_sink.server_url
+                if isinstance(upload_result, dict):
+                    runtime_payload["completed_run_upload"] = upload_result
+                else:
+                    runtime_payload["completed_run_upload"] = upload_result.as_dict()
     return cast(dict[str, object], decoded)
 
 
@@ -837,7 +979,8 @@ def run_otel_write_demo(
 
 def run_remote_sync(
     *,
-    server_url: str,
+    server_url: str | None = None,
+    config: Path | None = None,
     runs_dir: Path | None = None,
     graph_id: str | None = None,
     run_id: str | None = None,
@@ -851,22 +994,51 @@ def run_remote_sync(
 ) -> int:
     """Sync local run bundles to the remote ingest API."""
 
-    manifests = sync_runs_to_server(
-        server_url=server_url,
-        runs_dir=runs_dir,
-        graph_id=graph_id,
-        run_id=run_id,
-        invocation_name=invocation_name,
-        project_id=project_id,
-        project_label=project_label,
-        environment_name=environment_name,
-        catalog_entry_id=catalog_entry_id,
-        catalog_source=None if catalog_source is None else CatalogSource(catalog_source),
+    project_config = None
+    if config is not None or server_url is None:
+        project_config = (
+            load_project_config(config)
+            if config is not None
+            else load_discovered_project_config()
+        )
+    resolved_runs_dir = runs_dir
+    if resolved_runs_dir is None and project_config is not None:
+        resolved_runs_dir = project_config.default_runs_dir
+    resolved_catalog_source = (
+        None if catalog_source is None else CatalogSource(catalog_source)
     )
+    receipts = (
+        sync_runs_to_server(
+            server_url=cast(str, server_url),
+            runs_dir=resolved_runs_dir,
+            graph_id=graph_id,
+            run_id=run_id,
+            invocation_name=invocation_name,
+            project_id=project_id,
+            project_label=project_label,
+            environment_name=environment_name,
+            catalog_entry_id=catalog_entry_id,
+            catalog_source=resolved_catalog_source,
+        )
+        if project_config is None
+        else sync_runs_for_project(
+            config=project_config,
+            runs_dir=resolved_runs_dir,
+            graph_id=graph_id,
+            run_id=run_id,
+            invocation_name=invocation_name,
+            project_id=project_id,
+            project_label=project_label,
+            environment_name=environment_name,
+            catalog_entry_id=catalog_entry_id,
+            catalog_source=resolved_catalog_source,
+        )
+    )
+    resolved_server_url = server_url if project_config is None else project_config.server_url
     payload = {
-        "server_url": server_url,
-        "count": len(manifests),
-        "runs": [manifest.as_dict() for manifest in manifests],
+        "server_url": resolved_server_url,
+        "count": len(receipts),
+        "runs": [receipt.as_dict() for receipt in receipts],
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -876,11 +1048,13 @@ def run_remote_sync(
     table.add_column("Graph")
     table.add_column("Run")
     table.add_column("Project")
-    for manifest in manifests:
+    table.add_column("Uploaded", justify="right")
+    for receipt in receipts:
         table.add_row(
-            manifest.graph_id,
-            manifest.run_id,
-            manifest.project_id or "",
+            receipt.graph_id,
+            receipt.run_id,
+            receipt.project_id or "",
+            str(receipt.uploaded_at_ms),
         )
     Console().print(table)
     return 0
@@ -958,6 +1132,7 @@ def run_remote_status(
     table.add_column("Updated")
     table.add_column("Catalog")
     table.add_column("Version")
+    table.add_column("Last Upload")
     table.add_row(
         project.project_id,
         project_config.server_url,
@@ -969,6 +1144,15 @@ def run_remote_status(
             else "not published"
         ),
         str(project.catalog_version or ""),
+        (
+            ""
+            if project.last_completed_run_upload_at_ms is None
+            else (
+                f"{project.last_completed_run_graph_id}/"
+                f"{project.last_completed_run_id} @ "
+                f"{project.last_completed_run_upload_at_ms}"
+            )
+        ),
     )
     Console().print(table)
     return 0
@@ -2446,7 +2630,8 @@ def build_parser() -> argparse.ArgumentParser:
         "sync",
         help="Sync persisted local runs to the remote ingest API.",
     )
-    remote_sync.add_argument("--server-url", required=True)
+    remote_sync.add_argument("--server-url")
+    remote_sync.add_argument("--config", type=Path)
     remote_sync.add_argument("--runs-dir", type=Path)
     remote_sync.add_argument("--graph-id")
     remote_sync.add_argument("--run-id")
@@ -2748,6 +2933,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.remote_command == "sync":
                 return run_remote_sync(
                     server_url=args.server_url,
+                    config=args.config,
                     runs_dir=args.runs_dir,
                     graph_id=args.graph_id,
                     run_id=args.run_id,

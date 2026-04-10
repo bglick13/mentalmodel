@@ -148,9 +148,7 @@ def build_project_run_target(
             f"Project {project.project_id!r} must declare runs_dir for shared-stack launches."
         )
     return ProjectRunTarget(
-        runs_dir=(
-            project.runs_dir.expanduser().resolve()
-        ),
+        runs_dir=(project.runs_dir.expanduser().resolve()),
         project_id=project.project_id,
         project_label=project.label,
         environment_name=project.default_environment,

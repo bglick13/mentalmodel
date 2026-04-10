@@ -564,15 +564,27 @@ class DashboardApiTest(unittest.TestCase):
                 artifact_store=InMemoryArtifactStore(),
                 cache_dir=remote_root,
             )
+            project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+            project_store.link_project(
+                RemoteProjectLinkRequest(
+                    project_id="mentalmodel-examples",
+                    label="Mentalmodel Examples",
+                    catalog_provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+                )
+            )
             client = TestClient(
                 create_dashboard_app(
                     runs_dir=None,
                     frontend_dist=None,
                     remote_run_store=remote_store,
+                    remote_project_store=project_store,
                 )
             )
             ingest = client.post("/api/remote/runs", json=upload.as_dict())
             self.assertEqual(ingest.status_code, 200)
+            receipt = ingest.json()
+            self.assertEqual(receipt["project_id"], "mentalmodel-examples")
+            self.assertIsInstance(receipt["uploaded_at_ms"], int)
             runs_response = client.get(
                 "/api/runs",
                 params={"graph_id": "async_rl_demo"},
@@ -585,6 +597,41 @@ class DashboardApiTest(unittest.TestCase):
                 f"/api/runs/async_rl_demo/{report.runtime.run_id}/overview"
             )
             self.assertEqual(overview.status_code, 200)
+            project = project_store.get_project(project_id="mentalmodel-examples")
+            self.assertEqual(project.last_completed_run_id, report.runtime.run_id)
+
+    def test_remote_ingest_rejects_unknown_project_id(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as local_tmp,
+            tempfile.TemporaryDirectory() as remote_tmp,
+        ):
+            local_root = Path(local_tmp)
+            remote_root = Path(remote_tmp)
+            report = run_verification(build_program(), runs_dir=local_root)
+            self.assertTrue(report.success)
+            upload = build_run_bundle_upload(
+                runs_dir=local_root,
+                graph_id="async_rl_demo",
+                run_id=report.runtime.run_id,
+                project_id="missing-project",
+                project_label="Missing Project",
+            )
+            remote_store = RemoteRunStore(
+                manifest_index=InMemoryManifestIndex(),
+                artifact_store=InMemoryArtifactStore(),
+                cache_dir=remote_root,
+            )
+            project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+            client = TestClient(
+                create_dashboard_app(
+                    runs_dir=None,
+                    frontend_dist=None,
+                    remote_run_store=remote_store,
+                    remote_project_store=project_store,
+                )
+            )
+            ingest = client.post("/api/remote/runs", json=upload.as_dict())
+            self.assertEqual(ingest.status_code, 400)
 
     def test_external_project_catalog_graph_uses_subprocess_loader(self) -> None:
         fixture_entry = default_dashboard_catalog()[0]

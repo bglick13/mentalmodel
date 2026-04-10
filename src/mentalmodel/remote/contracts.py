@@ -704,6 +704,67 @@ class RemoteProjectCatalogPublishRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class RemoteRunUploadReceipt:
+    """Service response for one completed-run ingest request."""
+
+    graph_id: str
+    run_id: str
+    uploaded_at_ms: int
+    run_dir: str
+    project_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.graph_id, "RemoteRunUploadReceipt.graph_id")
+        _require_identifier(self.run_id, "RemoteRunUploadReceipt.run_id")
+        _require_non_negative(
+            self.uploaded_at_ms,
+            "RemoteRunUploadReceipt.uploaded_at_ms",
+        )
+        if not self.run_dir:
+            raise RemoteContractError("RemoteRunUploadReceipt.run_dir cannot be empty.")
+        if self.project_id is not None:
+            _require_identifier(self.project_id, "RemoteRunUploadReceipt.project_id")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "graph_id": self.graph_id,
+            "run_id": self.run_id,
+            "uploaded_at_ms": self.uploaded_at_ms,
+            "run_dir": self.run_dir,
+            "project_id": self.project_id,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> RemoteRunUploadReceipt:
+        graph_id = payload.get("graph_id")
+        run_id = payload.get("run_id")
+        uploaded_at_ms = payload.get("uploaded_at_ms")
+        run_dir = payload.get("run_dir")
+        project_id = payload.get("project_id")
+        if not isinstance(graph_id, str):
+            raise RemoteContractError("RemoteRunUploadReceipt.graph_id must be a string.")
+        if not isinstance(run_id, str):
+            raise RemoteContractError("RemoteRunUploadReceipt.run_id must be a string.")
+        if not isinstance(uploaded_at_ms, int):
+            raise RemoteContractError(
+                "RemoteRunUploadReceipt.uploaded_at_ms must be an integer."
+            )
+        if not isinstance(run_dir, str):
+            raise RemoteContractError("RemoteRunUploadReceipt.run_dir must be a string.")
+        if project_id is not None and not isinstance(project_id, str):
+            raise RemoteContractError(
+                "RemoteRunUploadReceipt.project_id must be a string when present."
+            )
+        return cls(
+            graph_id=graph_id,
+            run_id=run_id,
+            uploaded_at_ms=uploaded_at_ms,
+            run_dir=run_dir,
+            project_id=project_id,
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class RemoteProjectRecord:
     """Service-owned remote project record for one linked repo."""
 
@@ -717,6 +778,10 @@ class RemoteProjectRecord:
     default_runs_dir: str | None = None
     default_verify_spec: str | None = None
     catalog_snapshot: ProjectCatalogSnapshot | None = None
+    last_completed_run_upload_at_ms: int | None = None
+    last_completed_run_graph_id: str | None = None
+    last_completed_run_id: str | None = None
+    last_completed_run_invocation_name: str | None = None
 
     def __post_init__(self) -> None:
         _require_identifier(self.project_id, "RemoteProjectRecord.project_id")
@@ -741,6 +806,35 @@ class RemoteProjectRecord:
             and self.catalog_snapshot.project_id != self.project_id
         ):
             raise RemoteContractError("RemoteProjectRecord.catalog_snapshot project_id mismatch.")
+        if self.last_completed_run_upload_at_ms is not None:
+            _require_non_negative(
+                self.last_completed_run_upload_at_ms,
+                "RemoteProjectRecord.last_completed_run_upload_at_ms",
+            )
+        if self.last_completed_run_graph_id == "":
+            raise RemoteContractError(
+                "RemoteProjectRecord.last_completed_run_graph_id cannot be empty."
+            )
+        if self.last_completed_run_id == "":
+            raise RemoteContractError(
+                "RemoteProjectRecord.last_completed_run_id cannot be empty."
+            )
+        if self.last_completed_run_invocation_name == "":
+            raise RemoteContractError(
+                "RemoteProjectRecord.last_completed_run_invocation_name cannot be empty."
+            )
+        if self.last_completed_run_upload_at_ms is None and any(
+            value is not None
+            for value in (
+                self.last_completed_run_graph_id,
+                self.last_completed_run_id,
+                self.last_completed_run_invocation_name,
+            )
+        ):
+            raise RemoteContractError(
+                "RemoteProjectRecord upload metadata requires "
+                "last_completed_run_upload_at_ms."
+            )
 
     @property
     def catalog_published(self) -> bool:
@@ -773,6 +867,10 @@ class RemoteProjectRecord:
             "catalog_entry_count": self.catalog_entry_count,
             "catalog_published_at_ms": self.catalog_published_at_ms,
             "catalog_version": self.catalog_version,
+            "last_completed_run_upload_at_ms": self.last_completed_run_upload_at_ms,
+            "last_completed_run_graph_id": self.last_completed_run_graph_id,
+            "last_completed_run_id": self.last_completed_run_id,
+            "last_completed_run_invocation_name": self.last_completed_run_invocation_name,
         }
         if include_catalog_snapshot:
             payload["catalog_snapshot"] = (
@@ -792,6 +890,12 @@ class RemoteProjectRecord:
         default_runs_dir = payload.get("default_runs_dir")
         default_verify_spec = payload.get("default_verify_spec")
         snapshot_payload = payload.get("catalog_snapshot")
+        last_completed_run_upload_at_ms = payload.get("last_completed_run_upload_at_ms")
+        last_completed_run_graph_id = payload.get("last_completed_run_graph_id")
+        last_completed_run_id = payload.get("last_completed_run_id")
+        last_completed_run_invocation_name = payload.get(
+            "last_completed_run_invocation_name"
+        )
         if not isinstance(project_id, str):
             raise RemoteContractError("RemoteProjectRecord.project_id must be a string.")
         if not isinstance(label, str):
@@ -818,6 +922,33 @@ class RemoteProjectRecord:
             raise RemoteContractError(
                 "RemoteProjectRecord.default_verify_spec must be a string when present."
             )
+        if (
+            last_completed_run_upload_at_ms is not None
+            and not isinstance(last_completed_run_upload_at_ms, int)
+        ):
+            raise RemoteContractError(
+                "RemoteProjectRecord.last_completed_run_upload_at_ms must be an integer "
+                "when present."
+            )
+        if (
+            last_completed_run_graph_id is not None
+            and not isinstance(last_completed_run_graph_id, str)
+        ):
+            raise RemoteContractError(
+                "RemoteProjectRecord.last_completed_run_graph_id must be a string when present."
+            )
+        if last_completed_run_id is not None and not isinstance(last_completed_run_id, str):
+            raise RemoteContractError(
+                "RemoteProjectRecord.last_completed_run_id must be a string when present."
+            )
+        if (
+            last_completed_run_invocation_name is not None
+            and not isinstance(last_completed_run_invocation_name, str)
+        ):
+            raise RemoteContractError(
+                "RemoteProjectRecord.last_completed_run_invocation_name must be a string "
+                "when present."
+            )
         if snapshot_payload is not None and not isinstance(snapshot_payload, dict):
             raise RemoteContractError(
                 "RemoteProjectRecord.catalog_snapshot must be a JSON object when present."
@@ -837,6 +968,10 @@ class RemoteProjectRecord:
                 if snapshot_payload is None
                 else ProjectCatalogSnapshot.from_dict(snapshot_payload)
             ),
+            last_completed_run_upload_at_ms=last_completed_run_upload_at_ms,
+            last_completed_run_graph_id=last_completed_run_graph_id,
+            last_completed_run_id=last_completed_run_id,
+            last_completed_run_invocation_name=last_completed_run_invocation_name,
         )
 
 

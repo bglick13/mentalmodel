@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from pathlib import Path
 from urllib import request
 
-from mentalmodel.remote.contracts import CatalogSource, RemoteContractError, RunManifest
+from mentalmodel.remote.contracts import (
+    CatalogSource,
+    RemoteContractError,
+    RemoteRunUploadReceipt,
+    RunManifest,
+)
+from mentalmodel.remote.project_config import MentalModelProjectConfig
+from mentalmodel.remote.sinks import CompletedRunPublishResult, CompletedRunSink
 from mentalmodel.remote.store import RunBundleUpload, UploadedArtifact
 from mentalmodel.runtime.runs import (
     build_run_manifest_from_summary,
@@ -79,6 +87,23 @@ def build_run_bundle_upload_from_run_dir(
     )
 
 
+def upload_run_bundle_to_server(
+    *,
+    server_url: str,
+    upload: RunBundleUpload,
+    api_key: str | None = None,
+) -> RemoteRunUploadReceipt:
+    """Upload one completed run bundle to the remote ingest API."""
+
+    response = _request_json(
+        f"{server_url.rstrip('/')}/api/remote/runs",
+        method="POST",
+        payload=upload.as_dict(),
+        api_key=api_key,
+    )
+    return RemoteRunUploadReceipt.from_dict(response)
+
+
 def sync_runs_to_server(
     *,
     server_url: str,
@@ -91,7 +116,8 @@ def sync_runs_to_server(
     environment_name: str | None = None,
     catalog_entry_id: str | None = None,
     catalog_source: CatalogSource | None = None,
-) -> tuple[RunManifest, ...]:
+    api_key: str | None = None,
+) -> tuple[RemoteRunUploadReceipt, ...]:
     """Sync one or more local run bundles to the remote ingest API."""
 
     uploads: tuple[RunBundleUpload, ...]
@@ -128,27 +154,148 @@ def sync_runs_to_server(
             )
             for summary in summaries
         )
-    manifests: list[RunManifest] = []
-    for upload in uploads:
-        _post_json(f"{server_url.rstrip('/')}/api/remote/runs", upload.as_dict())
-        manifests.append(upload.manifest)
-    return tuple(manifests)
-
-
-def _post_json(url: str, payload: dict[str, object]) -> dict[str, object]:
-    body = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return tuple(
+        upload_run_bundle_to_server(
+            server_url=server_url,
+            upload=upload,
+            api_key=api_key,
+        )
+        for upload in uploads
     )
+
+
+def sync_runs_for_project(
+    *,
+    config: MentalModelProjectConfig,
+    runs_dir: Path | None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    invocation_name: str | None = None,
+    project_id: str | None = None,
+    project_label: str | None = None,
+    environment_name: str | None = None,
+    catalog_entry_id: str | None = None,
+    catalog_source: CatalogSource | None = None,
+) -> tuple[RemoteRunUploadReceipt, ...]:
+    """Sync one or more local run bundles using repo-linked remote config."""
+
+    return sync_runs_to_server(
+        server_url=config.server_url,
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+        project_id=project_id or config.project_id,
+        project_label=project_label or config.label,
+        environment_name=environment_name or config.default_environment,
+        catalog_entry_id=catalog_entry_id,
+        catalog_source=catalog_source,
+        api_key=config.resolve_api_key(),
+    )
+
+
+class RemoteServiceCompletedRunSink(CompletedRunSink):
+    """Completed-run sink that publishes bundles through the hosted service API."""
+
+    def __init__(
+        self,
+        config: MentalModelProjectConfig,
+        *,
+        project_id: str | None = None,
+        project_label: str | None = None,
+        environment_name: str | None = None,
+        catalog_entry_id: str | None = None,
+        catalog_source: CatalogSource | None = None,
+    ) -> None:
+        self._config = config
+        self.project_id = project_id or config.project_id
+        self.project_label = project_label or config.label
+        self.environment_name = environment_name or config.default_environment
+        self.catalog_entry_id = catalog_entry_id
+        self.catalog_source = catalog_source
+
+    @property
+    def server_url(self) -> str:
+        return self._config.server_url
+
+    def publish(
+        self,
+        *,
+        manifest: RunManifest,
+        run_dir: Path,
+    ) -> CompletedRunPublishResult:
+        del manifest
+        return self.publish_run_dir(run_dir)
+
+    def publish_run_dir(self, run_dir: Path) -> CompletedRunPublishResult:
+        upload = build_run_bundle_upload_from_run_dir(
+            run_dir=run_dir,
+            project_id=self.project_id,
+            project_label=self.project_label,
+            environment_name=self.environment_name,
+            catalog_entry_id=self.catalog_entry_id,
+            catalog_source=self.catalog_source,
+        )
+        receipt = upload_run_bundle_to_server(
+            server_url=self._config.server_url,
+            upload=upload,
+            api_key=self._config.resolve_api_key(),
+        )
+        return CompletedRunPublishResult(
+            transport="service-api",
+            success=True,
+            graph_id=receipt.graph_id,
+            run_id=receipt.run_id,
+            project_id=receipt.project_id,
+            server_url=self._config.server_url,
+            remote_run_dir=receipt.run_dir,
+            uploaded_at_ms=receipt.uploaded_at_ms,
+        )
+
+
+def _request_json(
+    url: str,
+    *,
+    method: str,
+    payload: dict[str, object] | None,
+    api_key: str | None,
+) -> dict[str, object]:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Accept": "application/json"}
+    if api_key is not None:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = request.Request(url, data=body, headers=headers, method=method)
     try:
         with request.urlopen(req) as response:
             raw = response.read().decode("utf-8")
     except Exception as exc:
-        raise RemoteContractError(f"Failed to POST remote run bundle: {exc}") from exc
+        raise RemoteContractError(f"Remote run request failed: {exc}") from exc
     decoded = json.loads(raw)
     if not isinstance(decoded, dict):
-        raise RemoteContractError("Remote ingest response must be a JSON object.")
+        raise RemoteContractError("Remote run response must be a JSON object.")
     return decoded
+
+
+def failed_completed_run_publish(
+    *,
+    transport: str,
+    manifest: RunManifest,
+    error: Exception,
+    server_url: str | None = None,
+    project_id: str | None = None,
+) -> CompletedRunPublishResult:
+    """Build one stable failed-upload record for verification surfaces."""
+
+    uploaded_at_ms = int(time.time() * 1000)
+    return CompletedRunPublishResult(
+        transport=transport,
+        success=False,
+        graph_id=manifest.graph_id,
+        run_id=manifest.run_id,
+        project_id=project_id or manifest.project_id,
+        server_url=server_url,
+        uploaded_at_ms=uploaded_at_ms,
+        error=str(error),
+    )

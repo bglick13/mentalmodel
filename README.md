@@ -92,6 +92,7 @@ uv run mentalmodel replay --graph-id async_rl_demo --frame-id steps[3]
 uv run mentalmodel remote link
 uv run mentalmodel remote status
 uv run mentalmodel remote publish-catalog
+uv run mentalmodel remote sync --config mentalmodel.toml --run-id <run_id>
 uv run mentalmodel otel show-config
 uv run mentalmodel otel write-demo --stack lgtm --output-dir /tmp/mentalmodel-otel
 uv run mentalmodel runs list
@@ -233,6 +234,12 @@ Dashboard UI:
 - hosted dashboard entries now come from remote catalog snapshots, so the
   service can render pinned nodes, metric groups, and custom views without
   importing the producer repo locally
+- a linked repo uploads the completed run bundle automatically during normal
+  `mentalmodel verify` execution after local `.runs` materialization succeeds
+- in a linked repo, `mentalmodel verify --spec ...` now uploads the completed
+  run bundle automatically after local `.runs` materialization succeeds
+- `mentalmodel remote sync` remains available as the manual recovery and
+  backfill path rather than the normal hosted operator flow
 - the first proof workflow is `review_workflow`; the UI can launch either
   runtime environment, inspect the persisted graph, inspect node
   inputs/outputs, inspect invariant results, pivot from grouped metrics into

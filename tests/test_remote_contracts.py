@@ -14,6 +14,7 @@ from mentalmodel.remote import (
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteProjectRecord,
+    RemoteRunUploadReceipt,
     RunManifest,
     RunManifestStatus,
     RunTraceSummary,
@@ -191,10 +192,27 @@ class RemoteContractsTest(unittest.TestCase):
             linked_at_ms=1000,
             updated_at_ms=1001,
             catalog_snapshot=snapshot,
+            last_completed_run_upload_at_ms=2000,
+            last_completed_run_graph_id="async_rl_demo",
+            last_completed_run_id="run-123",
+            last_completed_run_invocation_name="fixture",
         )
         self.assertTrue(record.catalog_published)
         self.assertEqual(record.catalog_entry_count, 1)
         self.assertEqual(record.catalog_published_at_ms, 1000)
+        self.assertEqual(record.as_dict()["last_completed_run_id"], "run-123")
+
+    def test_remote_run_upload_receipt_round_trips(self) -> None:
+        receipt = RemoteRunUploadReceipt(
+            graph_id="async_rl_demo",
+            run_id="run-123",
+            uploaded_at_ms=1000,
+            run_dir="/tmp/remote/.runs/async_rl_demo/run-123",
+            project_id="mentalmodel-examples",
+        )
+        decoded = RemoteRunUploadReceipt.from_dict(receipt.as_dict())
+        self.assertEqual(decoded.graph_id, "async_rl_demo")
+        self.assertEqual(decoded.project_id, "mentalmodel-examples")
 
 
 if __name__ == "__main__":

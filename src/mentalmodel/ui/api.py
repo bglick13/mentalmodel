@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -15,6 +16,7 @@ from mentalmodel.remote.contracts import (
     ProjectCatalog,
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
+    RemoteRunUploadReceipt,
 )
 from mentalmodel.remote.store import FileRemoteRunStore, RunBundleUpload
 from mentalmodel.ui.catalog import DashboardCatalogEntry
@@ -175,15 +177,35 @@ def create_dashboard_app(
             )
         try:
             upload = RunBundleUpload.from_dict(payload)
+            if (
+                configured_remote_project_store is not None
+                and upload.manifest.project_id is not None
+            ):
+                configured_remote_project_store.get_project(
+                    project_id=upload.manifest.project_id
+                )
             run_dir = ingest_store.ingest(upload)
+            uploaded_at_ms = int(time.time() * 1000)
+            if (
+                configured_remote_project_store is not None
+                and upload.manifest.project_id is not None
+            ):
+                configured_remote_project_store.record_completed_run_upload(
+                    project_id=upload.manifest.project_id,
+                    graph_id=upload.manifest.graph_id,
+                    run_id=upload.manifest.run_id,
+                    invocation_name=upload.manifest.invocation_name,
+                    uploaded_at_ms=uploaded_at_ms,
+                )
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {
-            "status": "ok",
-            "graph_id": upload.manifest.graph_id,
-            "run_id": upload.manifest.run_id,
-            "run_dir": str(run_dir),
-        }
+        return RemoteRunUploadReceipt(
+            graph_id=upload.manifest.graph_id,
+            run_id=upload.manifest.run_id,
+            uploaded_at_ms=uploaded_at_ms,
+            run_dir=str(run_dir),
+            project_id=upload.manifest.project_id,
+        ).as_dict()
 
     @app.post("/api/catalog/from-path", response_model=None)
     def catalog_from_path(
