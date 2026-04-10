@@ -34,6 +34,7 @@ type InspectorNodeIoProps = {
   runId: string | null;
   nodeId: string | null;
   frameId: string | null;
+  runFailureMessage: string | null;
   /** Explorer’s loaded node detail when scope matches this inspector (avoids a duplicate GET). */
   prefetchedDetail: NodeDetail | null;
 };
@@ -44,6 +45,7 @@ export function InspectorNodeIo({
   runId,
   nodeId,
   frameId,
+  runFailureMessage,
   prefetchedDetail,
 }: InspectorNodeIoProps) {
   const frameForApi = useMemo(
@@ -172,7 +174,9 @@ export function InspectorNodeIo({
           <h4 className="exec-detail-related-expanded-title">Output</h4>
           {detail.output_error ? (
             <pre className="exec-detail-pre exec-detail-pre-nested">
-              {detail.output_error}
+              {runFailureMessage
+                ? `Run failed before outputs were fully persisted.\nRuntime error: ${runFailureMessage}\n\n${detail.output_error}`
+                : detail.output_error}
             </pre>
           ) : detail.output !== undefined ? (
             <pre className="exec-detail-pre exec-detail-pre-nested">

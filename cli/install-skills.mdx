@@ -3,7 +3,7 @@ title: "install-skills"
 description: "Install packaged coding-agent skill templates for mentalmodel."
 ---
 
-The `install-skills` command writes a set of packaged skill template files to the default skill directory for a supported coding agent. Skills teach the agent how to work with `mentalmodel` programs, write invariants, author plugins, and debug runs.
+The `install-skills` command writes a set of packaged skill template files to the default skill directory for a supported coding agent. Skills teach the agent how to work with `mentalmodel` programs, write invariants, author plugins, debug runs, and shape dashboard surfaces such as metric groups and custom views.
 
 ## Usage
 
@@ -35,6 +35,7 @@ The following skill templates are installed for each supported agent:
 | `mentalmodel-plugin-authoring` | How to author and register custom plugins |
 | `mentalmodel-invariants-testing` | Writing, testing, and debugging invariants |
 | `mentalmodel-debugging` | Inspecting run bundles and replaying executions with the CLI |
+| `mentalmodel-dashboard-authoring` | Designing metric groups, pinned nodes, and custom views for the dashboard |
 
 ## Examples
 
@@ -66,6 +67,7 @@ The command renders a table showing the agent, target directory, and full path o
 | codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-plugin-authoring.md |
 | codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-invariants-testing.md |
 | codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-debugging.md |
+| codex | /home/user/.codex/skills | /home/user/.codex/skills/mentalmodel-dashboard-authoring.md |
 
 <Note>
   Use `--dry-run` to verify the target paths before committing to installation, especially when using `--target-dir` with a custom location.

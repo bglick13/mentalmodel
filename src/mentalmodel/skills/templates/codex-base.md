@@ -45,6 +45,9 @@ authoring model.
   to preserve a rich provider metric map but export a stable named subset.
 - Use `extract_output_metrics(...)` with a typed extractor when the output shape
   needs real aggregation before it is safe to emit as metrics.
+- Use dashboard metric groups for numeric charts and snapshot rails.
+- Use dashboard custom views for row-based operator tables over stable reporting
+  outputs.
 - Preserve strong typing and generics. Do not introduce `Any` to move faster.
 
 ## Useful commands
@@ -143,6 +146,7 @@ program = Workflow(
 
 - `docs/recipes/structure-debugging.md`
 - `docs/recipes/block-reuse.md`
+- `docs/recipes/custom-view-authoring.md`
 - `docs/recipes/invariant-debugging.md`
 - `docs/recipes/loop-debugging.md`
 - `docs/recipes/runtime-profile-selection.md`

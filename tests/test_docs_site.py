@@ -93,6 +93,30 @@ class DocsSiteTest(unittest.TestCase):
         self.assertIn("graph.json", guide)
         self.assertIn("dev:stack", guide)
 
+    def test_dashboard_docs_cover_custom_views_and_dashboard_skill(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        docs_json = (repo_root / "docs.json").read_text(encoding="utf-8")
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        guide = (repo_root / "guides" / "custom-views.mdx").read_text(encoding="utf-8")
+        recipe = (
+            repo_root / "docs" / "recipes" / "custom-view-authoring.md"
+        ).read_text(encoding="utf-8")
+        codex_skill = (
+            repo_root
+            / "src"
+            / "mentalmodel"
+            / "skills"
+            / "templates"
+            / "codex-dashboard-authoring.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("guides/custom-views", docs_json)
+        self.assertIn("docs/recipes/custom-view-authoring", docs_json)
+        self.assertIn("DashboardCustomView", guide)
+        self.assertIn("row_source.kind=\"node_output_items\"", recipe)
+        self.assertIn("mentalmodel-dashboard-authoring", readme)
+        self.assertIn("dashboard catalogs", codex_skill)
+
     def test_remote_docs_cover_repo_linked_phase_one(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         remote_page = (repo_root / "cli" / "remote.mdx").read_text(encoding="utf-8")

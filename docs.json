@@ -41,6 +41,7 @@
           "group": "Guides",
           "pages": [
             "guides/authoring-workflows",
+            "guides/custom-views",
             "guides/dashboard-ui",
             "guides/remote-migration",
             "guides/reusable-blocks",
@@ -66,6 +67,7 @@
             "group": "Recipes",
             "pages": [
               "docs/recipes/block-reuse",
+              "docs/recipes/custom-view-authoring",
               "docs/recipes/structure-debugging",
               "docs/recipes/invariant-debugging",
               "docs/recipes/loop-debugging",

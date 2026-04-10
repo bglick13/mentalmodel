@@ -2313,25 +2313,21 @@ def _remote_live_session_from_row(
     records: Sequence[Sequence[object]],
     spans: Sequence[Sequence[object]],
 ) -> RemoteLiveSessionRecord:
-    graph_json = json.loads(cast(str, row[14]))
-    analysis_json = json.loads(cast(str, row[15]))
-    if not isinstance(graph_json, dict):
-        raise RemoteContractError("Stored live session graph_json must be an object.")
-    if not isinstance(analysis_json, dict):
-        raise RemoteContractError("Stored live session analysis_json must be an object.")
+    graph_json = _json_object_from_db_payload(row[14], "remote_live_sessions.graph_json")
+    analysis_json = _json_object_from_db_payload(
+        row[15], "remote_live_sessions.analysis_json"
+    )
     normalized_records = tuple(
-        _json_object_from_db_payload(cast(str, record_row[0]), "remote_live_records.payload_json")
+        _json_object_from_db_payload(record_row[0], "remote_live_records.payload_json")
         for record_row in records
     )
     normalized_spans = tuple(
-        _json_object_from_db_payload(cast(str, span_row[0]), "remote_live_spans.payload_json")
+        _json_object_from_db_payload(span_row[0], "remote_live_spans.payload_json")
         for span_row in spans
     )
-    runtime_profile_names = json.loads(cast(str, row[8]))
-    if not isinstance(runtime_profile_names, list):
-        raise RemoteContractError(
-            "Stored live session runtime_profile_names must decode to a list."
-        )
+    runtime_profile_names = _json_list_from_db_payload(
+        row[8], "remote_live_sessions.runtime_profile_names"
+    )
     return RemoteLiveSessionRecord(
         graph_id=cast(str, row[0]),
         run_id=cast(str, row[1]),
@@ -2424,16 +2420,35 @@ def _optional_span_node_id(row: dict[str, object]) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _json_object_from_db_payload(raw: str, field_name: str) -> dict[str, object]:
-    payload = json.loads(raw)
+def _json_value_from_db_payload(raw: object, field_name: str) -> JsonValue:
+    if isinstance(raw, (str, bytes, bytearray)):
+        payload = json.loads(raw)
+    else:
+        payload = raw
+    try:
+        return cast_json_value(payload)
+    except TypeError as exc:
+        raise RemoteContractError(
+            f"Stored {field_name} must decode to valid JSON-compatible data."
+        ) from exc
+
+
+def _json_object_from_db_payload(raw: object, field_name: str) -> dict[str, object]:
+    payload = _json_value_from_db_payload(raw, field_name)
     if not isinstance(payload, dict):
         raise RemoteContractError(f"Stored {field_name} must decode to an object.")
     return cast(dict[str, object], payload)
 
 
+def _json_list_from_db_payload(raw: object, field_name: str) -> list[object]:
+    payload = _json_value_from_db_payload(raw, field_name)
+    if not isinstance(payload, list):
+        raise RemoteContractError(f"Stored {field_name} must decode to a list.")
+    return cast(list[object], payload)
+
+
 def _remote_operation_event_from_row(row: Sequence[object]) -> RemoteOperationEvent:
-    metadata_json = cast(str, row[10])
-    metadata = _json_object_from_db_payload(metadata_json, "remote_operation_events.metadata_json")
+    metadata = _json_object_from_db_payload(row[10], "remote_operation_events.metadata_json")
     return RemoteOperationEvent(
         event_id=cast(str, row[0]),
         occurred_at_ms=cast(int, row[1]),

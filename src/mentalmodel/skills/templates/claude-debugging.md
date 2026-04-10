@@ -29,5 +29,5 @@ description: Use when debugging a mentalmodel workflow or generated artifact. Co
 - read `verification.json`, `records.jsonl`, and `outputs.json` before
   `otel-spans.jsonl`
 - follow the recipe docs under `docs/recipes/` for structure, invariants,
-  block reuse, loops, runtime profiles, resource injection, parameterized
-  verification, runtime failures, and run comparisons
+  block reuse, custom-view authoring, loops, runtime profiles, resource
+  injection, parameterized verification, runtime failures, and run comparisons

@@ -16,7 +16,8 @@
     "@xyflow/react": "^12.8.5",
     "dagre": "^0.8.5",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@types/dagre": "^0.7.52",

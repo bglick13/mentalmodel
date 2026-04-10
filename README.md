@@ -241,6 +241,8 @@ Dashboard UI:
 - hosted dashboard entries now come from remote catalog snapshots, so the
   service can render pinned nodes, metric groups, and custom views without
   importing the producer repo locally
+- grouped metric entries now also drive iteration-aware trend charts in the
+  dashboard when matching metrics carry loop iteration metadata
 - a linked repo uploads the completed run bundle automatically during normal
   `mentalmodel verify` execution after local `.runs` materialization succeeds
 - a linked repo now also streams live execution state during normal
@@ -295,9 +297,11 @@ Installed skills currently include:
 - `mentalmodel-plugin-authoring`
 - `mentalmodel-invariants-testing`
 - `mentalmodel-debugging`
+- `mentalmodel-dashboard-authoring`
 
 Debug recipe docs:
 
+- [custom-view-authoring.md](/Users/ben/repos/mentalmodel/docs/recipes/custom-view-authoring.md)
 - [structure-debugging.md](/Users/ben/repos/mentalmodel/docs/recipes/structure-debugging.md)
 - [invariant-debugging.md](/Users/ben/repos/mentalmodel/docs/recipes/invariant-debugging.md)
 - [runtime-failure-debugging.md](/Users/ben/repos/mentalmodel/docs/recipes/runtime-failure-debugging.md)

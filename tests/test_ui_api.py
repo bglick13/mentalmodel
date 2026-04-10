@@ -13,6 +13,9 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from mentalmodel.examples.async_rl.demo import build_program
+from mentalmodel.examples.verification_failure import (
+    build_program as build_failure_program,
+)
 from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
@@ -289,6 +292,43 @@ class DashboardApiTest(unittest.TestCase):
         spec_ids = {entry["spec_id"] for entry in catalog_response.json()["entries"]}
         self.assertEqual(spec_ids, {"pangramanizer-smoke"})
 
+    def test_remote_catalog_entries_override_local_duplicates(self) -> None:
+        project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
+        local_entry = default_dashboard_catalog()[0]
+        remote_entry_payload = dict(local_entry.as_dict())
+        remote_entry_payload["label"] = "Remote Override"
+        remote_entry_payload["launch_enabled"] = False
+        project_store.link_project(
+            RemoteProjectLinkRequest(
+                project_id="pangramanizer",
+                label="Pangramanizer",
+                catalog_provider="pangramanizer.dashboard:catalog",
+                catalog_snapshot=ProjectCatalogSnapshot(
+                    project_id="pangramanizer",
+                    provider="pangramanizer.dashboard:catalog",
+                    published_at_ms=1000,
+                    entries=(remote_entry_payload,),
+                    default_entry_id=local_entry.spec_id,
+                ),
+            )
+        )
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                catalog_entries=(local_entry,),
+                remote_project_store=project_store,
+            )
+        )
+
+        response = client.get("/api/catalog")
+        self.assertEqual(response.status_code, 200)
+        entries = response.json()["entries"]
+        matching = [entry for entry in entries if entry["spec_id"] == local_entry.spec_id]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["label"], "Remote Override")
+        self.assertFalse(matching[0]["launch_enabled"])
+
     def test_remote_catalog_publish_endpoint_updates_existing_snapshot(self) -> None:
         project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
         client = TestClient(
@@ -389,6 +429,31 @@ class DashboardApiTest(unittest.TestCase):
         payload = events.json()["events"]
         self.assertGreaterEqual(len(payload), 1)
         self.assertIn(payload[0]["kind"], {"run.upload", "live.commit"})
+
+    def test_run_overview_exposes_runtime_failure_context_for_failed_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runs_dir = Path(tmpdir)
+            report = run_verification(
+                build_failure_program(),
+                runs_dir=runs_dir,
+                persist_run_artifacts=True,
+            )
+            self.assertFalse(report.success)
+            self.assertIsNotNone(report.runtime.run_id)
+            assert report.runtime.run_id is not None
+
+            client = TestClient(
+                create_dashboard_app(runs_dir=runs_dir, frontend_dist=None)
+            )
+            overview = client.get(
+                f"/api/runs/verification_failure/{report.runtime.run_id}/overview"
+            )
+            self.assertEqual(overview.status_code, 200)
+            payload = overview.json()
+            self.assertEqual(payload["summary"]["status"], "failed")
+            self.assertFalse(payload["verification_success"])
+            self.assertIsInstance(payload["runtime_error"], str)
+            self.assertTrue(payload["runtime_error"])
 
     def test_review_workflow_dashboard_api_launches_and_inspects_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -550,6 +615,150 @@ class DashboardApiTest(unittest.TestCase):
             self.assertEqual(payload["rows"][0]["values"]["pangram_score"], 0.9)
             self.assertEqual(payload["rows"][1]["values"]["run_label"], "synthetic")
             self.assertEqual(payload["warnings"], [])
+
+    def test_dashboard_custom_view_endpoint_evaluates_live_rows(self) -> None:
+        custom_entry = DashboardCatalogEntry(
+            spec_id="custom-live-view-entry",
+            label="Custom Live View Entry",
+            description="Synthetic live custom table view entry.",
+            spec_path=Path("/tmp/custom-live.toml"),
+            graph_id="custom_live_graph",
+            invocation_name="custom_live_invocation",
+            category="integration",
+            launch_enabled=False,
+            custom_views=(
+                DashboardCustomView(
+                    view_id="sample-quality",
+                    title="Sample Quality",
+                    description="Prompt and reward table.",
+                    kind="table",
+                    row_source=DashboardTableRowSource(
+                        kind="node_output_items",
+                        node_id="sample_rows",
+                        items_path="rows",
+                    ),
+                    columns=(
+                        DashboardTableColumn(
+                            column_id="prompt_text",
+                            title="Prompt",
+                            selector=DashboardValueSelector(
+                                kind="row_item",
+                                path="prompt_text",
+                            ),
+                        ),
+                        DashboardTableColumn(
+                            column_id="pangram_score",
+                            title="Pangram",
+                            selector=DashboardValueSelector(
+                                kind="row_item",
+                                path="reward.pangram",
+                            ),
+                        ),
+                        DashboardTableColumn(
+                            column_id="run_label",
+                            title="Run Label",
+                            selector=DashboardValueSelector(
+                                kind="node_output",
+                                node_id="summary_node",
+                                path="run_label",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+        client = TestClient(
+            create_dashboard_app(
+                runs_dir=None,
+                frontend_dist=None,
+                catalog_entries=(custom_entry,),
+                remote_live_session_store=live_store,
+                remote_api_key="test-key",
+            )
+        )
+
+        start_response = client.post(
+            "/api/remote/live/sessions/start",
+            headers={"Authorization": "Bearer test-key"},
+            json=RemoteLiveSessionStartRequest(
+                graph_id="custom_live_graph",
+                run_id="run-live-custom-view",
+                started_at_ms=1000,
+                project_id="custom-project",
+                invocation_name="custom_live_invocation",
+                graph={"graph_id": "custom_live_graph", "metadata": {}, "nodes": [], "edges": []},
+                analysis={"error_count": 0, "warning_count": 0, "findings": []},
+                runtime_default_profile_name=None,
+                runtime_profile_names=(),
+            ).as_dict(),
+        )
+        self.assertEqual(start_response.status_code, 200)
+
+        update_response = client.post(
+            "/api/remote/live/sessions/run-live-custom-view",
+            headers={"Authorization": "Bearer test-key"},
+            json=RemoteLiveSessionUpdateRequest(
+                graph_id="custom_live_graph",
+                run_id="run-live-custom-view",
+                updated_at_ms=1100,
+                records=(
+                    {
+                        "record_id": "live:sample_rows:succeeded",
+                        "run_id": "run-live-custom-view",
+                        "node_id": "sample_rows",
+                        "frame_id": "root",
+                        "frame_path": ["root"],
+                        "loop_node_id": None,
+                        "iteration_index": None,
+                        "event_type": "node.succeeded",
+                        "sequence": 1,
+                        "timestamp_ms": 1100,
+                        "payload": {
+                            "output": {
+                                "rows": [
+                                    {
+                                        "prompt_text": "Prompt A",
+                                        "reward": {"pangram": 0.9},
+                                    },
+                                    {
+                                        "prompt_text": "Prompt B",
+                                        "reward": {"pangram": 0.7},
+                                    },
+                                ]
+                            }
+                        },
+                    },
+                    {
+                        "record_id": "live:summary_node:succeeded",
+                        "run_id": "run-live-custom-view",
+                        "node_id": "summary_node",
+                        "frame_id": "root",
+                        "frame_path": ["root"],
+                        "loop_node_id": None,
+                        "iteration_index": None,
+                        "event_type": "node.succeeded",
+                        "sequence": 2,
+                        "timestamp_ms": 1101,
+                        "payload": {"output": {"run_label": "live-synthetic"}},
+                    },
+                ),
+                spans=(),
+            ).as_dict(),
+        )
+        self.assertEqual(update_response.status_code, 200)
+
+        response = client.get(
+            "/api/catalog/custom-live-view-entry/runs/run-live-custom-view/views/sample-quality"
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["view"]["view_id"], "sample-quality")
+        self.assertEqual(payload["row_count"], 2)
+        self.assertEqual(payload["rows"][0]["values"]["prompt_text"], "Prompt A")
+        self.assertEqual(payload["rows"][0]["values"]["pangram_score"], 0.9)
+        self.assertEqual(payload["rows"][1]["values"]["run_label"], "live-synthetic")
+        self.assertEqual(payload["warnings"], [])
 
     def test_dashboard_registers_spec_from_absolute_path(self) -> None:
         fixture_path = Path(__file__).resolve().parents[1] / Path(

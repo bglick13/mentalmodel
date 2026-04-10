@@ -293,6 +293,8 @@ export type InvariantOverview = {
 export type RunOverview = {
   summary: RunSummary;
   verification: Record<string, unknown> | null;
+  verification_success: boolean | null;
+  runtime_error: string | null;
   graph: GraphPayload;
   metrics: NumericMetric[];
   invariants: InvariantOverview[];

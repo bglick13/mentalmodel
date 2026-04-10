@@ -16,6 +16,7 @@ import {
 } from "./components/InspectorNodeIo";
 import { ExplorerTimeseriesChart } from "./components/ExplorerTimeseriesChart";
 import { GraphPanel } from "./components/GraphPanel";
+import { MetricGroupTimeseriesChart } from "./components/MetricGroupTimeseriesChart";
 import { SpanFlamegraph } from "./components/SpanFlamegraph";
 import {
   fetchCatalog,
@@ -77,6 +78,7 @@ type SpansInspector =
 type MetricGroupView = {
   group: MetricGroup;
   metrics: NumericMetric[];
+  hasIterationSeries: boolean;
 };
 
 type ViewId =
@@ -125,6 +127,8 @@ const VIEWS: Array<{
 const SPEC_PATH_STORAGE_KEY = "mentalmodel.dashboard.specPath";
 const LEGACY_PANGRAM_VERIFY3 =
   "/Users/ben/repos/pangramanizer/pangramanizer/mentalmodel_training/verification/real_verify3.toml";
+const RUN_LIST_POLL_MS = 2000;
+const SELECTED_RUN_POLL_MS = 2000;
 
 function readStoredSpecPath(): string {
   try {
@@ -269,6 +273,7 @@ function App() {
   );
   const [remoteEvents, setRemoteEvents] = useState<RemoteOperationEvent[]>([]);
   const [runSpansLoading, setRunSpansLoading] = useState(false);
+  const [selectedRunRefreshTick, setSelectedRunRefreshTick] = useState(0);
   const explorerUrlHydratedRef = useRef(false);
   const prevExplorerSpecIdRef = useRef<string | null>(null);
   /** After popstate/back-forward: sync URL with React state using replace, do not push. */
@@ -345,14 +350,20 @@ function App() {
     [runs, runsInExploreWindow],
   );
 
-  const loadRun = useCallback(async (entry: CatalogEntry, runId: string) => {
+  const loadRun = useCallback(async (
+    entry: CatalogEntry,
+    runId: string,
+    options?: { preserveFrameSelection?: boolean },
+  ) => {
     const [overview, replay] = await Promise.all([
       fetchRunOverview(entry.graph_id, runId),
       fetchRunReplay(entry.graph_id, runId, entry.default_loop_node_id ?? undefined),
     ]);
     setActiveRun(overview);
     setActiveReplay(replay);
-    setSelectedFrameId(null);
+    if (!options?.preserveFrameSelection) {
+      setSelectedFrameId(null);
+    }
     const preferred = exploreNodeIdRef.current;
     setSelectedNodeId((current) => {
       if (
@@ -469,18 +480,33 @@ function App() {
     if (!selectedCatalog) {
       return;
     }
+    let cancelled = false;
     const timer = window.setInterval(() => {
-      void refreshRuns(selectedCatalog).catch((fetchError: unknown) => {
-        setError(String(fetchError));
-      });
-    }, 5000);
-    return () => window.clearInterval(timer);
+      if (cancelled || document.visibilityState !== "visible") {
+        return;
+      }
+      void refreshRuns(selectedCatalog)
+        .then((nextRuns) => {
+          if (cancelled || nextRuns.length === 0) {
+            return;
+          }
+          setExploreRunId((current) => current ?? nextRuns[0]!.run_id);
+        })
+        .catch((fetchError: unknown) => {
+          if (!cancelled) {
+            setError(String(fetchError));
+          }
+        });
+    }, RUN_LIST_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [selectedCatalog, refreshRuns]);
 
   useEffect(() => {
     if (
       exploreRunId != null &&
-      runs.length > 0 &&
       !runs.some((r) => r.run_id === exploreRunId) &&
       !(
         activeExecution?.run_id === exploreRunId &&
@@ -531,6 +557,35 @@ function App() {
   ]);
 
   useEffect(() => {
+    if (!selectedCatalog || !exploreRunId) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      if (cancelled || document.visibilityState !== "visible") {
+        return;
+      }
+      void loadRun(selectedCatalog, exploreRunId, {
+        preserveFrameSelection: true,
+      })
+        .then(() => {
+          if (!cancelled) {
+            setSelectedRunRefreshTick((current) => current + 1);
+          }
+        })
+        .catch((loadError: unknown) => {
+          if (!cancelled) {
+            setError(String(loadError));
+          }
+        });
+    }, SELECTED_RUN_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedCatalog, exploreRunId, loadRun]);
+
+  useEffect(() => {
     if (!selectedCatalog || !activeRun || exploreRunId == null) {
       return;
     }
@@ -557,7 +612,13 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCatalog, activeRun?.summary.run_id, exploreRunId, exploreNodeId]);
+  }, [
+    selectedCatalog,
+    activeRun?.summary.run_id,
+    exploreRunId,
+    exploreNodeId,
+    selectedRunRefreshTick,
+  ]);
 
   useEffect(() => {
     if (!selectedCatalog || !activeRun || exploreRunId == null) {
@@ -588,7 +649,12 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCatalog, activeRun?.summary.run_id, exploreRunId]);
+  }, [
+    selectedCatalog,
+    activeRun?.summary.run_id,
+    exploreRunId,
+    selectedRunRefreshTick,
+  ]);
 
   useEffect(() => {
     const projectId = selectedCatalog?.project_id ?? null;
@@ -618,7 +684,12 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCatalog?.project_id, selectedCatalog?.graph_id, exploreRunId]);
+  }, [
+    selectedCatalog?.project_id,
+    selectedCatalog?.graph_id,
+    exploreRunId,
+    selectedRunRefreshTick,
+  ]);
 
   useEffect(() => {
     if (
@@ -667,6 +738,7 @@ function App() {
     activeRun?.summary.run_id,
     exploreRunId,
     selectedCustomViewId,
+    selectedRunRefreshTick,
   ]);
 
   useEffect(() => {
@@ -1473,6 +1545,7 @@ function renderCurrentView({
           exploreNodeId={exploreNodeId}
           exploreRunId={exploreRunId}
           nodeDetail={nodeDetail}
+          runFailureMessage={activeRun?.runtime_error ?? null}
           runContext={runContext}
           runRecordsInWindow={recordsInTimeWindow}
           runSpansLoading={runSpansLoading}
@@ -1563,10 +1636,49 @@ function OverviewView({
       : String(
           new Set(activeRun?.metrics.map((m) => m.frame_id) ?? []).size,
         );
+  const runFailed =
+    activeRun?.summary.status === "failed" ||
+    activeRun?.verification_success === false ||
+    activeRun?.runtime_error != null;
+  const failureCards: Array<{ label: string; copy: string }> = [];
+  if (runFailed && activeRun != null && activeRun.runtime_error) {
+    failureCards.push({
+      label: "runtime failure",
+      copy:
+        activeRun.summary.output_count === 0
+          ? `Run failed before outputs were fully persisted. ${activeRun.runtime_error}`
+          : activeRun.runtime_error,
+    });
+  }
+  if (
+    runFailed &&
+    activeRun != null &&
+    activeRun.summary.output_count === 0 &&
+    !activeRun.runtime_error
+  ) {
+    failureCards.push({
+      label: "missing outputs",
+      copy:
+        "Run failed before frame or node outputs were written to the persisted bundle.",
+    });
+  }
 
   return (
     <>
       <RunContextStrip tokens={runContext} />
+
+      {failureCards.length > 0 ? (
+        <section className="analysis-stack">
+          {failureCards.map((card) => (
+            <AlertCard
+              key={`${card.label}:${card.copy}`}
+              copy={card.copy}
+              label={card.label}
+              tone="error"
+            />
+          ))}
+        </section>
+      ) : null}
 
       <section className="hero-grid v3-hero-grid">
         <KpiCard
@@ -1608,6 +1720,32 @@ function OverviewView({
               timeseries={timeseries}
             />
           </Panel>
+
+          <Panel title="Training metrics">
+            {metricGroups.length > 0 ? (
+              <div className="metric-groups-stack">
+                {metricGroups.map((groupView) => (
+                  <MetricGroupRail
+                    key={groupView.group.group_id}
+                    group={groupView.group}
+                    hasIterationSeries={groupView.hasIterationSeries}
+                    metrics={groupView.metrics}
+                    onInspectMetric={(metric) => {
+                      selectNodeAndExplorer(
+                        metric.node_id,
+                        metric.frame_id && metric.frame_id !== "root"
+                          ? metric.frame_id
+                          : null,
+                      );
+                      setActiveView("node");
+                    }}
+                  />
+                ))}
+              </div>
+            ) : (
+              <EmptyState copy="This spec does not expose grouped numeric outputs yet." />
+            )}
+          </Panel>
         </div>
 
         <div className="stack narrow">
@@ -1645,29 +1783,6 @@ function OverviewView({
                 <EmptyState copy="This spec has no persisted runs yet. Launch one from the workspace." />
               )}
             </div>
-          </Panel>
-
-          <Panel title="Metrics">
-            {metricGroups.length > 0 ? (
-              metricGroups.map((groupView) => (
-                <MetricGroupRail
-                  key={groupView.group.group_id}
-                  group={groupView.group}
-                  metrics={groupView.metrics}
-                  onInspectMetric={(metric) => {
-                    selectNodeAndExplorer(
-                      metric.node_id,
-                      metric.frame_id && metric.frame_id !== "root"
-                        ? metric.frame_id
-                        : null,
-                    );
-                    setActiveView("node");
-                  }}
-                />
-              ))
-            ) : (
-              <EmptyState copy="This spec does not expose grouped numeric outputs yet." />
-            )}
           </Panel>
         </div>
       </section>
@@ -1905,6 +2020,9 @@ function CustomViewsView({
     selectedRow && activeCustomView
       ? activeCustomView.rows.findIndex((r) => r.row_id === selectedRow.row_id)
       : -1;
+  const showInlineLoading = customViewLoading && activeRun != null && activeCustomView != null;
+  const showBlockingLoading = customViewLoading && activeCustomView == null;
+  const showInlineError = customViewError != null && activeCustomView != null;
 
   return (
     <>
@@ -1915,18 +2033,26 @@ function CustomViewsView({
             title={activeCustomView?.view.title ?? "Custom View"}
             aside={
               activeRun ? (
-                <StatusChip label={activeRun.summary.run_id.slice(0, 12)} tone="accent" />
+                <div className="chip-row wrap">
+                  <StatusChip label={activeRun.summary.run_id.slice(0, 12)} tone="accent" />
+                  {showInlineLoading ? (
+                    <StatusChip label="refreshing view…" tone="accent" />
+                  ) : null}
+                </div>
               ) : null
             }
           >
-            {customViewError ? (
-              <EmptyState copy={customViewError} />
-            ) : customViewLoading ? (
-              <EmptyState copy="Loading evaluated run view…" />
-            ) : !activeRun ? (
-              <EmptyState copy="Pick a persisted run in Explorer to evaluate a custom view." />
+            {!activeRun ? (
+              <EmptyState copy="Pick a run in Explorer to evaluate a custom view." />
             ) : activeCustomView ? (
               <div className="custom-view-stack">
+                {showInlineError ? (
+                  <AlertCard
+                    copy={customViewError ?? "Custom view refresh failed."}
+                    label="view refresh failed"
+                    tone="error"
+                  />
+                ) : null}
                 {activeCustomView.view.description ? (
                   <div className="panel-copy">{activeCustomView.view.description}</div>
                 ) : null}
@@ -1997,6 +2123,10 @@ function CustomViewsView({
                   </table>
                 </div>
               </div>
+            ) : customViewError ? (
+              <EmptyState copy={customViewError} />
+            ) : showBlockingLoading ? (
+              <EmptyState copy="Loading evaluated run view…" />
             ) : (
               <EmptyState copy="Select a custom view to render it for the current run." />
             )}
@@ -2370,6 +2500,7 @@ function SpansRecordsView({
   exploreNodeId,
   exploreRunId,
   nodeDetail,
+  runFailureMessage,
   runContext,
   runRecordsInWindow,
   runSpansLoading,
@@ -2385,6 +2516,7 @@ function SpansRecordsView({
   exploreRunId: string | null;
   /** Latest node-detail payload for the explorer’s node + frame (same API the drawers call). */
   nodeDetail: NodeDetail | null;
+  runFailureMessage: string | null;
   runContext: ScopeToken[];
   /** Time-window slice of the loaded run’s semantic records (same source as list; used to join spans). */
   runRecordsInWindow: ExecutionRecord[];
@@ -2572,16 +2704,14 @@ function SpansRecordsView({
                 <StatusChip label={`frame: ${selectedFrameId ?? "all"}`} />
                 <StatusChip label={`${spanItems.length} spans`} />
                 <StatusChip label={`trace: ${activeRun?.summary.trace_mode ?? "n/a"}`} />
+                {runSpansLoading && exploreRunId ? (
+                  <StatusChip label="loading span data…" tone="accent" />
+                ) : null}
               </div>
               <p className="spans-explainer">
                 Sequential span list (like a Datadog span list). Click a row for full
                 attributes.
               </p>
-              {runSpansLoading && exploreRunId ? (
-                <div className="spans-loading-banner" aria-live="polite">
-                  Loading span data…
-                </div>
-              ) : null}
               <TraceList
                 indexOffset={spanIndexOffset}
                 selectedIndex={
@@ -2656,6 +2786,7 @@ function SpansRecordsView({
               nodeId={spanDetail.correlationKeys.nodeId}
               prefetchedDetail={ioPrefetchForOpenSpan}
               runId={spanDetail.correlationKeys.runId ?? exploreRunId}
+              runFailureMessage={runFailureMessage}
             />
           }
           badge={spanDetail.kindTag.toUpperCase()}
@@ -2680,6 +2811,7 @@ function SpansRecordsView({
               nodeId={recordDetail.node_id}
               prefetchedDetail={ioPrefetchForOpenRecord}
               runId={recordDetail.run_id}
+              runFailureMessage={runFailureMessage}
             />
           }
           badge={recordDetail.event_type}
@@ -3166,10 +3298,12 @@ function StatusChip({
 
 function MetricGroupRail({
   group,
+  hasIterationSeries,
   metrics,
   onInspectMetric,
 }: {
   group: MetricGroup;
+  hasIterationSeries: boolean;
   metrics: NumericMetric[];
   onInspectMetric: (metric: NumericMetric) => void;
 }) {
@@ -3181,6 +3315,15 @@ function MetricGroupRail({
         <div className="panel-title">{group.title}</div>
         <div className="panel-subtitle">{group.description}</div>
       </div>
+      {hasIterationSeries ? (
+        <MetricGroupTimeseriesChart group={group} metrics={metrics} />
+      ) : (
+        <div className="metric-group-hint">
+          This group currently exposes snapshot metrics only. Iteration charts appear
+          automatically when matching metrics include
+          <span className="mono"> iteration_index</span>.
+        </div>
+      )}
       <div className="metric-rail-list">
         {metrics.map((metric) => (
           <button
@@ -3480,20 +3623,34 @@ function buildMetricGroups(
     return [];
   }
   return catalog.metric_groups
-    .map((group) => ({
-      group,
-      metrics: dedupeMetrics(
-        metrics.filter((metric) =>
-          group.metric_path_prefixes.some(
-            (prefix) =>
-              metric.path.startsWith(prefix) || metric.label.startsWith(prefix),
-          ),
+    .map((group) => {
+      const matchingMetrics = metrics.filter((metric) => metricMatchesGroup(metric, group));
+      return {
+        group,
+        metrics: dedupeMetrics(matchingMetrics)
+          .sort((left, right) => right.value - left.value)
+          .slice(0, group.max_items),
+        hasIterationSeries: matchingMetrics.some(
+          (metric) => metric.iteration_index != null,
         ),
-      )
-        .sort((left, right) => right.value - left.value)
-        .slice(0, group.max_items),
-    }))
+      };
+    })
     .filter((groupView) => groupView.metrics.length > 0);
+}
+
+function metricMatchesGroup(metric: NumericMetric, group: MetricGroup): boolean {
+  const metricNodePath = `${metric.node_id}.${metric.path}`;
+  const normalizedLabel =
+    metric.frame_id && metric.frame_id !== "root"
+      ? metric.label.replace(`${metric.frame_id}.`, "")
+      : metric.label;
+  return group.metric_path_prefixes.some(
+    (prefix) =>
+      metric.path.startsWith(prefix) ||
+      metricNodePath.startsWith(prefix) ||
+      metric.label.startsWith(prefix) ||
+      normalizedLabel.startsWith(prefix),
+  );
 }
 
 function formatMetricValue(value: number) {

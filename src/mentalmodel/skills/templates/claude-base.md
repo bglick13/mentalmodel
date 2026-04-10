@@ -35,6 +35,9 @@ authoring model.
   named fields from richer provider metric maps.
 - Use `extract_output_metrics(...)` for typed aggregation when projection alone
   is not enough.
+- Use dashboard metric groups for numeric charts and snapshot rails.
+- Use dashboard custom views for row-based operator tables over stable reporting
+  outputs.
 - Preserve strong typing and generics.
 - Run `mentalmodel doctor` when setup, entrypoints, installed skills, or
   tracing look suspicious.
@@ -96,6 +99,7 @@ normalize older bundles.
 Recipe docs live under `docs/recipes/`:
 
 - `block-reuse.md`
+- `custom-view-authoring.md`
 - `structure-debugging.md`
 - `invariant-debugging.md`
 - `loop-debugging.md`

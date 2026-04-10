@@ -2145,9 +2145,13 @@ class CliTest(unittest.TestCase):
             skill_file = Path(tmpdir) / "mentalmodel-base" / "SKILL.md"
             plugin_skill = Path(tmpdir) / "mentalmodel-plugin-authoring" / "SKILL.md"
             debug_skill = Path(tmpdir) / "mentalmodel-debugging" / "SKILL.md"
+            dashboard_skill = (
+                Path(tmpdir) / "mentalmodel-dashboard-authoring" / "SKILL.md"
+            )
             self.assertTrue(skill_file.exists())
             self.assertTrue(plugin_skill.exists())
             self.assertTrue(debug_skill.exists())
+            self.assertTrue(dashboard_skill.exists())
             self.assertIn("mentalmodel Base", skill_file.read_text(encoding="utf-8"))
 
 

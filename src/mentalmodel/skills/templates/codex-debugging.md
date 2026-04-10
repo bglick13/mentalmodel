@@ -79,6 +79,7 @@ When a generated doc “looks wrong”:
 
 - `docs/recipes/structure-debugging.md`
 - `docs/recipes/block-reuse.md`
+- `docs/recipes/custom-view-authoring.md`
 - `docs/recipes/invariant-debugging.md`
 - `docs/recipes/loop-debugging.md`
 - `docs/recipes/runtime-profile-selection.md`

@@ -11,6 +11,7 @@ SUPPORTED_SKILLS = (
     "mentalmodel-plugin-authoring",
     "mentalmodel-invariants-testing",
     "mentalmodel-debugging",
+    "mentalmodel-dashboard-authoring",
 )
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeGuard
+from typing import TypeGuard, cast
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
@@ -236,6 +236,50 @@ def evaluate_custom_view(
     )
 
 
+def evaluate_custom_view_from_records(
+    *,
+    records: list[dict[str, object]],
+    run_id: str,
+    view: DashboardCustomView,
+) -> EvaluatedCustomView:
+    warnings: list[str] = []
+    warning_keys: set[str] = set()
+    rows = _resolve_row_scopes_from_records(
+        records=records,
+        run_id=run_id,
+        view=view,
+        warnings=warnings,
+        warning_keys=warning_keys,
+    )
+    evaluated_rows: list[EvaluatedCustomViewRow] = []
+    for row in rows:
+        values: dict[str, JsonValue] = {}
+        for column in view.columns:
+            value = _evaluate_selector_from_records(
+                records=records,
+                run_id=run_id,
+                selector=column.selector,
+                row=row,
+                warnings=warnings,
+                warning_keys=warning_keys,
+            )
+            values[column.column_id] = value
+        evaluated_rows.append(
+            EvaluatedCustomViewRow(
+                row_id=row.row_id,
+                frame_id=row.frame_id,
+                loop_node_id=row.loop_node_id,
+                iteration_index=row.iteration_index,
+                values=values,
+            )
+        )
+    return EvaluatedCustomView(
+        view=view,
+        rows=tuple(evaluated_rows),
+        warnings=tuple(warnings),
+    )
+
+
 def _resolve_row_scopes(
     *,
     runs_dir: Path,
@@ -328,6 +372,88 @@ def _resolve_row_scopes(
                     warning_keys,
                     ("row-source-item", source.node_id, source.items_path, str(index)),
                     "Custom view row items must be JSON-compatible values.",
+                )
+                continue
+            resolved_rows.append(
+                _ResolvedRowScope(
+                    row_id=f"{frame_id or 'root'}:{index}",
+                    frame_id=frame_id,
+                    loop_node_id=loop_node_id,
+                    iteration_index=iteration_index,
+                    item=item,
+                )
+            )
+    return tuple(resolved_rows)
+
+
+def _resolve_row_scopes_from_records(
+    *,
+    records: list[dict[str, object]],
+    run_id: str,
+    view: DashboardCustomView,
+    warnings: list[str],
+    warning_keys: set[str],
+) -> tuple[_ResolvedRowScope, ...]:
+    source = view.row_source
+    outputs_by_scope = _latest_live_outputs_for_node(
+        records=records,
+        run_id=run_id,
+        node_id=source.node_id,
+    )
+    matching_scopes = [
+        scope
+        for scope in outputs_by_scope
+        if source.loop_node_id is None or scope[1] == source.loop_node_id
+    ]
+    if not matching_scopes:
+        _add_warning(
+            warnings,
+            warning_keys,
+            ("row-source-live-output", source.node_id),
+            f"Row source {source.node_id!r} is not available from the live record stream yet.",
+        )
+        return ()
+
+    ordered_scopes = sorted(
+        matching_scopes,
+        key=lambda scope: (
+            -1 if scope[2] is None else cast(int, scope[2]),
+            "" if scope[0] is None else cast(str, scope[0]),
+        ),
+    )
+    resolved_rows: list[_ResolvedRowScope] = []
+    for frame_id, loop_node_id, iteration_index in ordered_scopes:
+        output = outputs_by_scope[(frame_id, loop_node_id, iteration_index)]
+        items = _extract_value(output, source.items_path)
+        if items is _MISSING:
+            _add_warning(
+                warnings,
+                warning_keys,
+                ("row-source-live-path", source.node_id, source.items_path),
+                (
+                    f"Row source path {source.items_path!r} was not found on live "
+                    f"node output {source.node_id!r}."
+                ),
+            )
+            continue
+        if not isinstance(items, list):
+            _add_warning(
+                warnings,
+                warning_keys,
+                ("row-source-live-list", source.node_id, source.items_path),
+                (
+                    f"Row source path {source.items_path!r} on live node "
+                    f"{source.node_id!r} is not a list."
+                ),
+            )
+            continue
+        for index, item in enumerate(items):
+            if not _is_json_value(item):
+                _add_warning(
+                    warnings,
+                    warning_keys,
+                    ("row-source-live-item", source.node_id, source.items_path, str(index)),
+                    "Live custom view row items must be JSON-compatible values.",
                 )
                 continue
             resolved_rows.append(
@@ -447,6 +573,268 @@ def _evaluate_selector(
         )
         return None
     return cast_json_value(value)
+
+
+def _evaluate_selector_from_records(
+    *,
+    records: list[dict[str, object]],
+    run_id: str,
+    selector: DashboardValueSelector,
+    row: _ResolvedRowScope,
+    warnings: list[str],
+    warning_keys: set[str],
+) -> JsonValue:
+    source: JsonValue | object
+    if selector.kind == "row_item":
+        source = row.item
+    elif selector.kind == "scope":
+        source = {
+            "frame_id": row.frame_id,
+            "loop_node_id": row.loop_node_id,
+            "iteration_index": row.iteration_index,
+        }
+    elif selector.kind == "node_output":
+        if selector.node_id is None:
+            return None
+        output = _latest_live_output_for_scope(
+            records=records,
+            run_id=run_id,
+            node_id=selector.node_id,
+            frame_id=row.frame_id,
+            loop_node_id=row.loop_node_id,
+            iteration_index=row.iteration_index,
+        )
+        if output is _MISSING:
+            _add_warning(
+                warnings,
+                warning_keys,
+                ("live-node-output", selector.node_id, row.row_id),
+                f"Live node output {selector.node_id!r} was not found for row {row.row_id}.",
+            )
+            return None
+        source = output
+    elif selector.kind == "node_input":
+        if selector.node_id is None:
+            return None
+        inputs = _latest_live_inputs_for_scope(
+            records=records,
+            run_id=run_id,
+            node_id=selector.node_id,
+            frame_id=row.frame_id,
+            loop_node_id=row.loop_node_id,
+            iteration_index=row.iteration_index,
+        )
+        if inputs is _MISSING:
+            _add_warning(
+                warnings,
+                warning_keys,
+                ("live-node-input", selector.node_id, row.row_id),
+                f"Live node input {selector.node_id!r} was not found for row {row.row_id}.",
+            )
+            return None
+        source = inputs
+    elif selector.kind == "record_payload":
+        if selector.node_id is None:
+            return None
+        payload = _latest_live_record_payload_for_scope(
+            records=records,
+            run_id=run_id,
+            node_id=selector.node_id,
+            event_type=selector.event_type,
+            frame_id=row.frame_id,
+            loop_node_id=row.loop_node_id,
+            iteration_index=row.iteration_index,
+        )
+        if payload is _MISSING:
+            _add_warning(
+                warnings,
+                warning_keys,
+                ("live-record-payload", selector.node_id, selector.event_type or "*", row.row_id),
+                (
+                    f"Live record payload {selector.node_id!r}/"
+                    f"{selector.event_type or '*'} was not found for row "
+                    f"{row.row_id}."
+                ),
+            )
+            return None
+        source = payload
+    else:
+        return None
+    if selector.path is None or selector.path == "":
+        return cast_json_value(source)
+    value = _extract_value(source, selector.path)
+    if value is _MISSING:
+        _add_warning(
+            warnings,
+            warning_keys,
+            (
+                "live-selector-path",
+                selector.kind,
+                selector.node_id or "",
+                selector.path,
+                row.row_id,
+            ),
+            f"Selector path {selector.path!r} was not found for live row {row.row_id}.",
+        )
+        return None
+    return cast_json_value(value)
+
+
+def _latest_live_outputs_for_node(
+    *,
+    records: list[dict[str, object]],
+    run_id: str,
+    node_id: str,
+) -> dict[tuple[str | None, str | None, int | None], JsonValue]:
+    outputs: dict[tuple[str | None, str | None, int | None], JsonValue] = {}
+    for record in records:
+        if not _live_record_matches(
+            record,
+            run_id=run_id,
+            node_id=node_id,
+            event_type="node.succeeded",
+        ):
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        output = payload.get("output")
+        if not _is_json_value(output):
+            continue
+        outputs[_live_scope_key(record)] = output
+    return outputs
+
+
+def _latest_live_output_for_scope(
+    *,
+    records: list[dict[str, object]],
+    run_id: str,
+    node_id: str,
+    frame_id: str | None,
+    loop_node_id: str | None,
+    iteration_index: int | None,
+) -> JsonValue | object:
+    output = _MISSING
+    for record in records:
+        if not _live_record_matches(
+            record,
+            run_id=run_id,
+            node_id=node_id,
+            event_type="node.succeeded",
+            frame_id=frame_id,
+            loop_node_id=loop_node_id,
+            iteration_index=iteration_index,
+        ):
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        candidate = payload.get("output")
+        if _is_json_value(candidate):
+            output = candidate
+    return output
+
+
+def _latest_live_inputs_for_scope(
+    *,
+    records: list[dict[str, object]],
+    run_id: str,
+    node_id: str,
+    frame_id: str | None,
+    loop_node_id: str | None,
+    iteration_index: int | None,
+) -> JsonValue | object:
+    inputs = _MISSING
+    for record in records:
+        if not _live_record_matches(
+            record,
+            run_id=run_id,
+            node_id=node_id,
+            frame_id=frame_id,
+            loop_node_id=loop_node_id,
+            iteration_index=iteration_index,
+        ):
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        for key in ("inputs", "resolved_inputs"):
+            candidate = payload.get(key)
+            if _is_json_value(candidate):
+                inputs = candidate
+    return inputs
+
+
+def _latest_live_record_payload_for_scope(
+    *,
+    records: list[dict[str, object]],
+    run_id: str,
+    node_id: str,
+    event_type: str | None,
+    frame_id: str | None,
+    loop_node_id: str | None,
+    iteration_index: int | None,
+) -> JsonValue | object:
+    payload_value = _MISSING
+    for record in records:
+        if not _live_record_matches(
+            record,
+            run_id=run_id,
+            node_id=node_id,
+            event_type=event_type,
+            frame_id=frame_id,
+            loop_node_id=loop_node_id,
+            iteration_index=iteration_index,
+        ):
+            continue
+        payload = record.get("payload")
+        if _is_json_value(payload):
+            payload_value = payload
+    return payload_value
+
+
+def _live_record_matches(
+    record: dict[str, object],
+    *,
+    run_id: str,
+    node_id: str,
+    event_type: str | None = None,
+    frame_id: str | None = None,
+    loop_node_id: str | None = None,
+    iteration_index: int | None = None,
+) -> bool:
+    if record.get("run_id") != run_id or record.get("node_id") != node_id:
+        return False
+    if event_type is not None and record.get("event_type") != event_type:
+        return False
+    rec_frame_id, rec_loop_node_id, rec_iteration_index = _live_scope_key(record)
+    if rec_frame_id != frame_id:
+        return False
+    if rec_loop_node_id != loop_node_id:
+        return False
+    if rec_iteration_index != iteration_index:
+        return False
+    return True
+
+
+def _live_scope_key(
+    record: dict[str, object],
+) -> tuple[str | None, str | None, int | None]:
+    frame_id_value = record.get("frame_id")
+    loop_node_id_value = record.get("loop_node_id")
+    iteration_index_value = record.get("iteration_index")
+    frame_id = (
+        frame_id_value
+        if isinstance(frame_id_value, str) and frame_id_value != "root"
+        else None
+    )
+    loop_node_id = loop_node_id_value if isinstance(loop_node_id_value, str) else None
+    iteration_index = (
+        iteration_index_value
+        if isinstance(iteration_index_value, int) and not isinstance(iteration_index_value, bool)
+        else None
+    )
+    return (frame_id, loop_node_id, iteration_index)
 
 
 def cast_json_value(value: JsonValue | object) -> JsonValue:

@@ -129,11 +129,17 @@ uv run mentalmodel ui \
 ```
 
 That lets downstream projects like Pangramanizer expose their own specs, metric
-groups, pinned nodes, and default loop drilldown behavior without forking the
-dashboard shell during local development.
+groups, pinned nodes, custom views, and default loop drilldown behavior without
+forking the dashboard shell during local development.
 
 Project-scoped catalogs are the preferred shape when one shared stack needs to
 host multiple projects cleanly.
+
+When a catalog defines grouped metrics and custom views together, the dashboard
+can offer both:
+
+- iteration-aware numeric trend charts from grouped metrics
+- row-based operator tables from custom views
 
 ## Workspace configs
 

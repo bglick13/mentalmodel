@@ -10,6 +10,7 @@ services that power the CLI. The intended interaction model is:
 - use grouped metrics and pinned nodes as fast drilldown entrypoints
 - pivot into node inputs, outputs, traces, and invariant results
 - fall back to raw records only when you need the full semantic event stream
+- expose custom views when operators need row-based tables instead of raw logs
 
 ## Architecture
 
@@ -107,3 +108,8 @@ Each catalog entry can define:
 - grouped metric prefixes
 - pinned drilldown nodes
 - default loop replay scope
+- custom views for row-based dashboard tables
+
+See [Custom Views](/Users/ben/repos/mentalmodel/guides/custom-views.mdx) for the
+authoring model and [Custom View Authoring](/Users/ben/repos/mentalmodel/docs/recipes/custom-view-authoring.md)
+for the fast recipe.

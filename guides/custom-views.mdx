@@ -1,0 +1,156 @@
+---
+title: Custom Views
+description: Author catalog-defined dashboard tables that turn stable workflow outputs into operator-facing run views.
+---
+
+Custom views let a project expose purpose-built dashboard tables without
+forking the dashboard shell.
+
+They are the right tool when operators need:
+
+- a stable table over one node’s output items
+- a curated run narrative, not just raw records
+- a human-facing inspection surface for prompts, completions, eval rows, or
+  checkpoint history
+
+They are **not** a substitute for metrics. Use:
+
+- metric groups for numeric summaries and charts
+- pinned nodes for fast drill-down
+- custom views for row-based operator tables
+
+## Mental model
+
+A custom view is declared on a `DashboardCatalogEntry` and consists of:
+
+- `row_source`
+  - where the rows come from
+  - today this is a node output list (`kind="node_output_items"`)
+- `columns`
+  - how each table cell is derived for one row
+  - selectors can read:
+    - the current `row_item`
+    - scope metadata (`frame_id`, `iteration_index`)
+    - another node’s output
+    - another node’s inputs
+    - a matching record payload
+
+The dashboard evaluates the same view contract against:
+
+- persisted `.runs` bundles
+- live record streams before the final bundle lands
+
+That means you should author views against stable semantic outputs and record
+shapes, not against incidental UI behavior.
+
+## Recommended shape
+
+Prefer one stable reporting node per operator table.
+
+Good pattern:
+
+1. workflow step logic produces rich internal outputs
+2. reporting joins normalize them into a stable operator-facing list
+3. custom view reads that list directly
+
+This keeps the view contract durable even if the inner workflow changes.
+
+## Example
+
+```python
+from mentalmodel.ui.catalog import DashboardCatalogEntry
+from mentalmodel.ui.custom_views import (
+    DashboardCustomView,
+    DashboardTableColumn,
+    DashboardTableRowSource,
+    DashboardValueSelector,
+)
+
+sample_quality = DashboardCustomView(
+    view_id="sample-quality",
+    title="Sample Quality",
+    description="Prompt, generated sample, and reward outcomes for each sample.",
+    kind="table",
+    row_source=DashboardTableRowSource(
+        kind="node_output_items",
+        node_id="reporting.training_sample_quality",
+        items_path=".",
+    ),
+    columns=(
+        DashboardTableColumn(
+            "step",
+            "Step",
+            DashboardValueSelector(kind="row_item", path="step"),
+        ),
+        DashboardTableColumn(
+            "prompt_text",
+            "Prompt",
+            DashboardValueSelector(kind="row_item", path="prompt_text"),
+        ),
+        DashboardTableColumn(
+            "total_reward",
+            "Total Reward",
+            DashboardValueSelector(kind="row_item", path="total_reward"),
+        ),
+    ),
+)
+```
+
+## Selector guidance
+
+Prefer selectors in this order:
+
+1. `row_item`
+2. `scope`
+3. `node_output`
+4. `node_input`
+5. `record_payload`
+
+Why:
+
+- `row_item` is the most stable contract
+- `node_output` is still stable when backed by a dedicated reporting node
+- `record_payload` is powerful, but easiest to make brittle
+
+## Live-view guidance
+
+Live custom views work best when:
+
+- the row source is emitted by a single `node.succeeded`
+- the row items are JSON-compatible values
+- table columns can tolerate partial progress while the run is still active
+
+The dashboard keeps the last good table visible while live refreshes are in
+flight. That means operator tables should be safe to re-evaluate frequently.
+
+## How to decide between metric groups and custom views
+
+Use a metric group when:
+
+- the signal is numeric
+- trend lines and summaries matter
+- “latest value by step” is enough
+
+Use a custom view when:
+
+- each row matters independently
+- text is central to understanding the run
+- operators need prompt / output / reason / path columns
+
+It is common to use both over the same reporting node family.
+
+## Verification checklist
+
+For every new custom view:
+
+1. add or update a catalog test
+2. prove the source node emits a stable output list
+3. verify the view in the dashboard on a real run
+4. confirm the view still works during live execution when applicable
+
+Useful commands:
+
+```bash
+uv run mentalmodel ui --catalog-entrypoint mypkg.dashboard:catalog
+uv run mentalmodel verify --spec path/to/spec.toml
+```

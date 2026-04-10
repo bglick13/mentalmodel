@@ -59,7 +59,11 @@ from mentalmodel.ui.catalog import (
     default_dashboard_catalog,
     validate_dashboard_catalog,
 )
-from mentalmodel.ui.custom_views import DashboardCustomView, evaluate_custom_view
+from mentalmodel.ui.custom_views import (
+    DashboardCustomView,
+    evaluate_custom_view,
+    evaluate_custom_view_from_records,
+)
 from mentalmodel.ui.execution_worker import (
     ProjectExecutionWorker,
     SubprocessProjectExecutionWorker,
@@ -71,6 +75,16 @@ from mentalmodel.ui.run_handles import (
     persisted_run_handle,
 )
 from mentalmodel.ui.workspace import flatten_project_catalogs
+
+
+def _merge_catalog_entries(
+    *groups: Sequence[DashboardCatalogEntry],
+) -> tuple[DashboardCatalogEntry, ...]:
+    merged: dict[str, DashboardCatalogEntry] = {}
+    for group in groups:
+        for entry in group:
+            merged[entry.spec_id] = entry
+    return tuple(merged.values())
 
 
 @dataclass(slots=True)
@@ -280,45 +294,41 @@ class DashboardService:
 
     def list_catalog(self) -> tuple[DashboardCatalogEntry, ...]:
         return validate_dashboard_catalog(
-            self._static_catalog
-            + self._remote_catalog_entries()
-            + tuple(self._dynamic_catalog.values())
+            _merge_catalog_entries(
+                self._static_catalog,
+                self._remote_catalog_entries(),
+                tuple(self._dynamic_catalog.values()),
+            )
         )
 
     def list_projects(self) -> tuple[dict[str, JsonValue], ...]:
-        projects: list[dict[str, JsonValue]] = []
-        seen_project_ids: set[str] = set()
+        projects_by_id: dict[str, dict[str, JsonValue]] = {}
         for project_catalog in self._project_catalogs:
-            seen_project_ids.add(project_catalog.project.project_id)
-            projects.append(
-                {
-                    "project_id": project_catalog.project.project_id,
-                    "label": project_catalog.project.label,
-                    "root_dir": str(project_catalog.project.root_dir),
-                    "runs_dir": (
-                        None
-                        if project_catalog.project.runs_dir is None
-                        else str(project_catalog.project.runs_dir)
-                    ),
-                    "description": project_catalog.description
-                    or project_catalog.project.description,
-                    "catalog_entry_count": len(project_catalog.entries),
-                    "default_entry_id": project_catalog.default_entry_id,
-                    "tags": list(project_catalog.project.tags),
-                    "enabled": project_catalog.project.enabled,
-                    "source": "workspace",
-                    "default_environment": project_catalog.project.default_environment,
-                    "catalog_provider": project_catalog.project.catalog_provider,
-                    "catalog_published": True,
-                    "catalog_published_at_ms": None,
-                    "catalog_version": None,
-                    "remote_health": None,
-                }
-            )
+            projects_by_id[project_catalog.project.project_id] = {
+                "project_id": project_catalog.project.project_id,
+                "label": project_catalog.project.label,
+                "root_dir": str(project_catalog.project.root_dir),
+                "runs_dir": (
+                    None
+                    if project_catalog.project.runs_dir is None
+                    else str(project_catalog.project.runs_dir)
+                ),
+                "description": project_catalog.description
+                or project_catalog.project.description,
+                "catalog_entry_count": len(project_catalog.entries),
+                "default_entry_id": project_catalog.default_entry_id,
+                "tags": list(project_catalog.project.tags),
+                "enabled": project_catalog.project.enabled,
+                "source": "workspace",
+                "default_environment": project_catalog.project.default_environment,
+                "catalog_provider": project_catalog.project.catalog_provider,
+                "catalog_published": True,
+                "catalog_published_at_ms": None,
+                "catalog_version": None,
+                "remote_health": None,
+            }
         if self.remote_project_store is not None:
             for project in self.remote_project_store.list_projects():
-                if project.project_id in seen_project_ids:
-                    continue
                 remote_health = (
                     None
                     if self.remote_event_store is None
@@ -329,34 +339,32 @@ class DashboardService:
                         ).as_dict()
                     )
                 )
-                projects.append(
-                    {
-                        "project_id": project.project_id,
-                        "label": project.label,
-                        "root_dir": None,
-                        "runs_dir": project.default_runs_dir,
-                        "description": project.description,
-                        "catalog_entry_count": project.catalog_entry_count,
-                        "default_entry_id": (
-                            None
-                            if project.catalog_snapshot is None
-                            else project.catalog_snapshot.default_entry_id
-                        ),
-                        "tags": [],
-                        "enabled": True,
-                        "source": "remote",
-                        "default_environment": project.default_environment,
-                        "catalog_provider": project.catalog_provider,
-                        "catalog_published": project.catalog_published,
-                        "catalog_published_at_ms": project.catalog_published_at_ms,
-                        "catalog_version": project.catalog_version,
-                        "linked_at_ms": project.linked_at_ms,
-                        "updated_at_ms": project.updated_at_ms,
-                        "default_verify_spec": project.default_verify_spec,
-                        "remote_health": remote_health,
-                    }
-                )
-        return tuple(projects)
+                projects_by_id[project.project_id] = {
+                    "project_id": project.project_id,
+                    "label": project.label,
+                    "root_dir": None,
+                    "runs_dir": project.default_runs_dir,
+                    "description": project.description,
+                    "catalog_entry_count": project.catalog_entry_count,
+                    "default_entry_id": (
+                        None
+                        if project.catalog_snapshot is None
+                        else project.catalog_snapshot.default_entry_id
+                    ),
+                    "tags": [],
+                    "enabled": True,
+                    "source": "remote",
+                    "default_environment": project.default_environment,
+                    "catalog_provider": project.catalog_provider,
+                    "catalog_published": project.catalog_published,
+                    "catalog_published_at_ms": project.catalog_published_at_ms,
+                    "catalog_version": project.catalog_version,
+                    "linked_at_ms": project.linked_at_ms,
+                    "updated_at_ms": project.updated_at_ms,
+                    "default_verify_spec": project.default_verify_spec,
+                    "remote_health": remote_health,
+                }
+        return tuple(projects_by_id.values())
 
     def list_remote_events(
         self,
@@ -588,6 +596,8 @@ class DashboardService:
             return {
                 "summary": handle.as_dict(),
                 "verification": None,
+                "verification_success": None,
+                "runtime_error": session.error,
                 "graph": self._graph_payload_for_entry(session.spec),
                 "metrics": [],
                 "invariants": [],
@@ -601,6 +611,8 @@ class DashboardService:
             return {
                 "summary": self._remote_live_run_handle(remote_live).as_dict(),
                 "verification": None,
+                "verification_success": None,
+                "runtime_error": remote_live.error,
                 "graph": _graph_payload_from_live_session(remote_live),
                 "metrics": _as_json_list(
                     _derive_numeric_metrics_from_live_records(remote_live.records)
@@ -639,9 +651,17 @@ class DashboardService:
         )
         graph = self.get_run_graph(graph_id=graph_id, run_id=run_id)
         metrics = self._derive_numeric_output_metrics(graph_id=graph_id, run_id=run_id)
+        verification_success = (
+            verification.get("success")
+            if isinstance(verification, dict)
+            and isinstance(verification.get("success"), bool)
+            else None
+        )
         return {
             "summary": persisted_run_handle(summary).as_dict(),
             "verification": verification,
+            "verification_success": verification_success,
+            "runtime_error": replay.runtime_error,
             "graph": graph,
             "metrics": _as_json_list(metrics),
             "invariants": _as_json_list([
@@ -679,6 +699,28 @@ class DashboardService:
     ) -> dict[str, JsonValue]:
         entry = self._resolve_entry(spec_id)
         view = _resolve_custom_view(entry, view_id)
+        session = self._session_for_run(graph_id=entry.graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=entry.graph_id, run_id=run_id)
+        ):
+            evaluated = evaluate_custom_view_from_records(
+                records=cast(list[dict[str, object]], session.records),
+                run_id=run_id,
+                view=view,
+            )
+            return _as_json_object(evaluated.as_dict())
+        remote_live = self._remote_live_session_for_run(graph_id=entry.graph_id, run_id=run_id)
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=entry.graph_id, run_id=run_id)
+        ):
+            evaluated = evaluate_custom_view_from_records(
+                records=list(remote_live.records),
+                run_id=run_id,
+                view=view,
+            )
+            return _as_json_object(evaluated.as_dict())
         history_runs_dir = self._require_history_runs_dir(
             graph_id=entry.graph_id,
             run_id=run_id,
