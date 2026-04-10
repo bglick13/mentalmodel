@@ -12,11 +12,24 @@ data plane.
 uv run mentalmodel remote link
 uv run mentalmodel remote status
 uv run mentalmodel remote publish-catalog
+uv run mentalmodel remote doctor
 uv run mentalmodel remote write-demo --output-dir /tmp/mentalmodel-remote
 uv run mentalmodel remote doctor --workspace-config /tmp/mentalmodel-remote/workspace.toml
 uv run mentalmodel remote up --output-dir /tmp/mentalmodel-remote --open-browser
 uv run mentalmodel remote sync --server-url http://127.0.0.1:8765
 ```
+
+## Choosing a mode
+
+`mentalmodel remote` now has two explicit modes:
+
+- hosted repo-linked mode
+- local workspace mode
+
+Hosted repo-linked mode is the primary product path.
+
+Local workspace mode exists for generated demo stacks, offline development, and
+multi-repo local testing.
 
 ## Repo-linked hosted path
 
@@ -64,9 +77,9 @@ so you can confirm:
 - how many catalog entries are currently stored remotely
 - which completed run was uploaded most recently
 
-This is intentionally separate from the older `workspace.toml` path. The local
-workspace registry is still useful for localhost and offline development, but
-the hosted direction is now repo-owned config plus remote project records.
+This is intentionally separate from the local `workspace.toml` path. Workspace
+files are for local stack work, not the standard hosted setup path. The hosted
+direction is now repo-owned config plus remote project records.
 
 ## `remote link`
 
@@ -135,6 +148,37 @@ The status payload now also surfaces catalog version and publish metadata, so
 you can confirm that the hosted dashboard is looking at the expected snapshot.
 In Phase 3 it also surfaces the last successful completed-run upload, so you
 can verify that normal `mentalmodel verify` executions are arriving remotely.
+
+## `remote doctor`
+
+Validate either hosted repo-linked mode or local workspace mode:
+
+```bash
+uv run mentalmodel remote doctor
+uv run mentalmodel remote doctor --config /Users/ben/repos/pangramanizer/mentalmodel.toml
+uv run mentalmodel remote doctor --workspace-config /tmp/mentalmodel-remote/workspace.toml
+```
+
+Mode selection rules:
+
+- if you pass `--workspace-config`, `remote doctor` validates local workspace mode
+- otherwise it validates hosted repo-linked mode
+- in hosted mode it auto-discovers `mentalmodel.toml` from the current repo if you do not pass `--config`
+
+Hosted checks now tell you whether:
+
+- the repo-owned config loads
+- the API key resolves
+- the catalog snapshot can be built
+- the default verify spec and runs dir are usable
+- the remote project record is reachable
+
+Local checks still validate:
+
+- the generated workspace registry
+- provider resolution
+- output routing
+- stack asset layout
 
 ## Normal completed-run flow
 
@@ -231,7 +275,7 @@ uv run mentalmodel remote doctor \
   --workspace-config /tmp/mentalmodel-remote/workspace.toml
 ```
 
-`remote doctor` now also fails if an enabled project has no explicit `runs_dir`.
+`remote doctor --workspace-config ...` now also fails if an enabled project has no explicit `runs_dir`.
 That is a real launch-routing error for the shared stack, not just missing
 metadata.
 
@@ -296,8 +340,8 @@ storage. The dashboard read path materializes remote bundles into a local cache
 so the existing historical inspection APIs can keep using the current run
 inspection helpers.
 
-Treat `remote sync` as the manual recovery path now, not the normal hosted
-workflow. Use it when:
+Treat `remote sync` as the manual recovery and backfill path now, not the
+normal hosted workflow. Use it when:
 
 - a linked `verify` run uploaded locally but the remote publish step failed
 - you want to backfill older local runs into the hosted service

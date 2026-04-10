@@ -24,6 +24,11 @@ uv run mentalmodel ui --catalog-entrypoint mypkg.dashboard:catalog
 uv run mentalmodel ui --remote-database-url postgresql://... --remote-object-store-bucket mentalmodel-runs
 ```
 
+Mode guidance:
+
+- hosted mode: use repo-linked projects plus the remote backend
+- local mode: use `--workspace-config` and optional `--catalog-entrypoint`
+
 ## What it serves
 
 - a React dashboard if `apps/dashboard/dist` exists
@@ -38,6 +43,38 @@ uv run mentalmodel ui --remote-database-url postgresql://... --remote-object-sto
   - node inputs, outputs, and traces
 
 ## How to use that
+
+## Hosted mode
+
+Hosted mode is the primary product path. The dashboard should render linked
+projects from remote project records and stored catalog snapshots without
+importing producer repos locally.
+
+Typical hosted flow:
+
+1. Link the repo:
+
+```bash
+uv run mentalmodel remote link
+uv run mentalmodel remote status
+```
+
+2. Launch the UI against the remote backend:
+
+```bash
+uv run mentalmodel ui \
+  --remote-database-url postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel \
+  --remote-object-store-bucket mentalmodel-runs \
+  --remote-object-store-endpoint http://127.0.0.1:9000 \
+  --remote-object-store-access-key minio \
+  --remote-object-store-secret-key miniosecret \
+  --no-remote-object-store-secure
+```
+
+Do not use `--workspace-config` or `--catalog-entrypoint` for the normal hosted
+path.
+
+## Local mode
 
 For the built-in proof path:
 
@@ -93,14 +130,14 @@ uv run mentalmodel ui \
 
 That lets downstream projects like Pangramanizer expose their own specs, metric
 groups, pinned nodes, and default loop drilldown behavior without forking the
-dashboard shell.
+dashboard shell during local development.
 
 Project-scoped catalogs are the preferred shape when one shared stack needs to
 host multiple projects cleanly.
 
 ## Workspace configs
 
-`--workspace-config` is the preferred way to run one shared stack across
+`--workspace-config` is the preferred way to run one shared local stack across
 multiple repos.
 
 The workspace TOML registers projects, their repo roots, and their provider
@@ -126,12 +163,11 @@ uv run mentalmodel remote up --output-dir /tmp/mentalmodel-remote --open-browser
 
 ## Remote backend flags
 
-For the durable Phase 2 history path, point the UI at Postgres plus an
+For the hosted remote backend path, point the UI at Postgres plus an
 S3-compatible object store:
 
 ```bash
 uv run mentalmodel ui \
-  --workspace-config /tmp/mentalmodel-remote/workspace.toml \
   --remote-database-url postgresql://postgres:postgres@127.0.0.1:5432/mentalmodel \
   --remote-object-store-bucket mentalmodel-runs \
   --remote-object-store-endpoint http://127.0.0.1:9000 \

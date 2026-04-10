@@ -222,9 +222,16 @@ Dashboard UI:
 - for rebuild-free local frontend work:
   - `cd apps/dashboard`
   - `npm run dev:stack`
-- then launch the hosted-style UI from the repository root with:
+- hosted mode is now the primary product path:
+  - link the repo with `uv run mentalmodel remote link`
+  - verify the link with `uv run mentalmodel remote status`
+  - launch the dashboard against the remote backend with `uv run mentalmodel ui ...`
+- local workspace mode remains available for development and offline stack work:
+  - `uv run mentalmodel remote write-demo --output-dir ...`
+  - `uv run mentalmodel remote up --output-dir ...`
+- then launch the UI from the repository root with:
   - `uv run mentalmodel ui --open-browser`
-- or point the backend at a Vite dev server and a custom catalog:
+- or, for local development only, point the backend at a Vite dev server and a custom catalog:
   - `uv run mentalmodel ui --frontend-dev-url http://127.0.0.1:5173 --catalog-entrypoint mypkg.dashboard:catalog`
 - the hosted-service direction now starts with repo-owned `mentalmodel.toml`
   plus `uv run mentalmodel remote link` /
@@ -246,6 +253,9 @@ Dashboard UI:
   committed
 - `mentalmodel remote sync` remains available as the manual recovery and
   backfill path rather than the normal hosted operator flow
+- `mentalmodel remote doctor` now detects whether you are validating hosted
+  repo-linked mode or local workspace mode and reports the missing pieces for
+  that mode explicitly
 - the first proof workflow is `review_workflow`; the UI can launch either
   runtime environment, inspect the persisted graph, inspect node
   inputs/outputs, inspect invariant results, pivot from grouped metrics into

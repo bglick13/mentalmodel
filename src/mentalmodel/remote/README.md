@@ -1,7 +1,7 @@
 # mentalmodel.remote
 
-Remote runs data-plane package for contracts, sink seams, and the first bundle
-upload path, plus the first repo-owned project-link seam for the hosted model.
+Remote runs data-plane package for contracts, sink seams, and the repo-owned
+hosted-service seam, plus the local stack helpers used for development.
 
 ## Purpose
 
@@ -24,8 +24,8 @@ primitives for remote-compatible run handling:
 - an S3-compatible object-store backend for artifact blobs
 - a remote-backed run repository that materializes bundles into a local cache
 - a CLI/API sync path for uploading persisted local runs
-- workspace TOML load/write helpers for one shared stack
-- localhost bootstrap and doctor flows for the remote MVP
+- workspace TOML load/write helpers for one shared local stack
+- localhost bootstrap and doctor flows for the local-stack development path
 
 The durable Phase 2 backend stores:
 
@@ -35,7 +35,7 @@ The durable Phase 2 backend stores:
   existing inspection helpers
 
 The older file-backed store remains in-tree as a deterministic fallback for
-tests and local transition scenarios.
+tests and local stack scenarios.
 
 ## Main entrypoints
 
@@ -91,7 +91,7 @@ tests and local transition scenarios.
    the cache on demand.
 6. `FileRemoteRunStore.ingest(...)` remains available as a deterministic fallback.
 7. `mentalmodel remote write-demo` generates a workspace registry plus helper
-   scripts for one local multi-project stack.
+   scripts for one local multi-project development stack.
 8. `mentalmodel remote link` reads repo-owned `mentalmodel.toml`, resolves the
    configured catalog provider, and publishes a remote project record plus the
    current catalog snapshot.

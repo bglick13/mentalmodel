@@ -1098,64 +1098,75 @@ class CliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout.getvalue())
         self.assertTrue(payload["success"])
+        self.assertEqual(payload["mode"], "local")
 
-    def test_projects_commands_round_trip_workspace_config(self) -> None:
+    def test_remote_doctor_defaults_to_hosted_repo_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            workspace_path = Path(tmpdir) / "workspace.toml"
+            root = Path(tmpdir)
+            spec_path = root / "verify.toml"
+            spec_path.write_text(
+                (
+                    "[program]\n"
+                    'entrypoint = "mentalmodel.examples.async_rl.demo:build_program"\n'
+                ),
+                encoding="utf-8",
+            )
+            (root / "mentalmodel.toml").write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "demo-project"',
+                        'label = "Demo Project"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        'default_environment = "prod"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "",
+                        "[runs]",
+                        'default_runs_dir = ".runs"',
+                        "",
+                        "[verify]",
+                        'default_spec = "verify.toml"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
             stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                exit_code = main(
-                    [
-                        "projects",
-                        "add",
-                        "--workspace-config",
-                        str(workspace_path),
-                        "--project-id",
-                        "mentalmodel-examples",
-                        "--label",
-                        "Mentalmodel Examples",
-                        "--root-dir",
-                        str(Path(__file__).resolve().parents[1]),
-                        "--provider",
-                        "mentalmodel.ui.catalog:default_dashboard_catalog",
-                        "--json",
-                    ]
-                )
+            with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
+                with patch(
+                    "mentalmodel.remote.doctor.fetch_remote_project_status",
+                    return_value=RemoteProjectRecord(
+                        project_id="demo-project",
+                        label="Demo Project",
+                        default_environment="prod",
+                        catalog_provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+                        linked_at_ms=1000,
+                        updated_at_ms=1001,
+                        catalog_snapshot=ProjectCatalogSnapshot(
+                            project_id="demo-project",
+                            provider="mentalmodel.ui.catalog:default_dashboard_catalog",
+                            published_at_ms=1000,
+                            entries=(),
+                        ),
+                    ),
+                ):
+                    with contextlib.chdir(root):
+                        with contextlib.redirect_stdout(stdout):
+                            exit_code = main(["remote", "doctor", "--json"])
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["project"]["project_id"], "mentalmodel-examples")
-
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                exit_code = main(
-                    [
-                        "projects",
-                        "list",
-                        "--workspace-config",
-                        str(workspace_path),
-                        "--json",
-                    ]
-                )
-            self.assertEqual(exit_code, 0)
-            payload = json.loads(stdout.getvalue())
-            self.assertEqual(len(payload["projects"]), 1)
-
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                exit_code = main(
-                    [
-                        "projects",
-                        "inspect",
-                        "--workspace-config",
-                        str(workspace_path),
-                        "--project-id",
-                        "mentalmodel-examples",
-                        "--json",
-                    ]
-                )
-            self.assertEqual(exit_code, 0)
-            payload = json.loads(stdout.getvalue())
-            self.assertEqual(payload["catalog_entry_count"], 2)
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["mode"], "hosted")
+            checks = {
+                check["name"]: check
+                for check in cast(list[dict[str, object]], payload["checks"])
+            }
+            self.assertEqual(checks["remote_link"]["status"], "pass")
 
     def test_doctor_command_outputs_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

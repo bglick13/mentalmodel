@@ -456,14 +456,15 @@ def _remote_demo_readme(
     )
     return f"""# mentalmodel Remote Demo
 
-This directory bootstraps the current remote-runs MVP for one local stack.
+This directory bootstraps the current local development stack for the remote
+service model.
 
 ## What is here
 
 - `docker-compose.remote-minimal.yml`: local Postgres + MinIO backend services
-- `workspace.toml`: project registry for the shared dashboard stack
+- `workspace.toml`: project registry for the shared local dashboard stack
 - `mentalmodel.remote.env`: wired backend credentials and dashboard config
-- `run-dashboard.sh`: launches `mentalmodel ui` against the generated workspace
+- `run-dashboard.sh`: launches `mentalmodel ui` against the generated local workspace
 - `start-stack.sh`: starts the backend services and then launches the dashboard
 - `stop-stack.sh`: stops the backend services
 - `sync-local-runs.sh`: uploads local `.runs` bundles into the shared stack
