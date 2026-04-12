@@ -12,6 +12,8 @@ description: Use when debugging a mentalmodel workflow or generated artifact. Co
   separately, and prefer `--spec` when the project already has a TOML
   invocation spec
 - run `mentalmodel doctor` when setup, skills, entrypoints, or tracing may be wrong
+- if `doctor` warns about coarse topology, assume spans and records may be too
+  coarse because orchestration is hidden inside one effect
 - use `mentalmodel otel show-config` when tracing/export configuration looks suspicious
 - use `mentalmodel runs latest --graph-id <graph_id>` to resolve the newest bundle
 - use `mentalmodel replay --graph-id <graph_id>` to reconstruct the run timeline
@@ -28,6 +30,8 @@ description: Use when debugging a mentalmodel workflow or generated artifact. Co
 - use semantic execution records before generic traces
 - read `verification.json`, `records.jsonl`, and `outputs.json` before
   `otel-spans.jsonl`
+- if a large workflow only shows one or two spans in the UI, inspect the
+  workflow topology before assuming tracing/export is broken
 - follow the recipe docs under `docs/recipes/` for structure, invariants,
   block reuse, custom-view authoring, loops, runtime profiles, resource
   injection, parameterized verification, runtime failures, and run comparisons

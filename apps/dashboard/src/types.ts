@@ -164,6 +164,13 @@ export type ExecutionRecord = {
   payload: Record<string, unknown>;
 };
 
+export type PageResponse<T> = {
+  items: T[];
+  next_cursor: string | null;
+  total_count: number;
+  has_more: boolean;
+};
+
 export type ExecutionMessage = {
   sequence: number;
   timestamp_ms: number;
@@ -329,6 +336,8 @@ export type SpanKindTag =
 export type GenericSpan = {
   /** Raw OTel/span ``name`` (before UI normalization). */
   label: string;
+  /** Canonical node id for drill-down / aggregation. */
+  nodeId: string;
   /** Primary display line (short, deduped vs node id). */
   title: string;
   /** Secondary line: frame / context only (no duplicate of title). */
@@ -344,6 +353,10 @@ export type GenericSpan = {
   /** Wall-clock bounds from OTel (ms since epoch); null when absent. */
   startTimeMs: number | null;
   endTimeMs: number | null;
+  frameId: string;
+  loopNodeId: string | null;
+  iterationIndex: number | null;
+  runtimeProfile: string | null;
   statusLabel: string;
   /** Short id for tables (run id or trace hint). */
   traceIdDisplay: string;

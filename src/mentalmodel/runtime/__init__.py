@@ -15,6 +15,13 @@ from mentalmodel.runtime.errors import (
 from mentalmodel.runtime.execution import ExecutionNodeMetadata
 from mentalmodel.runtime.executor import AsyncExecutor, ExecutionResult
 from mentalmodel.runtime.frame import ExecutionFrame, ExecutionFrameSegment
+from mentalmodel.runtime.managed import (
+    ManagedExecutionOptions,
+    ManagedExecutionResult,
+    ManagedInvariantFailure,
+    ManagedRunTarget,
+    run_managed,
+)
 from mentalmodel.runtime.plan import (
     CompiledProgram,
     ExecutionPlan,
@@ -44,6 +51,10 @@ __all__ = [
     "ExecutionResult",
     "InvariantDiff",
     "InvariantViolationError",
+    "ManagedExecutionOptions",
+    "ManagedExecutionResult",
+    "ManagedInvariantFailure",
+    "ManagedRunTarget",
     "NodeDiff",
     "ReplayEvent",
     "ReplayNodeSummary",
@@ -56,6 +67,7 @@ __all__ = [
     "build_replay_report",
     "build_run_diff",
     "compile_program",
+    "run_managed",
     "MissingRuntimeProfileError",
     "MissingRuntimeResourceError",
 ]

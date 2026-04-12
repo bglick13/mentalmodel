@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeGuard, cast
+from typing import TypeGuard
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
@@ -417,8 +417,8 @@ def _resolve_row_scopes_from_records(
     ordered_scopes = sorted(
         matching_scopes,
         key=lambda scope: (
-            -1 if scope[2] is None else cast(int, scope[2]),
-            "" if scope[0] is None else cast(str, scope[0]),
+            -1 if scope[2] is None else scope[2],
+            "" if scope[0] is None else scope[0],
         ),
     )
     resolved_rows: list[_ResolvedRowScope] = []

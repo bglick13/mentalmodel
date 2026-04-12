@@ -22,6 +22,7 @@ from mentalmodel.remote.backend import (
     InMemoryEventIndex,
     InMemoryLiveSessionIndex,
     InMemoryManifestIndex,
+    InMemoryPersistedRunIndex,
     InMemoryProjectIndex,
     RemoteEventStore,
     RemoteLiveSessionStore,
@@ -539,7 +540,7 @@ class DashboardApiTest(unittest.TestCase):
 
             records_response = client.get(f"/api/runs/review_workflow/{run_id}/records")
             self.assertEqual(records_response.status_code, 200)
-            records = records_response.json()["records"]
+            records = records_response.json()["items"]
             self.assertGreater(len(records), 0)
 
     def test_dashboard_custom_view_endpoint_evaluates_table_rows(self) -> None:
@@ -843,6 +844,7 @@ class DashboardApiTest(unittest.TestCase):
             remote_store = RemoteRunStore(
                 manifest_index=InMemoryManifestIndex(),
                 artifact_store=InMemoryArtifactStore(),
+                persisted_run_index=InMemoryPersistedRunIndex(),
                 cache_dir=remote_root,
             )
             project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
@@ -1183,7 +1185,7 @@ class DashboardApiTest(unittest.TestCase):
                 "/api/runs/pangramanizer_training_real_verify3/run-external-live/spans"
             )
             self.assertEqual(spans_response.status_code, 200)
-            self.assertEqual(len(spans_response.json()["spans"]), 1)
+            self.assertEqual(len(spans_response.json()["items"]), 1)
             completion_gate.set()
             for _ in range(40):
                 execution = client.get(f"/api/executions/{execution_id}").json()
@@ -1507,7 +1509,7 @@ class DashboardApiTest(unittest.TestCase):
 
         records = client.get("/api/runs/pangramanizer_training/run-live-123/records")
         self.assertEqual(records.status_code, 200)
-        self.assertEqual(len(records.json()["records"]), 1)
+        self.assertEqual(len(records.json()["items"]), 1)
 
     def test_completed_bundle_replaces_remote_live_handle_in_run_queries(self) -> None:
         with (
@@ -1633,3 +1635,15 @@ class DashboardApiTest(unittest.TestCase):
             overview = client.get(f"/api/runs/async_rl_demo/{run_id}/overview")
             self.assertEqual(overview.status_code, 200)
             self.assertEqual(overview.json()["summary"]["source"], "persisted")
+            records = client.get(
+                f"/api/runs/async_rl_demo/{run_id}/records",
+                params={"limit": 2},
+            )
+            self.assertEqual(records.status_code, 200)
+            self.assertGreater(records.json()["total_count"], 0)
+            spans = client.get(
+                f"/api/runs/async_rl_demo/{run_id}/spans",
+                params={"limit": 2},
+            )
+            self.assertEqual(spans.status_code, 200)
+            self.assertIn("total_count", spans.json())

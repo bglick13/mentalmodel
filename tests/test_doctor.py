@@ -4,8 +4,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mentalmodel import Effect, Workflow
 from mentalmodel.doctor import DoctorStatus, build_doctor_report
 from mentalmodel.skills import install_skills
+
+
+class _NoopEffect:
+    async def invoke(self, inputs, ctx):
+        del inputs, ctx
+        return {"ok": True}
+
+
+def build_coarse_program() -> Workflow:
+    return Workflow(
+        "coarse_program",
+        children=[
+            Effect("step_one", handler=_NoopEffect()),
+            Effect("step_two", handler=_NoopEffect()),
+        ],
+    )
 
 
 class DoctorTest(unittest.TestCase):
@@ -25,6 +42,7 @@ class DoctorTest(unittest.TestCase):
             statuses = {check.name: check.status for check in report.checks}
             self.assertEqual(statuses["skills"], DoctorStatus.PASS)
             self.assertEqual(statuses["entrypoint"], DoctorStatus.PASS)
+            self.assertEqual(statuses["topology"], DoctorStatus.PASS)
             self.assertEqual(statuses["runs"], DoctorStatus.WARN)
             self.assertEqual(statuses["tracing"], DoctorStatus.PASS)
             self.assertEqual(statuses["package_data"], DoctorStatus.PASS)
@@ -52,6 +70,19 @@ class DoctorTest(unittest.TestCase):
             self.assertFalse(report.success)
             entrypoint_check = next(check for check in report.checks if check.name == "entrypoint")
             self.assertEqual(entrypoint_check.status, DoctorStatus.FAIL)
+
+    def test_doctor_report_warns_for_coarse_workflow_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_dir = Path(tmpdir) / "skills"
+            install_skills("codex", target_dir=target_dir)
+            report = build_doctor_report(
+                agent="codex",
+                target_dir=target_dir,
+                entrypoint=f"{__name__}:build_coarse_program",
+            )
+            topology_check = next(check for check in report.checks if check.name == "topology")
+            self.assertEqual(topology_check.status, DoctorStatus.WARN)
+            self.assertEqual(topology_check.details["effect_count"], 2)
 
 
 if __name__ == "__main__":

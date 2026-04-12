@@ -4,6 +4,7 @@ import type {
   EvaluatedCustomView,
   ExecutionSession,
   NodeDetail,
+  PageResponse,
   RemoteOperationEvent,
   ReplayReport,
   RunOverview,
@@ -190,28 +191,55 @@ export async function fetchRunReplay(
 export async function fetchRunRecords(
   graphId: string,
   runId: string,
-  nodeId?: string,
-): Promise<ReplayReport["events"]> {
-  const query = nodeId ? `?node_id=${encodeURIComponent(nodeId)}` : "";
-  const payload = await request<{ records: ReplayReport["events"] }>(
-    `/api/runs/${graphId}/${runId}/records${query}`,
-  );
-  return payload.records;
+  params?: {
+    nodeId?: string | null;
+    frameId?: string | null;
+    cursor?: string | null;
+    limit?: number;
+  },
+): Promise<PageResponse<ReplayReport["events"][number]>> {
+  const query = new URLSearchParams();
+  if (params?.nodeId) {
+    query.set("node_id", params.nodeId);
+  }
+  if (params?.frameId) {
+    query.set("frame_id", params.frameId);
+  }
+  if (params?.cursor) {
+    query.set("cursor", params.cursor);
+  }
+  if (params?.limit != null) {
+    query.set("limit", String(params.limit));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return request(`/api/runs/${graphId}/${runId}/records${suffix}`);
 }
 
 export async function fetchRunSpans(
   graphId: string,
   runId: string,
-  nodeId?: string | null,
-): Promise<{ spans: Record<string, unknown>[] }> {
-  const params = new URLSearchParams();
-  if (nodeId) {
-    params.set("node_id", nodeId);
+  options?: {
+    nodeId?: string | null;
+    frameId?: string | null;
+    cursor?: string | null;
+    limit?: number;
+  },
+): Promise<PageResponse<Record<string, unknown>>> {
+  const query = new URLSearchParams();
+  if (options?.nodeId) {
+    query.set("node_id", options.nodeId);
   }
-  const q = params.toString();
-  return request(
-    `/api/runs/${graphId}/${runId}/spans${q ? `?${q}` : ""}`,
-  );
+  if (options?.frameId) {
+    query.set("frame_id", options.frameId);
+  }
+  if (options?.cursor) {
+    query.set("cursor", options.cursor);
+  }
+  if (options?.limit != null) {
+    query.set("limit", String(options.limit));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return request(`/api/runs/${graphId}/${runId}/spans${suffix}`);
 }
 
 export async function fetchNodeDetail(

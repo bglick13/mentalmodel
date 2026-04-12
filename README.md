@@ -115,6 +115,16 @@ uv run mentalmodel demo autoresearch-sorting
 uv run mentalmodel demo autoresearch-sorting --write-artifacts --output-dir /tmp/mentalmodel-autoresearch
 ```
 
+Programmatic execution tiers:
+
+- `execute_program(...)`: execute a workflow locally and return outputs, with no
+  persisted run bundle or remote delivery.
+- `run_managed(...)`: execute a workflow programmatically, persist the canonical
+  `.runs` bundle, and when repo-linked remote configuration is available also
+  stream live execution plus upload the completed run bundle.
+- `run_verification(...)`: run analysis, runtime execution, property checks, and
+  persisted/remote delivery as one verification-oriented operation.
+
 `mentalmodel verify` also accepts:
 
 - `--params-json` / `--params-file` for workflow factory parameters

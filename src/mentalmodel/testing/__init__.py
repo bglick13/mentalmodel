@@ -7,6 +7,13 @@ from mentalmodel.testing.harness import (
     execute_program,
     run_verification,
 )
+from mentalmodel.runtime.managed import (
+    ManagedExecutionOptions,
+    ManagedExecutionResult,
+    ManagedInvariantFailure,
+    ManagedRunTarget,
+    run_managed,
+)
 from mentalmodel.testing.invariants import (
     PropertyCheck,
     PropertyCheckResult,
@@ -43,11 +50,16 @@ __all__ = [
     "collect_runtime_boundary_observations",
     "discover_property_checks",
     "execute_program",
+    "ManagedExecutionOptions",
+    "ManagedExecutionResult",
+    "ManagedInvariantFailure",
+    "ManagedRunTarget",
     "hypothesis_property_check",
     "invariant_fail",
     "invariant_pass",
     "is_monotonic_non_decreasing",
     "property_check",
+    "run_managed",
     "run_property_checks",
     "run_verification",
 ]

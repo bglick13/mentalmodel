@@ -17,6 +17,7 @@ import {
 import { ExplorerTimeseriesChart } from "./components/ExplorerTimeseriesChart";
 import { GraphPanel } from "./components/GraphPanel";
 import { MetricGroupTimeseriesChart } from "./components/MetricGroupTimeseriesChart";
+import { SpanLatencyInsights } from "./components/SpanLatencyInsights";
 import { SpanFlamegraph } from "./components/SpanFlamegraph";
 import {
   fetchCatalog,
@@ -94,6 +95,9 @@ type ScopeToken = {
   value: string;
 };
 
+const RUN_RECORDS_PAGE_SIZE = 250;
+const RUN_SPANS_PAGE_SIZE = 200;
+
 const VIEWS: Array<{
   id: ViewId;
   label: string;
@@ -102,7 +106,7 @@ const VIEWS: Array<{
   {
     id: "overview",
     label: "Overview",
-    title: "Health, throughput chart, recent runs, and metrics rails",
+    title: "Health, trend charts, counters, recent runs, and bottlenecks",
   },
   {
     id: "views",
@@ -125,15 +129,13 @@ const VIEWS: Array<{
 ];
 
 const SPEC_PATH_STORAGE_KEY = "mentalmodel.dashboard.specPath";
-const LEGACY_PANGRAM_VERIFY3 =
-  "/Users/ben/repos/pangramanizer/pangramanizer/mentalmodel_training/verification/real_verify3.toml";
 const RUN_LIST_POLL_MS = 2000;
 const SELECTED_RUN_POLL_MS = 2000;
 
 function readStoredSpecPath(): string {
   try {
     const v = localStorage.getItem(SPEC_PATH_STORAGE_KEY);
-    if (!v || v.length === 0 || v === LEGACY_PANGRAM_VERIFY3) {
+    if (!v || v.length === 0) {
       return "";
     }
     return v;
@@ -245,6 +247,11 @@ function App() {
   const [activeRun, setActiveRun] = useState<RunOverview | null>(null);
   const [activeReplay, setActiveReplay] = useState<ReplayReport | null>(null);
   const [activeRecords, setActiveRecords] = useState<ExecutionRecord[]>([]);
+  const [activeRecordsCursor, setActiveRecordsCursor] = useState<string | null>(null);
+  const [activeRecordsHasMore, setActiveRecordsHasMore] = useState(false);
+  const [activeRecordsTotalCount, setActiveRecordsTotalCount] = useState(0);
+  const [activeRecordsLoading, setActiveRecordsLoading] = useState(false);
+  const [activeRecordsLoadingMore, setActiveRecordsLoadingMore] = useState(false);
   const [activeExecution, setActiveExecution] = useState<ExecutionSession | null>(
     null,
   );
@@ -264,6 +271,8 @@ function App() {
     useState<ExploreTimePreset>("1h");
   const [exploreRunId, setExploreRunId] = useState<string | null>(null);
   const [exploreNodeId, setExploreNodeId] = useState<string | null>(null);
+  const [exploreIterationStart, setExploreIterationStart] = useState<string>("");
+  const [exploreIterationEnd, setExploreIterationEnd] = useState<string>("");
   const [timeseries, setTimeseries] = useState<TimeseriesResponse | null>(null);
   const [timeseriesLoading, setTimeseriesLoading] = useState(false);
   const [timeseriesPollBusy, setTimeseriesPollBusy] = useState(false);
@@ -271,8 +280,12 @@ function App() {
   const [runSpans, setRunSpans] = useState<Record<string, unknown>[] | null>(
     null,
   );
+  const [runSpansCursor, setRunSpansCursor] = useState<string | null>(null);
+  const [runSpansHasMore, setRunSpansHasMore] = useState(false);
+  const [runSpansTotalCount, setRunSpansTotalCount] = useState(0);
   const [remoteEvents, setRemoteEvents] = useState<RemoteOperationEvent[]>([]);
   const [runSpansLoading, setRunSpansLoading] = useState(false);
+  const [runSpansLoadingMore, setRunSpansLoadingMore] = useState(false);
   const [selectedRunRefreshTick, setSelectedRunRefreshTick] = useState(0);
   const explorerUrlHydratedRef = useRef(false);
   const prevExplorerSpecIdRef = useRef<string | null>(null);
@@ -349,6 +362,48 @@ function App() {
     () => (runsInExploreWindow.length > 0 ? runsInExploreWindow : runs),
     [runs, runsInExploreWindow],
   );
+  const liveRecords = activeExecution?.records ?? [];
+  const liveMessages = activeExecution?.messages ?? [];
+  const liveRunRecords = useMemo(
+    () =>
+      activeExecution?.run_id === exploreRunId
+        ? liveRecords
+        : [],
+    [activeExecution?.run_id, exploreRunId, liveRecords],
+  );
+  const iterationBounds = useMemo(
+    () =>
+      collectIterationBounds({
+        metrics: activeRun?.metrics ?? [],
+        records:
+          activeRun?.summary.run_id === exploreRunId ? activeRecords : liveRunRecords,
+        spans:
+          activeRun?.summary.run_id === exploreRunId
+            ? runSpans
+            : activeExecution?.run_id === exploreRunId
+              ? activeExecution.spans
+              : runSpans,
+      }),
+    [
+      activeExecution?.run_id,
+      activeExecution?.spans,
+      activeRun?.metrics,
+      activeRun?.summary.run_id,
+      activeRecords,
+      exploreRunId,
+      liveRunRecords,
+      runSpans,
+    ],
+  );
+  const normalizedIterationRange = useMemo(
+    () =>
+      normalizeIterationRange({
+        startInput: exploreIterationStart,
+        endInput: exploreIterationEnd,
+        bounds: iterationBounds,
+      }),
+    [exploreIterationStart, exploreIterationEnd, iterationBounds],
+  );
 
   const loadRun = useCallback(async (
     entry: CatalogEntry,
@@ -397,6 +452,84 @@ function App() {
     [],
   );
 
+  const loadOlderRecords = useCallback(async () => {
+    if (
+      !selectedCatalog ||
+      !activeRun ||
+      !exploreRunId ||
+      activeRun.summary.run_id !== exploreRunId ||
+      !activeRecordsHasMore ||
+      activeRecordsCursor == null
+    ) {
+      return;
+    }
+    try {
+      setActiveRecordsLoadingMore(true);
+      const page = await fetchRunRecords(selectedCatalog.graph_id, activeRun.summary.run_id, {
+        nodeId: exploreNodeId,
+        frameId: selectedFrameId,
+        cursor: activeRecordsCursor,
+        limit: RUN_RECORDS_PAGE_SIZE,
+      });
+      setActiveRecords((current) => current.concat(page.items));
+      setActiveRecordsCursor(page.next_cursor);
+      setActiveRecordsHasMore(page.has_more);
+      setActiveRecordsTotalCount(page.total_count);
+      setError(null);
+    } catch (recordsError) {
+      setError(String(recordsError));
+    } finally {
+      setActiveRecordsLoadingMore(false);
+    }
+  }, [
+    selectedCatalog,
+    activeRun,
+    exploreRunId,
+    activeRecordsHasMore,
+    activeRecordsCursor,
+    exploreNodeId,
+    selectedFrameId,
+  ]);
+
+  const loadOlderSpans = useCallback(async () => {
+    if (
+      !selectedCatalog ||
+      !activeRun ||
+      !exploreRunId ||
+      activeRun.summary.run_id !== exploreRunId ||
+      !runSpansHasMore ||
+      runSpansCursor == null
+    ) {
+      return;
+    }
+    try {
+      setRunSpansLoadingMore(true);
+      const page = await fetchRunSpans(selectedCatalog.graph_id, activeRun.summary.run_id, {
+        nodeId: exploreNodeId,
+        frameId: selectedFrameId,
+        cursor: runSpansCursor,
+        limit: RUN_SPANS_PAGE_SIZE,
+      });
+      setRunSpans((current) => (current ?? []).concat(page.items));
+      setRunSpansCursor(page.next_cursor);
+      setRunSpansHasMore(page.has_more);
+      setRunSpansTotalCount(page.total_count);
+      setError(null);
+    } catch (spansError) {
+      setError(String(spansError));
+    } finally {
+      setRunSpansLoadingMore(false);
+    }
+  }, [
+    selectedCatalog,
+    activeRun,
+    exploreRunId,
+    runSpansHasMore,
+    runSpansCursor,
+    exploreNodeId,
+    selectedFrameId,
+  ]);
+
   useEffect(() => {
     void (async () => {
       try {
@@ -415,6 +548,12 @@ function App() {
         }
         setExploreRunId(parsed.runId);
         setExploreNodeId(parsed.nodeId);
+        setExploreIterationStart(
+          parsed.iterationStart != null ? String(parsed.iterationStart) : "",
+        );
+        setExploreIterationEnd(
+          parsed.iterationEnd != null ? String(parsed.iterationEnd) : "",
+        );
         const hashView = viewFromHash(window.location.hash);
         if (hashView) {
           setActiveView(hashView);
@@ -440,6 +579,8 @@ function App() {
     if (prevSpec != null && prevSpec !== specId) {
       setExploreRunId(null);
       setExploreNodeId(null);
+      setExploreIterationStart("");
+      setExploreIterationEnd("");
       setExploreTimePreset("1h");
       setSpansInspector(null);
     }
@@ -450,10 +591,20 @@ function App() {
     setActiveRun(null);
     setActiveReplay(null);
     setActiveRecords([]);
+    setActiveRecordsCursor(null);
+    setActiveRecordsHasMore(false);
+    setActiveRecordsTotalCount(0);
+    setActiveRecordsLoading(false);
+    setActiveRecordsLoadingMore(false);
     setSelectedFrameId(null);
     setNodeDetail(null);
     setTimeseries(null);
     setRunSpans(null);
+    setRunSpansCursor(null);
+    setRunSpansHasMore(false);
+    setRunSpansTotalCount(0);
+    setRunSpansLoading(false);
+    setRunSpansLoadingMore(false);
     void (async () => {
       try {
         const [catalogGraph, runData] = await Promise.all([
@@ -526,8 +677,14 @@ function App() {
       setActiveRun(null);
       setActiveReplay(null);
       setActiveRecords([]);
+      setActiveRecordsCursor(null);
+      setActiveRecordsHasMore(false);
+      setActiveRecordsTotalCount(0);
       setNodeDetail(null);
       setRunSpans(null);
+      setRunSpansCursor(null);
+      setRunSpansHasMore(false);
+      setRunSpansTotalCount(0);
       return;
     }
     if (activeRun?.summary.run_id === exploreRunId) {
@@ -541,8 +698,15 @@ function App() {
     ) {
       setActiveRun(null);
       setActiveReplay(null);
+      setActiveRecords([]);
+      setActiveRecordsCursor(null);
+      setActiveRecordsHasMore(false);
+      setActiveRecordsTotalCount(0);
       setNodeDetail(null);
       setRunSpans(null);
+      setRunSpansCursor(null);
+      setRunSpansHasMore(false);
+      setRunSpansTotalCount(0);
       return;
     }
     void loadRun(selectedCatalog, exploreRunId);
@@ -558,6 +722,15 @@ function App() {
 
   useEffect(() => {
     if (!selectedCatalog || !exploreRunId) {
+      return;
+    }
+    const shouldPollSelectedRun =
+      activeRun == null ||
+      (activeRun.summary.run_id === exploreRunId &&
+        (activeRun.summary.status === "running" ||
+          activeRun.summary.status === "pending" ||
+          activeRun.summary.source === "remote-live"));
+    if (!shouldPollSelectedRun) {
       return;
     }
     let cancelled = false;
@@ -583,30 +756,49 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selectedCatalog, exploreRunId, loadRun]);
+  }, [selectedCatalog, exploreRunId, loadRun, activeRun]);
 
   useEffect(() => {
     if (!selectedCatalog || !activeRun || exploreRunId == null) {
+      setActiveRecords([]);
+      setActiveRecordsCursor(null);
+      setActiveRecordsHasMore(false);
+      setActiveRecordsTotalCount(0);
+      setActiveRecordsLoading(false);
       return;
     }
     if (activeRun.summary.run_id !== exploreRunId) {
       return;
     }
     let cancelled = false;
-    void fetchRunRecords(
-      selectedCatalog.graph_id,
-      activeRun.summary.run_id,
-      exploreNodeId ?? undefined,
-    )
+    setActiveRecordsLoading(true);
+    void fetchRunRecords(selectedCatalog.graph_id, activeRun.summary.run_id, {
+      nodeId: exploreNodeId,
+      frameId: selectedFrameId,
+      limit: RUN_RECORDS_PAGE_SIZE,
+    })
       .then((records) => {
         if (!cancelled) {
-          setActiveRecords(records);
+          setActiveRecords(records.items);
+          setActiveRecordsCursor(records.next_cursor);
+          setActiveRecordsHasMore(records.has_more);
+          setActiveRecordsTotalCount(records.total_count);
           setError(null);
         }
       })
       .catch((recordsError: unknown) => {
         if (!cancelled) {
           setError(String(recordsError));
+          setActiveRecords([]);
+          setActiveRecordsCursor(null);
+          setActiveRecordsHasMore(false);
+          setActiveRecordsTotalCount(0);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setActiveRecordsLoading(false);
+          setActiveRecordsLoadingMore(false);
         }
       });
     return () => {
@@ -617,12 +809,18 @@ function App() {
     activeRun?.summary.run_id,
     exploreRunId,
     exploreNodeId,
+    selectedFrameId,
     selectedRunRefreshTick,
   ]);
 
   useEffect(() => {
     if (!selectedCatalog || !activeRun || exploreRunId == null) {
       setRunSpansLoading(false);
+      setRunSpansLoadingMore(false);
+      setRunSpans(null);
+      setRunSpansCursor(null);
+      setRunSpansHasMore(false);
+      setRunSpansTotalCount(0);
       return;
     }
     if (activeRun.summary.run_id !== exploreRunId) {
@@ -630,20 +828,31 @@ function App() {
     }
     let cancelled = false;
     setRunSpansLoading(true);
-    void fetchRunSpans(selectedCatalog.graph_id, activeRun.summary.run_id)
+    void fetchRunSpans(selectedCatalog.graph_id, activeRun.summary.run_id, {
+      nodeId: exploreNodeId,
+      frameId: selectedFrameId,
+      limit: RUN_SPANS_PAGE_SIZE,
+    })
       .then((payload) => {
         if (!cancelled) {
-          setRunSpans(payload.spans);
+          setRunSpans(payload.items);
+          setRunSpansCursor(payload.next_cursor);
+          setRunSpansHasMore(payload.has_more);
+          setRunSpansTotalCount(payload.total_count);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setRunSpans([]);
+          setRunSpansCursor(null);
+          setRunSpansHasMore(false);
+          setRunSpansTotalCount(0);
         }
       })
       .finally(() => {
         if (!cancelled) {
           setRunSpansLoading(false);
+          setRunSpansLoadingMore(false);
         }
       });
     return () => {
@@ -653,6 +862,8 @@ function App() {
     selectedCatalog,
     activeRun?.summary.run_id,
     exploreRunId,
+    exploreNodeId,
+    selectedFrameId,
     selectedRunRefreshTick,
   ]);
 
@@ -752,6 +963,8 @@ function App() {
       window: exploreTimePreset,
       runId: exploreRunId,
       nodeId: exploreNodeId,
+      iterationStart: normalizedIterationRange.start,
+      iterationEnd: normalizedIterationRange.end,
       spanInspectIndex:
         activeView === "spans" && spansInspector?.kind === "span"
           ? spansInspector.index
@@ -780,6 +993,7 @@ function App() {
     exploreTimePreset,
     exploreRunId,
     exploreNodeId,
+    normalizedIterationRange,
     activeView,
     spansInspector,
   ]);
@@ -796,6 +1010,12 @@ function App() {
       }
       setExploreRunId(parsed.runId);
       setExploreNodeId(parsed.nodeId);
+      setExploreIterationStart(
+        parsed.iterationStart != null ? String(parsed.iterationStart) : "",
+      );
+      setExploreIterationEnd(
+        parsed.iterationEnd != null ? String(parsed.iterationEnd) : "",
+      );
       spansInspectorHydrateRef.current = {
         si: parsed.spanInspectIndex,
         rid: parsed.recordInspectId,
@@ -973,7 +1193,10 @@ function App() {
   const metricGroups = useMemo(() => {
     const groups = buildMetricGroups(
       selectedCatalog,
-      activeRun?.metrics ?? [],
+      filterMetricsByIterationRange(
+        activeRun?.metrics ?? [],
+        normalizedIterationRange,
+      ),
     );
     if (!exploreNodeId) {
       return groups;
@@ -986,29 +1209,78 @@ function App() {
         ),
       }))
       .filter((groupView) => groupView.metrics.length > 0);
-  }, [selectedCatalog, activeRun?.metrics, exploreNodeId]);
-  const frameCount = activeReplay?.frame_ids.length ?? 0;
+  }, [
+    selectedCatalog,
+    activeRun?.metrics,
+    exploreNodeId,
+    normalizedIterationRange,
+  ]);
+  const metricTrendGroups = useMemo(
+    () => metricGroups.filter((groupView) => groupView.hasIterationSeries),
+    [metricGroups],
+  );
+  const metricCounterSummaries = useMemo(
+    () => buildMetricCounterSummaries(metricGroups),
+    [metricGroups],
+  );
+  const frameCount = useMemo(
+    () =>
+      activeReplay == null
+        ? 0
+        : new Set(
+            activeReplay.node_summaries
+              .filter((summary) =>
+                isWithinIterationRange(
+                  summary.iteration_index,
+                  normalizedIterationRange,
+                ),
+              )
+              .map((summary) => summary.frame_id),
+          ).size,
+    [activeReplay, normalizedIterationRange],
+  );
+  const availableFrameOptions = useMemo(() => {
+    if (activeReplay == null) {
+      return [] as string[];
+    }
+    return [...new Set(
+      activeReplay.node_summaries
+        .filter((summary) =>
+          isWithinIterationRange(summary.iteration_index, normalizedIterationRange),
+        )
+        .map((summary) => summary.frame_id),
+    )].sort((left, right) => {
+      if (left === "root") {
+        return -1;
+      }
+      if (right === "root") {
+        return 1;
+      }
+      return left.localeCompare(right);
+    });
+  }, [activeReplay, normalizedIterationRange]);
   const selectedNodeSummary = useMemo(
     () => getSelectedNodeSummary(activeReplay, selectedNodeId, selectedFrameId),
     [activeReplay, selectedFrameId, selectedNodeId],
   );
-  const liveRecords = activeExecution?.records ?? [];
-  const liveMessages = activeExecution?.messages ?? [];
-  const liveRunRecords = useMemo(
-    () =>
-      activeExecution?.run_id === exploreRunId
-        ? liveRecords
-        : [],
-    [activeExecution?.run_id, exploreRunId, liveRecords],
-  );
   const recordsInTimeWindow = useMemo(
     () =>
-      filterRecordsByTimeWindow(
-        activeRun?.summary.run_id === exploreRunId ? activeRecords : liveRunRecords,
-        exploreWindow.sinceMs,
-        exploreWindow.untilMs,
+      filterRecordsByIterationRange(
+        filterRecordsByTimeWindow(
+          activeRun?.summary.run_id === exploreRunId ? activeRecords : liveRunRecords,
+          exploreWindow.sinceMs,
+          exploreWindow.untilMs,
+        ),
+        normalizedIterationRange,
       ),
-    [activeRecords, activeRun?.summary.run_id, exploreRunId, exploreWindow, liveRunRecords],
+    [
+      activeRecords,
+      activeRun?.summary.run_id,
+      exploreRunId,
+      exploreWindow,
+      liveRunRecords,
+      normalizedIterationRange,
+    ],
   );
   const selectedNodeRecords = useMemo(
     () =>
@@ -1017,10 +1289,10 @@ function App() {
   );
   const explorerRecordsInWindowCount = useMemo(() => {
     if (exploreRunId != null) {
-      return recordsInTimeWindow.length;
+      return activeRecordsTotalCount;
     }
     return runsInExploreWindow.reduce((sum, r) => sum + r.record_count, 0);
-  }, [exploreRunId, recordsInTimeWindow, runsInExploreWindow]);
+  }, [exploreRunId, activeRecordsTotalCount, runsInExploreWindow]);
   const recentRunSuccessLabel = useMemo(
     () => formatSuccessRateForRuns(runsInExploreWindow),
     [runsInExploreWindow],
@@ -1029,27 +1301,32 @@ function App() {
     if (exploreRunId == null) {
       return "—";
     }
-    return String(
-      (activeRun?.invariants ?? []).filter(
-        (item) => item.severity === "warning",
-      ).length,
-    );
-  }, [exploreRunId, activeRun?.invariants]);
+      return String(
+        (activeRun?.invariants ?? []).filter(
+          (item) =>
+            item.severity === "warning" &&
+            isWithinIterationRange(item.iteration_index, normalizedIterationRange),
+        ).length,
+      );
+  }, [exploreRunId, activeRun?.invariants, normalizedIterationRange]);
   const selectedNodeEdges = useMemo(
     () => getConnectedEdges(summaryGraph, selectedNodeId),
     [summaryGraph, selectedNodeId],
   );
   const spanItems = useMemo(
     () =>
-      buildSpanViews(
-        nodeDetail,
-        activeRun?.summary.run_id === exploreRunId
-          ? runSpans
-          : activeExecution?.run_id === exploreRunId
-            ? activeExecution.spans
-            : runSpans,
-        exploreNodeId,
-        selectedFrameId,
+      filterSpansByIterationRange(
+        buildSpanViews(
+          nodeDetail,
+          activeRun?.summary.run_id === exploreRunId
+            ? runSpans
+            : activeExecution?.run_id === exploreRunId
+              ? activeExecution.spans
+              : runSpans,
+          exploreNodeId,
+          selectedFrameId,
+        ),
+        normalizedIterationRange,
       ),
     [
       activeExecution?.run_id,
@@ -1060,6 +1337,7 @@ function App() {
       exploreNodeId,
       selectedFrameId,
       exploreRunId,
+      normalizedIterationRange,
     ],
   );
 
@@ -1100,6 +1378,10 @@ function App() {
           { label: "graph", value: activeRun.summary.graph_id },
           { label: "run", value: activeRun.summary.run_id },
           {
+            label: "steps",
+            value: formatIterationRangeLabel(normalizedIterationRange),
+          },
+          {
             label: "invocation",
             value:
               activeRun.summary.invocation_name ??
@@ -1121,6 +1403,10 @@ function App() {
             label: "invocation",
             value: selectedCatalog?.invocation_name ?? "n/a",
           },
+          {
+            label: "steps",
+            value: formatIterationRangeLabel(normalizedIterationRange),
+          },
         ];
     /* Facet row ($window, @run_id, @node_id) lives in ExplorerScopeBar — omit here to avoid duplicate UI. */
     if (selectedCatalog) {
@@ -1138,6 +1424,7 @@ function App() {
     exploreTimePreset,
     exploreRunId,
     exploreNodeId,
+    normalizedIterationRange,
   ]);
 
   const activeViewLabel =
@@ -1152,6 +1439,8 @@ function App() {
       window: exploreTimePreset,
       runId: exploreRunId,
       nodeId: exploreNodeId,
+      iterationStart: normalizedIterationRange.start,
+      iterationEnd: normalizedIterationRange.end,
       spanInspectIndex:
         activeView === "spans" && spansInspector?.kind === "span"
           ? spansInspector.index
@@ -1171,6 +1460,7 @@ function App() {
     exploreTimePreset,
     exploreRunId,
     exploreNodeId,
+    normalizedIterationRange,
     spansInspector,
   ]);
 
@@ -1285,18 +1575,26 @@ function App() {
 
         {selectedCatalog ? (
           <ExplorerScopeBar
-            exploreNodeId={exploreNodeId}
-            exploreRunId={exploreRunId}
-            exploreTimePreset={exploreTimePreset}
-            graphNodes={summaryGraph?.nodes ?? []}
-            runs={runsForExplorerDropdown}
-            setExploreNodeId={setExploreNodeId}
-            setExploreRunId={setExploreRunId}
-            setExploreTimePreset={setExploreTimePreset}
-          />
+          exploreNodeId={exploreNodeId}
+          exploreIterationEnd={exploreIterationEnd}
+          exploreIterationStart={exploreIterationStart}
+          exploreRunId={exploreRunId}
+          exploreTimePreset={exploreTimePreset}
+          selectedFrameId={selectedFrameId}
+          frameOptions={availableFrameOptions}
+          iterationBounds={iterationBounds}
+          graphNodes={summaryGraph?.nodes ?? []}
+          runs={runsForExplorerDropdown}
+          setExploreNodeId={setExploreNodeId}
+          setExploreIterationEnd={setExploreIterationEnd}
+          setExploreIterationStart={setExploreIterationStart}
+          setExploreRunId={setExploreRunId}
+          setExploreTimePreset={setExploreTimePreset}
+          setSelectedFrameId={setSelectedFrameId}
+        />
         ) : null}
 
-        {        renderCurrentView({
+        {renderCurrentView({
           activeExecution,
           activeCustomView,
           activeRun,
@@ -1305,6 +1603,10 @@ function App() {
           catalog,
           explorerRecordsInWindowCount,
           exploreNodeId,
+          filteredCustomView: filterCustomViewByIterationRange(
+            activeCustomView,
+            normalizedIterationRange,
+          ),
           exploreRunId,
           frameCount,
           graphFindings,
@@ -1314,8 +1616,14 @@ function App() {
           customViewLoading,
           liveMessages,
           liveRecords,
+          metricCounterSummaries,
           metricGroups,
+          metricTrendGroups,
           remoteEvents,
+          activeRecordsHasMore,
+          activeRecordsLoading,
+          activeRecordsLoadingMore,
+          activeRecordsTotalCount,
           nodeDetail,
           recentRunSuccessLabel,
           runContext,
@@ -1330,6 +1638,8 @@ function App() {
           recordsInTimeWindow,
           selectedNodeRecords,
           selectedNodeSummary,
+          iterationBounds,
+          normalizedIterationRange,
           setActiveView,
           setCatalog,
           setSelectedCustomViewId,
@@ -1338,6 +1648,8 @@ function App() {
           setSelectedNodeId,
           setSelectedSpecId,
           setSpansInspector,
+          loadOlderRecords,
+          loadOlderSpans,
           spanItems,
           spansInspector,
           summaryGraph,
@@ -1349,6 +1661,9 @@ function App() {
           timeseriesLoading,
           timeseriesPollBusy,
           runSpansLoading,
+          runSpansHasMore,
+          runSpansLoadingMore,
+          runSpansTotalCount,
           openTracesAtSpanIndex,
         })}
       </main>
@@ -1365,6 +1680,7 @@ function renderCurrentView({
   catalog,
   explorerRecordsInWindowCount,
   exploreNodeId,
+  filteredCustomView,
   exploreRunId,
   frameCount,
   graphFindings,
@@ -1374,13 +1690,19 @@ function renderCurrentView({
   customViewLoading,
   liveMessages,
   liveRecords,
+  metricCounterSummaries,
   metricGroups,
+  metricTrendGroups,
   remoteEvents,
   nodeDetail,
   recentRunSuccessLabel,
   runContext,
   runs,
   runsForExplorerList,
+  activeRecordsHasMore,
+  activeRecordsLoading,
+  activeRecordsLoadingMore,
+  activeRecordsTotalCount,
   selectNodeAndExplorer,
   selectedCatalog,
   selectedCustomViewId,
@@ -1390,6 +1712,8 @@ function renderCurrentView({
   recordsInTimeWindow,
   selectedNodeRecords,
   selectedNodeSummary,
+  iterationBounds,
+  normalizedIterationRange,
   setActiveView,
   setCatalog,
   setSelectedCustomViewId,
@@ -1398,6 +1722,8 @@ function renderCurrentView({
   setSelectedNodeId,
   setSelectedSpecId,
   setSpansInspector,
+  loadOlderRecords,
+  loadOlderSpans,
   spanItems,
   spansInspector,
   summaryGraph,
@@ -1409,6 +1735,9 @@ function renderCurrentView({
   timeseriesLoading,
   timeseriesPollBusy,
   runSpansLoading,
+  runSpansHasMore,
+  runSpansLoadingMore,
+  runSpansTotalCount,
   openTracesAtSpanIndex,
 }: {
   activeExecution: ExecutionSession | null;
@@ -1419,6 +1748,7 @@ function renderCurrentView({
   catalog: CatalogEntry[];
   explorerRecordsInWindowCount: number;
   exploreNodeId: string | null;
+  filteredCustomView: EvaluatedCustomView | null;
   exploreRunId: string | null;
   frameCount: number;
   graphFindings: AnalysisFinding[];
@@ -1428,8 +1758,14 @@ function renderCurrentView({
   customViewLoading: boolean;
   liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
+  metricCounterSummaries: MetricSummary[];
   metricGroups: MetricGroupView[];
+  metricTrendGroups: MetricGroupView[];
   remoteEvents: RemoteOperationEvent[];
+  activeRecordsHasMore: boolean;
+  activeRecordsLoading: boolean;
+  activeRecordsLoadingMore: boolean;
+  activeRecordsTotalCount: number;
   nodeDetail: NodeDetail | null;
   recentRunSuccessLabel: string;
   runContext: ScopeToken[];
@@ -1444,6 +1780,8 @@ function renderCurrentView({
   recordsInTimeWindow: ExecutionRecord[];
   selectedNodeRecords: ExecutionRecord[];
   selectedNodeSummary: ReplayNodeSummary | null;
+  iterationBounds: IterationBounds | null;
+  normalizedIterationRange: NormalizedIterationRange;
   setActiveView: (view: ViewId) => void;
   setCatalog: (entries: CatalogEntry[]) => void;
   setSelectedCustomViewId: (viewId: string | null) => void;
@@ -1452,6 +1790,8 @@ function renderCurrentView({
   setSelectedNodeId: (nodeId: string | null) => void;
   setSelectedSpecId: (specId: string | null) => void;
   setSpansInspector: Dispatch<SetStateAction<SpansInspector | null>>;
+  loadOlderRecords: () => void;
+  loadOlderSpans: () => void;
   spanItems: GenericSpan[];
   spansInspector: SpansInspector | null;
   summaryGraph: GraphPayload | null;
@@ -1463,6 +1803,9 @@ function renderCurrentView({
   timeseriesLoading: boolean;
   timeseriesPollBusy: boolean;
   runSpansLoading: boolean;
+  runSpansHasMore: boolean;
+  runSpansLoadingMore: boolean;
+  runSpansTotalCount: number;
   openTracesAtSpanIndex: (spanIndex: number) => void;
 }) {
   switch (activeView) {
@@ -1470,16 +1813,22 @@ function renderCurrentView({
       return (
         <OverviewView
           activeExecution={activeExecution}
+          activeCustomView={filteredCustomView}
           activeRun={activeRun}
           exploreRunId={exploreRunId}
           explorerRecordsInWindowCount={explorerRecordsInWindowCount}
+          frameCount={frameCount}
+          iterationBounds={iterationBounds}
           graphFindings={graphFindings}
           handleRun={handleRun}
           liveMessages={liveMessages}
           liveRecords={liveRecords}
+          metricCounterSummaries={metricCounterSummaries}
           metricGroups={metricGroups}
+          metricTrendGroups={metricTrendGroups}
           remoteEvents={remoteEvents}
           recentRunSuccessLabel={recentRunSuccessLabel}
+          recordsInTimeWindow={recordsInTimeWindow}
           runContext={runContext}
           runsForExplorerList={runsForExplorerList}
           selectNodeAndExplorer={selectNodeAndExplorer}
@@ -1492,12 +1841,13 @@ function renderCurrentView({
           timeseriesLoading={timeseriesLoading}
           timeseriesPollBusy={timeseriesPollBusy}
           warningInvariantCount={warningInvariantCount}
+          spanItems={spanItems}
         />
       );
     case "views":
       return (
         <CustomViewsView
-          activeCustomView={activeCustomView}
+          activeCustomView={filteredCustomView}
           activeRun={activeRun}
           customViewError={customViewError}
           customViewLoading={customViewLoading}
@@ -1548,10 +1898,19 @@ function renderCurrentView({
           runFailureMessage={activeRun?.runtime_error ?? null}
           runContext={runContext}
           runRecordsInWindow={recordsInTimeWindow}
+          runRecordsHasMore={activeRecordsHasMore}
+          runRecordsLoading={activeRecordsLoading}
+          runRecordsLoadingMore={activeRecordsLoadingMore}
+          runRecordsTotalCount={activeRecordsTotalCount}
           runSpansLoading={runSpansLoading}
+          runSpansHasMore={runSpansHasMore}
+          runSpansLoadingMore={runSpansLoadingMore}
+          runSpansTotalCount={runSpansTotalCount}
           selectedNodeId={selectedNodeId}
           selectedFrameId={selectedFrameId}
           selectedNodeRecords={selectedNodeRecords}
+          onLoadOlderRecords={loadOlderRecords}
+          onLoadOlderSpans={loadOlderSpans}
           setSpansInspector={setSpansInspector}
           spanItems={spanItems}
           spansInspector={spansInspector}
@@ -1582,16 +1941,22 @@ function renderCurrentView({
 
 function OverviewView({
   activeExecution,
+  activeCustomView,
   activeRun,
   exploreRunId,
   explorerRecordsInWindowCount,
+  frameCount,
+  iterationBounds,
   graphFindings,
   handleRun,
   liveMessages,
   liveRecords,
+  metricCounterSummaries,
   metricGroups,
+  metricTrendGroups,
   remoteEvents,
   recentRunSuccessLabel,
+  recordsInTimeWindow,
   runContext,
   runsForExplorerList,
   selectNodeAndExplorer,
@@ -1604,18 +1969,25 @@ function OverviewView({
   timeseriesLoading,
   timeseriesPollBusy,
   warningInvariantCount,
+  spanItems,
 }: {
   activeExecution: ExecutionSession | null;
+  activeCustomView: EvaluatedCustomView | null;
   activeRun: RunOverview | null;
   exploreRunId: string | null;
   explorerRecordsInWindowCount: number;
+  frameCount: number;
+  iterationBounds: IterationBounds | null;
   graphFindings: AnalysisFinding[];
   handleRun: (specId: string) => Promise<void>;
   liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
+  metricCounterSummaries: MetricSummary[];
   metricGroups: MetricGroupView[];
+  metricTrendGroups: MetricGroupView[];
   remoteEvents: RemoteOperationEvent[];
   recentRunSuccessLabel: string;
+  recordsInTimeWindow: ExecutionRecord[];
   runContext: ScopeToken[];
   runsForExplorerList: RunSummary[];
   selectNodeAndExplorer: (nodeId: string, frameId?: string | null) => void;
@@ -1628,14 +2000,19 @@ function OverviewView({
   timeseriesLoading: boolean;
   timeseriesPollBusy: boolean;
   warningInvariantCount: string;
+  spanItems: GenericSpan[];
 }) {
   const currentRecordCount = String(explorerRecordsInWindowCount);
   const frameCountKpi =
-    exploreRunId == null
+    exploreRunId == null ? "—" : String(frameCount);
+  const visibleStepCount =
+    iterationBounds == null
       ? "—"
-      : String(
-          new Set(activeRun?.metrics.map((m) => m.frame_id) ?? []).size,
-        );
+      : String(iterationBounds.max - iterationBounds.min + 1);
+  const latestIterationLabel =
+    iterationBounds == null ? "—" : `i${iterationBounds.max}`;
+  const previewRecords = recordsInTimeWindow.slice(0, 8);
+  const previewCustomRows = activeCustomView?.rows.slice(-6).reverse() ?? [];
   const runFailed =
     activeRun?.summary.status === "failed" ||
     activeRun?.verification_success === false ||
@@ -1682,6 +2059,12 @@ function OverviewView({
 
       <section className="hero-grid v3-hero-grid">
         <KpiCard
+          label="Visible steps"
+          value={visibleStepCount}
+          source="source: selected run + current @step range"
+          tone="accent"
+        />
+        <KpiCard
           label="Recent run success"
           value={recentRunSuccessLabel}
           source="source: runs in explorer $window"
@@ -1704,9 +2087,14 @@ function OverviewView({
           tone="warning"
         />
         <KpiCard
+          label="Latest visible step"
+          value={latestIterationLabel}
+          source="source: selected run + current @step range"
+        />
+        <KpiCard
           label="Visible frames"
           value={frameCountKpi}
-          source="source: replay frames (requires @run_id)"
+          source="source: replay frames in current @step range"
         />
       </section>
 
@@ -1721,14 +2109,16 @@ function OverviewView({
             />
           </Panel>
 
-          <Panel title="Training metrics">
-            {metricGroups.length > 0 ? (
+          <Panel
+            title="Learning and stability trends"
+            subtitle="Iteration-scoped metric groups answer the training questions that matter: is reward moving, is loss stable, is KL under control, and are updates drifting."
+          >
+            {metricTrendGroups.length > 0 ? (
               <div className="metric-groups-stack">
-                {metricGroups.map((groupView) => (
-                  <MetricGroupRail
+                {metricTrendGroups.map((groupView) => (
+                  <MetricTrendPanel
                     key={groupView.group.group_id}
                     group={groupView.group}
-                    hasIterationSeries={groupView.hasIterationSeries}
                     metrics={groupView.metrics}
                     onInspectMetric={(metric) => {
                       selectNodeAndExplorer(
@@ -1743,8 +2133,22 @@ function OverviewView({
                 ))}
               </div>
             ) : (
-              <EmptyState copy="This spec does not expose grouped numeric outputs yet." />
+              <EmptyState copy="This spec does not expose iteration-scoped metric groups in the current explorer range." />
             )}
+          </Panel>
+
+          <Panel
+            title="Latency and bottlenecks"
+            subtitle="Use this panel to answer “what is the latency per step?” and “what is blocking the step right now?”"
+          >
+            <SpanLatencyInsights
+              spans={spanItems}
+              onInspectNode={(nodeId) => {
+                selectNodeAndExplorer(nodeId, null);
+                setSelectedFrameId(null);
+                setActiveView("spans");
+              }}
+            />
           </Panel>
         </div>
 
@@ -1784,200 +2188,308 @@ function OverviewView({
               )}
             </div>
           </Panel>
-        </div>
-      </section>
 
-      <section className="overview-bottom">
-        <Panel title="Records">
-          <RecordConsole records={activeRun ? activeRun.graph.nodes.length > 0 ? liveRecords.length > 0 ? liveRecords.slice(-4) : [] : [] : []} fallbackRecords={activeExecution?.records.slice(-4) ?? []} />
-        </Panel>
-
-        <Panel title="Remote delivery">
-          {activeRun?.remote_delivery || activeExecution?.live_execution_delivery ? (
-            <div className="stack compact">
-              {activeRun?.remote_delivery ? (
-                <div className="list-card">
-                  <div className="list-card-head">
-                    <span>Service health</span>
-                    <StatusChip
-                      label={activeRun.remote_delivery.last_status ?? "unknown"}
-                      tone={
-                        activeRun.remote_delivery.last_status === "succeeded"
-                          ? "ok"
-                          : activeRun.remote_delivery.last_status === "failed"
-                            ? "error"
-                            : "accent"
-                      }
-                    />
-                  </div>
-                  <div className="list-card-copy">
-                    {activeRun.remote_delivery.last_kind ?? "no events"} · failures (24h):{" "}
-                    {activeRun.remote_delivery.recent_failure_count} · successes (24h):{" "}
-                    {activeRun.remote_delivery.recent_success_count}
-                  </div>
-                  {activeRun.remote_delivery.last_error_message ? (
-                    <div className="list-card-copy">
-                      {activeRun.remote_delivery.last_error_message}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {activeExecution?.live_execution_delivery ? (
-                <div className="list-card">
-                  <div className="list-card-head">
-                    <span>Producer delivery</span>
-                    <StatusChip
-                      label={
-                        activeExecution.live_execution_delivery.success
-                          ? "succeeded"
-                          : "failed"
-                      }
-                      tone={
-                        activeExecution.live_execution_delivery.success ? "ok" : "error"
-                      }
-                    />
-                  </div>
-                  <div className="list-card-copy">
-                    start attempts:{" "}
-                    {String(activeExecution.live_execution_delivery.start_attempt_count)} · update attempts:{" "}
-                    {String(activeExecution.live_execution_delivery.update_attempt_count)}
-                  </div>
-                  {activeExecution.live_execution_delivery.error ? (
-                    <div className="list-card-copy">
-                      {activeExecution.live_execution_delivery.error}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              {remoteEvents.length > 0 ? (
-                <div className="interactive-list">
-                  {remoteEvents.slice(0, 6).map((event) => (
-                    <div key={event.event_id} className="list-card">
-                      <div className="list-card-head">
-                        <span>{event.kind}</span>
-                        <StatusChip
-                          label={event.status}
-                          tone={event.status === "succeeded" ? "ok" : "error"}
-                        />
-                      </div>
-                      <div className="list-card-copy">
-                        {new Date(event.occurred_at_ms).toLocaleTimeString()}
-                        {event.error_message ? ` · ${event.error_message}` : ""}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <EmptyState copy="No remote delivery diagnostics available for the current scope." />
-          )}
-        </Panel>
-
-        <Panel
-          title="Live run"
-          aside={
-            selectedCatalog ? (
-              <button
-                className="primary-action"
-                disabled={!selectedCatalog.launch_enabled}
-                onClick={() => void handleRun(selectedCatalog.spec_id)}
-              >
-                Run verification
-              </button>
-            ) : null
-          }
-        >
-          {activeExecution ? (
-            <div className="live-panel">
-              <div className="chip-row">
-                <StatusChip
-                  label={activeExecution.status}
-                  tone={
-                    activeExecution.status === "succeeded"
-                      ? "ok"
-                      : activeExecution.status === "failed"
-                        ? "error"
-                        : "accent"
-                  }
-                />
-                <StatusChip label={activeExecution.spec.label} />
-              </div>
-              <div className="live-list">
-                {(liveRecords.slice(-5) ?? []).map((record) => (
+          <Panel
+            title="Run counters and gauges"
+            subtitle="Use this strip for cumulative state over the visible run window: completed work, promotions, failures, and other operator counters."
+          >
+            {metricCounterSummaries.length > 0 ? (
+              <div className="metric-counter-grid">
+                {metricCounterSummaries.map((summary) => (
                   <button
-                    key={record.record_id}
-                    className="list-card"
+                    key={summary.key}
+                    className="metric-counter-card"
+                    title={`${summary.label} · ${summary.sourceLabel}`}
                     onClick={() => {
                       selectNodeAndExplorer(
-                        record.node_id,
-                        record.frame_id !== "root" ? record.frame_id : null,
+                        summary.metric.node_id,
+                        summary.metric.frame_id && summary.metric.frame_id !== "root"
+                          ? summary.metric.frame_id
+                          : null,
                       );
                       setActiveView("node");
                     }}
                   >
-                    <div className="list-card-head">
-                      <span>{record.node_id}</span>
-                      <span className="event-pill">{record.event_type}</span>
+                    <div className="metric-counter-head">
+                      <span className="metric-counter-label">{summary.label}</span>
+                      <span className="metric-counter-kind">{summary.seriesKind}</span>
                     </div>
-                    <div className="list-card-copy">
-                      {record.frame_id}
-                      {record.loop_node_id ? ` · ${record.loop_node_id}` : ""}
+                    <div className="metric-counter-primary">
+                      {formatMetricValueWithUnit(summary.latestValue, summary.unit)}
+                    </div>
+                    <div className="metric-counter-meta">
+                      {summary.pointCount > 1 ? (
+                        <strong>
+                          {formatMetricDelta(
+                            summary.latestValue - summary.firstValue,
+                            summary.unit,
+                          )}{" "}
+                          visible window
+                        </strong>
+                      ) : (
+                        <span>single visible point</span>
+                      )}
+                      <span>{summary.pointsLabel}</span>
+                    </div>
+                    <div className="metric-counter-foot">
+                      <span>{summary.sourceLabel}</span>
+                      <span>{summary.extremaLabel}</span>
                     </div>
                   </button>
                 ))}
-                {liveMessages.length > 0 ? (
-                  liveMessages.slice(-5).map((message) => (
-                    <div
-                      key={`${message.sequence}:${message.timestamp_ms}`}
+              </div>
+            ) : (
+              <EmptyState copy="No cumulative counter-like metrics are available in the current explorer range." />
+            )}
+          </Panel>
+
+          <Panel
+            title={activeCustomView?.view.title ?? "Behavior preview"}
+            subtitle="Compact preview of the currently selected table view. Open Tables for full row detail."
+          >
+            {!activeRun ? (
+              <EmptyState copy="Pick a run in Explorer to preview run tables." />
+            ) : activeCustomView ? (
+              <div className="custom-view-preview">
+                <div className="chip-row wrap">
+                  <StatusChip label={`${activeCustomView.row_count} rows`} tone="accent" />
+                  <StatusChip label={activeCustomView.view.kind} />
+                </div>
+                <div className="records-table-wrap custom-view-preview-wrap">
+                  <table className="records-table custom-view-table custom-view-preview-table">
+                    <thead>
+                      <tr>
+                        {activeCustomView.view.columns.slice(0, 4).map((column) => (
+                          <th key={column.column_id}>{column.title}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {previewCustomRows.map((row) => (
+                        <tr key={row.row_id}>
+                          {activeCustomView.view.columns.slice(0, 4).map((column) => (
+                            <td key={`${row.row_id}:${column.column_id}`}>
+                              {formatCustomViewCellPreview(row.values[column.column_id], column)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  className="primary-action secondary"
+                  onClick={() => setActiveView("views")}
+                >
+                  Open full table
+                </button>
+              </div>
+            ) : (
+              <EmptyState copy="This spec does not expose any custom views yet." />
+            )}
+          </Panel>
+        </div>
+      </section>
+
+      <section className="overview-bottom">
+        <div className="stack">
+          <Panel title="Records">
+            <RecordConsole
+              records={previewRecords}
+              fallbackRecords={activeExecution?.records.slice(-8) ?? []}
+            />
+          </Panel>
+
+          <Panel
+            title="Live run"
+            aside={
+              selectedCatalog ? (
+                <button
+                  className="primary-action"
+                  disabled={!selectedCatalog.launch_enabled}
+                  onClick={() => void handleRun(selectedCatalog.spec_id)}
+                >
+                  Run verification
+                </button>
+              ) : null
+            }
+          >
+            {activeExecution ? (
+              <div className="live-panel">
+                <div className="chip-row">
+                  <StatusChip
+                    label={activeExecution.status}
+                    tone={
+                      activeExecution.status === "succeeded"
+                        ? "ok"
+                        : activeExecution.status === "failed"
+                          ? "error"
+                          : "accent"
+                    }
+                  />
+                  <StatusChip label={activeExecution.spec.label} />
+                </div>
+                <div className="live-list">
+                  {(liveRecords.slice(-5) ?? []).map((record) => (
+                    <button
+                      key={record.record_id}
                       className="list-card"
+                      onClick={() => {
+                        selectNodeAndExplorer(
+                          record.node_id,
+                          record.frame_id !== "root" ? record.frame_id : null,
+                        );
+                        setActiveView("node");
+                      }}
                     >
                       <div className="list-card-head">
-                        <span>{message.source}</span>
-                        <span className="event-pill">{message.level}</span>
+                        <span>{record.node_id}</span>
+                        <span className="event-pill">{record.event_type}</span>
                       </div>
-                      <div className="list-card-copy">{message.message}</div>
+                      <div className="list-card-copy">
+                        {record.frame_id}
+                        {record.loop_node_id ? ` · ${record.loop_node_id}` : ""}
+                      </div>
+                    </button>
+                  ))}
+                  {liveMessages.length > 0 ? (
+                    liveMessages.slice(-5).map((message) => (
+                      <div
+                        key={`${message.sequence}:${message.timestamp_ms}`}
+                        className="list-card"
+                      >
+                        <div className="list-card-head">
+                          <span>{message.source}</span>
+                          <span className="event-pill">{message.level}</span>
+                        </div>
+                        <div className="list-card-copy">{message.message}</div>
+                      </div>
+                    ))
+                  ) : null}
+                  {liveRecords.length === 0 &&
+                  liveMessages.length === 0 &&
+                  activeExecution.spec.project_id &&
+                  activeExecution.spec.project_id !== "mentalmodel-examples" ? (
+                    <div className="empty-state">
+                      External run started. Live records have not arrived yet, so
+                      the worker is likely still in setup before the workflow
+                      begins emitting semantic events.
                     </div>
-                  ))
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <EmptyState copy="Launch a run to watch the live semantic stream." />
+            )}
+          </Panel>
+        </div>
+
+        <div className="stack">
+          <Panel title="Remote delivery">
+            {activeRun?.remote_delivery || activeExecution?.live_execution_delivery ? (
+              <div className="stack compact">
+                {activeRun?.remote_delivery ? (
+                  <div className="list-card">
+                    <div className="list-card-head">
+                      <span>Service health</span>
+                      <StatusChip
+                        label={activeRun.remote_delivery.last_status ?? "unknown"}
+                        tone={
+                          activeRun.remote_delivery.last_status === "succeeded"
+                            ? "ok"
+                            : activeRun.remote_delivery.last_status === "failed"
+                              ? "error"
+                              : "accent"
+                        }
+                      />
+                    </div>
+                    <div className="list-card-copy">
+                      {activeRun.remote_delivery.last_kind ?? "no events"} · failures (24h):{" "}
+                      {activeRun.remote_delivery.recent_failure_count} · successes (24h):{" "}
+                      {activeRun.remote_delivery.recent_success_count}
+                    </div>
+                    {activeRun.remote_delivery.last_error_message ? (
+                      <div className="list-card-copy">
+                        {activeRun.remote_delivery.last_error_message}
+                      </div>
+                    ) : null}
+                  </div>
                 ) : null}
-                {liveRecords.length === 0 &&
-                liveMessages.length === 0 &&
-                activeExecution.spec.project_id &&
-                activeExecution.spec.project_id !== "mentalmodel-examples" ? (
-                  <div className="empty-state">
-                    External run started. Live records have not arrived yet, so
-                    the worker is likely still in setup before the workflow
-                    begins emitting semantic events.
+                {activeExecution?.live_execution_delivery ? (
+                  <div className="list-card">
+                    <div className="list-card-head">
+                      <span>Producer delivery</span>
+                      <StatusChip
+                        label={
+                          activeExecution.live_execution_delivery.success
+                            ? "succeeded"
+                            : "failed"
+                        }
+                        tone={
+                          activeExecution.live_execution_delivery.success ? "ok" : "error"
+                        }
+                      />
+                    </div>
+                    <div className="list-card-copy">
+                      start attempts:{" "}
+                      {String(activeExecution.live_execution_delivery.start_attempt_count)} · update attempts:{" "}
+                      {String(activeExecution.live_execution_delivery.update_attempt_count)}
+                    </div>
+                    {activeExecution.live_execution_delivery.error ? (
+                      <div className="list-card-copy">
+                        {activeExecution.live_execution_delivery.error}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {remoteEvents.length > 0 ? (
+                  <div className="interactive-list">
+                    {remoteEvents.slice(0, 6).map((event) => (
+                      <div key={event.event_id} className="list-card">
+                        <div className="list-card-head">
+                          <span>{event.kind}</span>
+                          <StatusChip
+                            label={event.status}
+                            tone={event.status === "succeeded" ? "ok" : "error"}
+                          />
+                        </div>
+                        <div className="list-card-copy">
+                          {new Date(event.occurred_at_ms).toLocaleTimeString()}
+                          {event.error_message ? ` · ${event.error_message}` : ""}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 ) : null}
               </div>
-            </div>
-          ) : (
-            <EmptyState copy="Launch a run to watch the live semantic stream." />
-          )}
-        </Panel>
+            ) : (
+              <EmptyState copy="No remote delivery diagnostics available for the current scope." />
+            )}
+          </Panel>
 
-        <Panel title="Static analysis">
-          {graphFindings.length > 0 ? (
-            <div className="analysis-stack">
-              {graphFindings.slice(0, 6).map((finding) => (
-                <div
-                  key={`${finding.code}:${finding.node_id ?? "root"}:${finding.message}`}
-                  className={`analysis-card ${finding.severity}`}
-                >
-                  <div className="analysis-card-title">{finding.code}</div>
-                  <div className="analysis-card-copy">{finding.message}</div>
-                  <div className="analysis-card-meta">
-                    {finding.severity}
-                    {finding.node_id ? ` · ${finding.node_id}` : ""}
+          <Panel title="Static analysis">
+            {graphFindings.length > 0 ? (
+              <div className="analysis-stack">
+                {graphFindings.slice(0, 6).map((finding) => (
+                  <div
+                    key={`${finding.code}:${finding.node_id ?? "root"}:${finding.message}`}
+                    className={`analysis-card ${finding.severity}`}
+                  >
+                    <div className="analysis-card-title">{finding.code}</div>
+                    <div className="analysis-card-copy">{finding.message}</div>
+                    <div className="analysis-card-meta">
+                      {finding.severity}
+                      {finding.node_id ? ` · ${finding.node_id}` : ""}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <EmptyState copy="No structural findings for the selected spec." />
-          )}
-        </Panel>
+                ))}
+              </div>
+            ) : (
+              <EmptyState copy="No structural findings for the selected spec." />
+            )}
+          </Panel>
+        </div>
       </section>
     </>
   );
@@ -2004,9 +2516,14 @@ function CustomViewsView({
 }) {
   const availableViews = selectedCatalog?.custom_views ?? [];
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+  const [rowShowCount, setRowShowCount] = useState(50);
 
   useEffect(() => {
     setSelectedRowId(null);
+  }, [activeCustomView?.view.view_id, activeRun?.summary.run_id]);
+
+  useEffect(() => {
+    setRowShowCount(50);
   }, [activeCustomView?.view.view_id, activeRun?.summary.run_id]);
 
   const selectedRow = useMemo(() => {
@@ -2020,6 +2537,7 @@ function CustomViewsView({
     selectedRow && activeCustomView
       ? activeCustomView.rows.findIndex((r) => r.row_id === selectedRow.row_id)
       : -1;
+  const displayedRows = activeCustomView?.rows.slice(-rowShowCount) ?? [];
   const showInlineLoading = customViewLoading && activeRun != null && activeCustomView != null;
   const showBlockingLoading = customViewLoading && activeCustomView == null;
   const showInlineError = customViewError != null && activeCustomView != null;
@@ -2056,6 +2574,14 @@ function CustomViewsView({
                 {activeCustomView.view.description ? (
                   <div className="panel-copy">{activeCustomView.view.description}</div>
                 ) : null}
+                <div className="chip-row wrap">
+                  <StatusChip label={`${activeCustomView.row_count} rows`} tone="accent" />
+                  {activeCustomView.rows.length > displayedRows.length ? (
+                    <StatusChip
+                      label={`${displayedRows.length}/${activeCustomView.rows.length} loaded`}
+                    />
+                  ) : null}
+                </div>
                 {activeCustomView.warnings.length > 0 ? (
                   <div className="analysis-stack">
                     {activeCustomView.warnings.slice(0, 4).map((warning) => (
@@ -2084,7 +2610,7 @@ function CustomViewsView({
                       </tr>
                     </thead>
                     <tbody>
-                      {activeCustomView.rows.map((row) => (
+                      {displayedRows.map((row) => (
                         <tr
                           key={row.row_id}
                           className={`custom-view-row ${
@@ -2122,6 +2648,15 @@ function CustomViewsView({
                     </tbody>
                   </table>
                 </div>
+                {activeCustomView.rows.length > displayedRows.length ? (
+                  <button
+                    type="button"
+                    className="load-more-btn"
+                    onClick={() => setRowShowCount((current) => current + 50)}
+                  >
+                    Load older rows ({activeCustomView.rows.length - displayedRows.length} not shown)
+                  </button>
+                ) : null}
               </div>
             ) : customViewError ? (
               <EmptyState copy={customViewError} />
@@ -2345,7 +2880,7 @@ function NodeDetailView({
         <div className="stack">
           <Panel title="Throughput">
             <div className="chip-row">
-              <StatusChip label="source: queue_summary.*" tone="accent" />
+              <StatusChip label="source: semantic event cadence" tone="accent" />
               <StatusChip label="source: trace spans" />
             </div>
             <BarSeries values={buildRecordCadenceBars(selectedNodeRecords)} />
@@ -2492,9 +3027,6 @@ function nodeDetailIoPrefetchForRecord(
   return nodeDetail;
 }
 
-const SPAN_PAGE_SIZE = 200;
-const RECORD_PAGE_SIZE = 250;
-
 function SpansRecordsView({
   activeRun,
   exploreNodeId,
@@ -2503,10 +3035,19 @@ function SpansRecordsView({
   runFailureMessage,
   runContext,
   runRecordsInWindow,
+  runRecordsHasMore,
+  runRecordsLoading,
+  runRecordsLoadingMore,
+  runRecordsTotalCount,
   runSpansLoading,
+  runSpansHasMore,
+  runSpansLoadingMore,
+  runSpansTotalCount,
   selectedNodeId,
   selectedFrameId,
   selectedNodeRecords,
+  onLoadOlderRecords,
+  onLoadOlderSpans,
   setSpansInspector,
   spanItems,
   spansInspector,
@@ -2520,25 +3061,24 @@ function SpansRecordsView({
   runContext: ScopeToken[];
   /** Time-window slice of the loaded run’s semantic records (same source as list; used to join spans). */
   runRecordsInWindow: ExecutionRecord[];
+  runRecordsHasMore: boolean;
+  runRecordsLoading: boolean;
+  runRecordsLoadingMore: boolean;
+  runRecordsTotalCount: number;
   runSpansLoading: boolean;
+  runSpansHasMore: boolean;
+  runSpansLoadingMore: boolean;
+  runSpansTotalCount: number;
   selectedNodeId: string | null;
   selectedFrameId: string | null;
   selectedNodeRecords: ExecutionRecord[];
+  onLoadOlderRecords: () => void;
+  onLoadOlderSpans: () => void;
   setSpansInspector: Dispatch<SetStateAction<SpansInspector | null>>;
   spanItems: GenericSpan[];
   spansInspector: SpansInspector | null;
 }) {
   const explorerNodeLabel = exploreNodeId ?? "all";
-  const [spanShowCount, setSpanShowCount] = useState(SPAN_PAGE_SIZE);
-  const [recordShowCount, setRecordShowCount] = useState(RECORD_PAGE_SIZE);
-
-  useEffect(() => {
-    setSpanShowCount(SPAN_PAGE_SIZE);
-  }, [exploreRunId, exploreNodeId, selectedFrameId, activeRun?.summary.run_id]);
-
-  useEffect(() => {
-    setRecordShowCount(RECORD_PAGE_SIZE);
-  }, [exploreRunId, exploreNodeId, selectedFrameId, selectedNodeRecords.length]);
 
   const [traceFullscreenOpen, setTraceFullscreenOpen] = useState(false);
 
@@ -2560,17 +3100,6 @@ function SpansRecordsView({
     };
   }, [traceFullscreenOpen]);
 
-  const displayedRecords = useMemo(() => {
-    const slice = selectedNodeRecords.slice(-recordShowCount);
-    return slice;
-  }, [selectedNodeRecords, recordShowCount]);
-
-  const visibleSpans = useMemo(
-    () => spanItems.slice(-spanShowCount),
-    [spanItems, spanShowCount],
-  );
-  const spanIndexOffset = Math.max(0, spanItems.length - visibleSpans.length);
-
   const spanDetail =
     spansInspector?.kind === "span"
       ? (spanItems[spansInspector.index] ?? null)
@@ -2586,7 +3115,7 @@ function SpansRecordsView({
   const recordDetail =
     spansInspector?.kind === "record"
       ? (runRecordsInWindow.find((r) => r.record_id === spansInspector.id) ??
-          displayedRecords.find((r) => r.record_id === spansInspector.id) ??
+          selectedNodeRecords.find((r) => r.record_id === spansInspector.id) ??
           null)
       : null;
 
@@ -2702,9 +3231,11 @@ function SpansRecordsView({
               <div className="chip-row">
                 <StatusChip label={`@node_id: ${explorerNodeLabel}`} tone="accent" />
                 <StatusChip label={`frame: ${selectedFrameId ?? "all"}`} />
-                <StatusChip label={`${spanItems.length} spans`} />
+                <StatusChip label={`${spanItems.length} / ${runSpansTotalCount} spans`} />
                 <StatusChip label={`trace: ${activeRun?.summary.trace_mode ?? "n/a"}`} />
-                {runSpansLoading && exploreRunId ? (
+                {runSpansLoadingMore && exploreRunId ? (
+                  <StatusChip label="loading older spans…" tone="accent" />
+                ) : runSpansLoading && exploreRunId ? (
                   <StatusChip label="loading span data…" tone="accent" />
                 ) : null}
               </div>
@@ -2713,25 +3244,23 @@ function SpansRecordsView({
                 attributes.
               </p>
               <TraceList
-                indexOffset={spanIndexOffset}
+                indexOffset={0}
                 selectedIndex={
                   spansInspector?.kind === "span" ? spansInspector.index : null
                 }
-                spans={visibleSpans}
+                spans={spanItems}
                 onSelectSpan={(index) =>
                   setSpansInspector({ kind: "span", index })
                 }
               />
-              {spanItems.length > spanShowCount ? (
+              {runSpansHasMore ? (
                 <button
                   type="button"
                   className="load-more-btn"
-                  onClick={() =>
-                    setSpanShowCount((c) => c + SPAN_PAGE_SIZE)
-                  }
+                  onClick={onLoadOlderSpans}
+                  disabled={runSpansLoadingMore}
                 >
-                  Load older spans (
-                  {spanItems.length - spanShowCount} not shown)
+                  {runSpansLoadingMore ? "Loading older spans…" : "Load older spans"}
                 </button>
               ) : null}
             </Panel>
@@ -2740,10 +3269,15 @@ function SpansRecordsView({
           <div className="stack">
             <Panel title="Semantic stream">
               <div className="chip-row">
-                <StatusChip label={`${displayedRecords.length} records`} tone="accent" />
+                <StatusChip label={`${selectedNodeRecords.length} / ${runRecordsTotalCount} records`} tone="accent" />
                 <StatusChip
                   label={`scope: @node_id ${explorerNodeLabel} · frame ${selectedFrameId ?? "all"}`}
                 />
+                {runRecordsLoadingMore ? (
+                  <StatusChip label="loading older records…" tone="accent" />
+                ) : runRecordsLoading && exploreRunId ? (
+                  <StatusChip label="loading record data…" tone="accent" />
+                ) : null}
               </div>
               <p className="spans-explainer">
                 Execution events from <span className="mono">records.jsonl</span>. Not every
@@ -2751,7 +3285,7 @@ function SpansRecordsView({
               </p>
               <SemanticRecordList
                 emptyHint={recordsEmptyReason}
-                records={displayedRecords}
+                records={selectedNodeRecords}
                 selectedRecordId={
                   spansInspector?.kind === "record" ? spansInspector.id : null
                 }
@@ -2759,16 +3293,14 @@ function SpansRecordsView({
                   setSpansInspector({ kind: "record", id })
                 }
               />
-              {selectedNodeRecords.length > recordShowCount ? (
+              {runRecordsHasMore ? (
                 <button
                   type="button"
                   className="load-more-btn"
-                  onClick={() =>
-                    setRecordShowCount((c) => c + RECORD_PAGE_SIZE)
-                  }
+                  onClick={onLoadOlderRecords}
+                  disabled={runRecordsLoadingMore}
                 >
-                  Load older records (
-                  {selectedNodeRecords.length - recordShowCount} not shown)
+                  {runRecordsLoadingMore ? "Loading older records…" : "Load older records"}
                 </button>
               ) : null}
             </Panel>
@@ -3296,56 +3828,274 @@ function StatusChip({
   );
 }
 
-function MetricGroupRail({
+function MetricTrendPanel({
   group,
-  hasIterationSeries,
   metrics,
   onInspectMetric,
 }: {
   group: MetricGroup;
-  hasIterationSeries: boolean;
   metrics: NumericMetric[];
   onInspectMetric: (metric: NumericMetric) => void;
 }) {
-  const maxValue = Math.max(...metrics.map((metric) => metric.value), 1);
+  const summaries = summarizeMetricGroup(metrics);
 
   return (
-    <div className="metric-group-rail">
+    <div className="metric-trend-panel">
       <div className="metric-group-head">
         <div className="panel-title">{group.title}</div>
         <div className="panel-subtitle">{group.description}</div>
       </div>
-      {hasIterationSeries ? (
-        <MetricGroupTimeseriesChart group={group} metrics={metrics} />
-      ) : (
-        <div className="metric-group-hint">
-          This group currently exposes snapshot metrics only. Iteration charts appear
-          automatically when matching metrics include
-          <span className="mono"> iteration_index</span>.
-        </div>
-      )}
-      <div className="metric-rail-list">
-        {metrics.map((metric) => (
+      <MetricGroupTimeseriesChart group={group} metrics={metrics} />
+      <div className="metric-summary-grid compact">
+        {summaries.map((summary) => (
           <button
-            key={`${metric.node_id}:${metric.path}:${metric.frame_id ?? "root"}`}
-            className="metric-rail-row"
-            onClick={() => onInspectMetric(metric)}
+            key={summary.key}
+            className="metric-summary-card"
+            onClick={() => onInspectMetric(summary.metric)}
           >
-            <div className="metric-rail-meta">
-              <span>{metric.path}</span>
-              <strong>{formatMetricValue(metric.value)}</strong>
+            <div className="metric-summary-header">
+              <span className="metric-summary-label">{summary.label}</span>
+              {summary.iterationRange ? (
+                <span className="metric-summary-range">{summary.iterationRange}</span>
+              ) : null}
             </div>
-            <div className="metric-rail-track">
-              <div
-                className="metric-rail-fill"
-                style={{ width: `${Math.max((metric.value / maxValue) * 100, 8)}%` }}
-              />
+            <div className="metric-summary-primary">
+              {formatMetricValueWithUnit(summary.latestValue, summary.unit)}
+            </div>
+            <div className="metric-summary-meta">
+              <span>{summary.sourceLabel}</span>
+              {summary.deltaLabel ? <strong>{summary.deltaLabel}</strong> : null}
+            </div>
+            <div className="metric-summary-foot">
+              <span>{summary.extremaLabel}</span>
+              <span>{summary.pointsLabel}</span>
             </div>
           </button>
         ))}
       </div>
     </div>
   );
+}
+
+type MetricSummary = {
+  key: string;
+  label: string;
+  latestValue: number;
+  deltaLabel: string | null;
+  extremaLabel: string;
+  pointsLabel: string;
+  sourceLabel: string;
+  iterationRange: string | null;
+  unit: MetricUnit;
+  metric: NumericMetric;
+  firstValue: number;
+  pointCount: number;
+  seriesKind: "counter" | "gauge" | "trend";
+};
+
+type MetricUnit = "count" | "ms" | "pct" | "ratio" | "bytes" | "generic";
+
+function summarizeMetricGroup(metrics: NumericMetric[]): MetricSummary[] {
+  const byKey = new Map<
+    string,
+    {
+      label: string;
+      unit: MetricUnit;
+      metrics: NumericMetric[];
+    }
+  >();
+  for (const metric of metrics) {
+    const label = normalizeMetricSummaryLabel(metric);
+    const existing = byKey.get(label);
+    if (existing) {
+      existing.metrics.push(metric);
+      continue;
+    }
+    byKey.set(label, {
+      label,
+      unit: inferMetricUnit(metric),
+      metrics: [metric],
+    });
+  }
+  return [...byKey.values()]
+    .map((group) => buildMetricSummary(group.label, group.unit, group.metrics))
+    .sort((left, right) => {
+      const leftIteration = extractIterationForSummary(left.metric);
+      const rightIteration = extractIterationForSummary(right.metric);
+      if (leftIteration !== rightIteration) {
+        return rightIteration - leftIteration;
+      }
+      return left.label.localeCompare(right.label);
+    });
+}
+
+function buildMetricSummary(
+  label: string,
+  unit: MetricUnit,
+  metrics: NumericMetric[],
+): MetricSummary {
+  const ordered = [...metrics].sort((left, right) => {
+    const leftIteration = extractIterationForSummary(left);
+    const rightIteration = extractIterationForSummary(right);
+    if (leftIteration !== rightIteration) {
+      return leftIteration - rightIteration;
+    }
+    return left.value - right.value;
+  });
+  const latest = ordered[ordered.length - 1] ?? metrics[0]!;
+  const previous = ordered.length > 1 ? ordered[ordered.length - 2] : null;
+  const first = ordered[0] ?? latest;
+  const values = ordered.map((metric) => metric.value);
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const firstIteration = ordered[0]?.iteration_index ?? null;
+  const lastIteration = latest.iteration_index;
+  return {
+    key: `${latest.node_id}:${label}:${latest.frame_id ?? "root"}`,
+    label,
+    latestValue: latest.value,
+    deltaLabel:
+      previous == null
+        ? null
+        : formatMetricDelta(latest.value - previous.value, unit),
+    extremaLabel: `min ${formatMetricValueWithUnit(minValue, unit)} · max ${formatMetricValueWithUnit(maxValue, unit)}`,
+    pointsLabel:
+      latest.iteration_index == null
+        ? `${ordered.length} gauges`
+        : `${ordered.length} points`,
+    sourceLabel:
+      latest.iteration_index == null
+        ? latest.node_id
+        : `${latest.node_id} · ${formatIterationSeriesRange(firstIteration, lastIteration)}`,
+    iterationRange:
+      latest.iteration_index == null
+        ? null
+        : formatIterationSeriesRange(firstIteration, lastIteration),
+    unit,
+    metric: latest,
+    firstValue: first.value,
+    pointCount: ordered.length,
+    seriesKind: classifyMetricSeries(label, unit, ordered),
+  };
+}
+
+function normalizeMetricSummaryLabel(metric: NumericMetric): string {
+  const framePrefix =
+    metric.frame_id && metric.frame_id !== "root" ? `${metric.frame_id}.` : null;
+  if (framePrefix && metric.label.startsWith(framePrefix)) {
+    return metric.label.slice(framePrefix.length);
+  }
+  return metric.path || metric.label;
+}
+
+function extractIterationForSummary(metric: NumericMetric): number {
+  return metric.iteration_index ?? -1;
+}
+
+function buildMetricCounterSummaries(
+  metricGroups: MetricGroupView[],
+): MetricSummary[] {
+  return metricGroups
+    .flatMap((groupView) => summarizeMetricGroup(groupView.metrics))
+    .filter((summary) => summary.seriesKind !== "trend")
+    .sort((left, right) => {
+      const leftPriority = left.seriesKind === "counter" ? 0 : 1;
+      const rightPriority = right.seriesKind === "counter" ? 0 : 1;
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
+      }
+      return right.latestValue - left.latestValue;
+    })
+    .slice(0, 12);
+}
+
+function classifyMetricSeries(
+  label: string,
+  unit: MetricUnit,
+  metrics: NumericMetric[],
+): "counter" | "gauge" | "trend" {
+  const normalized = label.toLowerCase();
+  const counterish =
+    unit === "count" ||
+    normalized.includes("count") ||
+    normalized.includes("total") ||
+    normalized.includes("failure") ||
+    normalized.includes("error") ||
+    normalized.includes("success") ||
+    normalized.includes("promotion") ||
+    normalized.includes("completed") ||
+    normalized.includes("requests") ||
+    normalized.includes("tokens") ||
+    normalized.includes("batches") ||
+    normalized.includes("steps");
+  if (!counterish) {
+    return "trend";
+  }
+  if (metrics.length <= 1) {
+    return "gauge";
+  }
+  const monotonic = metrics.every((metric, index) => {
+    if (index === 0) {
+      return true;
+    }
+    const previous = metrics[index - 1];
+    return previous != null && metric.value >= previous.value;
+  });
+  return monotonic ? "counter" : "gauge";
+}
+
+function inferMetricUnit(metric: NumericMetric): MetricUnit {
+  const key = `${metric.path} ${metric.label}`.toLowerCase();
+  if (key.includes("latency") || key.includes("duration") || key.endsWith("_ms") || key.includes(".ms")) {
+    return "ms";
+  }
+  if (key.includes("percent") || key.endsWith("_pct") || key.includes(".pct") || key.includes("accuracy")) {
+    return "pct";
+  }
+  if (key.includes("ratio") || key.includes("rate") || key.includes("score") || key.includes("loss") || key.includes("reward") || key.includes("kl")) {
+    return "ratio";
+  }
+  if (key.includes("bytes") || key.includes("tokens")) {
+    return "bytes";
+  }
+  if (Number.isInteger(metric.value)) {
+    return "count";
+  }
+  return "generic";
+}
+
+function formatMetricValueWithUnit(value: number, unit: MetricUnit): string {
+  if (!Number.isFinite(value)) {
+    return "n/a";
+  }
+  if (unit === "ms") {
+    return `${formatMetricValue(value)} ms`;
+  }
+  if (unit === "pct") {
+    return `${formatMetricValue(value)}%`;
+  }
+  if (unit === "bytes") {
+    return `${formatMetricValue(value)}`;
+  }
+  return formatMetricValue(value);
+}
+
+function formatMetricDelta(delta: number, unit: MetricUnit): string {
+  const sign = delta > 0 ? "+" : "";
+  return `${sign}${formatMetricValueWithUnit(delta, unit)}`;
+}
+
+function formatIterationSeriesRange(
+  start: number | null,
+  end: number | null,
+): string {
+  if (start == null || end == null) {
+    return "snapshot";
+  }
+  if (start === end) {
+    return `i${end}`;
+  }
+  return `i${start}–i${end}`;
 }
 
 function BarSeries({ values }: { values: number[] }) {
@@ -3365,22 +4115,38 @@ function BarSeries({ values }: { values: number[] }) {
 
 function ExplorerScopeBar({
   exploreNodeId,
+  exploreIterationEnd,
+  exploreIterationStart,
   exploreRunId,
   exploreTimePreset,
+  selectedFrameId,
+  frameOptions,
+  iterationBounds,
   graphNodes,
   runs,
   setExploreNodeId,
+  setExploreIterationEnd,
+  setExploreIterationStart,
   setExploreRunId,
   setExploreTimePreset,
+  setSelectedFrameId,
 }: {
   exploreNodeId: string | null;
+  exploreIterationEnd: string;
+  exploreIterationStart: string;
   exploreRunId: string | null;
   exploreTimePreset: ExploreTimePreset;
+  selectedFrameId: string | null;
+  frameOptions: string[];
+  iterationBounds: IterationBounds | null;
   graphNodes: GraphPayload["nodes"];
   runs: RunSummary[];
   setExploreNodeId: (id: string | null) => void;
+  setExploreIterationEnd: (value: string) => void;
+  setExploreIterationStart: (value: string) => void;
   setExploreRunId: (id: string | null) => void;
   setExploreTimePreset: (p: ExploreTimePreset) => void;
+  setSelectedFrameId: (frameId: string | null) => void;
 }) {
   return (
     <section className="explorer-scope-bar" aria-label="Explorer facets">
@@ -3448,6 +4214,49 @@ function ExplorerScopeBar({
             ))}
           </select>
         </label>
+        <label className="explorer-facet">
+          <span className="explorer-facet-key">@frame_id</span>
+          <select
+            className="explorer-facet-input"
+            value={selectedFrameId ?? ""}
+            onChange={(event) =>
+              setSelectedFrameId(event.target.value ? event.target.value : null)
+            }
+          >
+            <option value="">All frames</option>
+            {frameOptions.filter((frameId) => frameId !== "root").map((frameId) => (
+              <option key={frameId} value={frameId === "root" ? "" : frameId}>
+                {frameId}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="explorer-facet explorer-facet-range">
+          <span className="explorer-facet-key">@step_start</span>
+          <input
+            className="explorer-facet-input"
+            inputMode="numeric"
+            type="number"
+            min={iterationBounds?.min ?? 0}
+            max={iterationBounds?.max ?? undefined}
+            placeholder={iterationBounds ? String(iterationBounds.min) : "all"}
+            value={exploreIterationStart}
+            onChange={(event) => setExploreIterationStart(event.target.value)}
+          />
+        </label>
+        <label className="explorer-facet explorer-facet-range">
+          <span className="explorer-facet-key">@step_end</span>
+          <input
+            className="explorer-facet-input"
+            inputMode="numeric"
+            type="number"
+            min={iterationBounds?.min ?? 0}
+            max={iterationBounds?.max ?? undefined}
+            placeholder={iterationBounds ? String(iterationBounds.max) : "all"}
+            value={exploreIterationEnd}
+            onChange={(event) => setExploreIterationEnd(event.target.value)}
+          />
+        </label>
       </div>
     </section>
   );
@@ -3460,10 +4269,12 @@ function RecordConsole({
   fallbackRecords: ExecutionRecord[];
   records: ExecutionRecord[];
 }) {
-  const source = records.length > 0 ? records : fallbackRecords;
+  const source = [...(records.length > 0 ? records : fallbackRecords)].sort(
+    (left, right) => right.timestamp_ms - left.timestamp_ms,
+  );
   return source.length > 0 ? (
     <div className="record-console">
-      {source.slice(-400).map((record) => (
+      {source.slice(0, 400).map((record) => (
         <div key={record.record_id} className="record-console-line">
           {formatRecordLine(record)}
         </div>
@@ -3613,6 +4424,158 @@ function EmptyState({
   copy: string;
 }) {
   return <div className={`empty-state ${compact ? "compact" : ""}`}>{copy}</div>;
+}
+
+type IterationBounds = {
+  min: number;
+  max: number;
+};
+
+type NormalizedIterationRange = {
+  start: number | null;
+  end: number | null;
+};
+
+function collectIterationBounds(input: {
+  metrics: NumericMetric[];
+  records: ExecutionRecord[];
+  spans: Array<{ iteration_index?: unknown }> | null;
+}): IterationBounds | null {
+  const values: number[] = [];
+  for (const metric of input.metrics) {
+    if (metric.iteration_index != null) {
+      values.push(metric.iteration_index);
+    }
+  }
+  for (const record of input.records) {
+    if (record.iteration_index != null) {
+      values.push(record.iteration_index);
+    }
+  }
+  for (const span of input.spans ?? []) {
+    const raw = span.iteration_index;
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      values.push(raw);
+    }
+  }
+  if (values.length === 0) {
+    return null;
+  }
+  return {
+    min: Math.min(...values),
+    max: Math.max(...values),
+  };
+}
+
+function normalizeIterationRange(input: {
+  startInput: string;
+  endInput: string;
+  bounds: IterationBounds | null;
+}): NormalizedIterationRange {
+  const parse = (value: string): number | null => {
+    if (value.trim() === "") {
+      return null;
+    }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return null;
+    }
+    return Math.max(0, Math.floor(parsed));
+  };
+  const startParsed = parse(input.startInput);
+  const endParsed = parse(input.endInput);
+  if (input.bounds == null) {
+    return { start: startParsed, end: endParsed };
+  }
+  const boundedStart =
+    startParsed == null
+      ? null
+      : Math.min(Math.max(startParsed, input.bounds.min), input.bounds.max);
+  const boundedEnd =
+    endParsed == null
+      ? null
+      : Math.min(Math.max(endParsed, input.bounds.min), input.bounds.max);
+  if (
+    boundedStart != null &&
+    boundedEnd != null &&
+    boundedStart > boundedEnd
+  ) {
+    return { start: boundedEnd, end: boundedStart };
+  }
+  return { start: boundedStart, end: boundedEnd };
+}
+
+function isWithinIterationRange(
+  iterationIndex: number | null,
+  range: NormalizedIterationRange,
+): boolean {
+  if (iterationIndex == null) {
+    return true;
+  }
+  if (range.start != null && iterationIndex < range.start) {
+    return false;
+  }
+  if (range.end != null && iterationIndex > range.end) {
+    return false;
+  }
+  return true;
+}
+
+function filterMetricsByIterationRange(
+  metrics: NumericMetric[],
+  range: NormalizedIterationRange,
+): NumericMetric[] {
+  return metrics.filter((metric) =>
+    isWithinIterationRange(metric.iteration_index, range),
+  );
+}
+
+function filterRecordsByIterationRange(
+  records: ExecutionRecord[],
+  range: NormalizedIterationRange,
+): ExecutionRecord[] {
+  return records.filter((record) =>
+    isWithinIterationRange(record.iteration_index, range),
+  );
+}
+
+function filterSpansByIterationRange(
+  spans: GenericSpan[],
+  range: NormalizedIterationRange,
+): GenericSpan[] {
+  return spans.filter((span) =>
+    isWithinIterationRange(span.iterationIndex, range),
+  );
+}
+
+function filterCustomViewByIterationRange(
+  view: EvaluatedCustomView | null,
+  range: NormalizedIterationRange,
+): EvaluatedCustomView | null {
+  if (view == null) {
+    return null;
+  }
+  const rows = view.rows.filter((row) =>
+    isWithinIterationRange(row.iteration_index, range),
+  );
+  return {
+    ...view,
+    row_count: rows.length,
+    rows,
+  };
+}
+
+function formatIterationRangeLabel(range: NormalizedIterationRange): string {
+  if (range.start == null && range.end == null) {
+    return "all";
+  }
+  if (range.start != null && range.end != null) {
+    return `i${range.start}–i${range.end}`;
+  }
+  if (range.start != null) {
+    return `i${range.start}+`;
+  }
+  return `≤ i${range.end}`;
 }
 
 function buildMetricGroups(

@@ -5,6 +5,8 @@ export const EXPLORER_PARAMS = {
   window: "window",
   run: "run",
   node: "node",
+  stepStart: "is",
+  stepEnd: "ie",
   /** Spans view: selected span row index (0-based). */
   spanInspect: "si",
   /** Spans view: selected semantic record id (e.g. ``run-…:38``). */
@@ -33,6 +35,8 @@ export type ParsedExplorerQuery = {
   runId: string | null;
   /** `null` = all nodes; empty string in URL also means all */
   nodeId: string | null;
+  iterationStart: number | null;
+  iterationEnd: number | null;
   /** Spans inspector: OTel row index, or null if absent / invalid */
   spanInspectIndex: number | null;
   /** Spans inspector: full ``record_id`` from records.jsonl */
@@ -47,6 +51,8 @@ export function parseExplorerQuery(search: string): ParsedExplorerQuery {
   const windowRaw = q.get(EXPLORER_PARAMS.window);
   const runRaw = q.get(EXPLORER_PARAMS.run);
   const nodeRaw = q.get(EXPLORER_PARAMS.node);
+  const stepStartRaw = q.get(EXPLORER_PARAMS.stepStart);
+  const stepEndRaw = q.get(EXPLORER_PARAMS.stepEnd);
   const siRaw = q.get(EXPLORER_PARAMS.spanInspect);
   const ridRaw = q.get(EXPLORER_PARAMS.recordInspect);
 
@@ -55,6 +61,22 @@ export function parseExplorerQuery(search: string): ParsedExplorerQuery {
     const n = Number.parseInt(siRaw, 10);
     if (Number.isFinite(n) && n >= 0) {
       spanInspectIndex = n;
+    }
+  }
+
+  let iterationStart: number | null = null;
+  if (stepStartRaw != null && stepStartRaw !== "") {
+    const n = Number.parseInt(stepStartRaw, 10);
+    if (Number.isFinite(n) && n >= 0) {
+      iterationStart = n;
+    }
+  }
+
+  let iterationEnd: number | null = null;
+  if (stepEndRaw != null && stepEndRaw !== "") {
+    const n = Number.parseInt(stepEndRaw, 10);
+    if (Number.isFinite(n) && n >= 0) {
+      iterationEnd = n;
     }
   }
 
@@ -69,6 +91,8 @@ export function parseExplorerQuery(search: string): ParsedExplorerQuery {
         : nodeRaw.length > 0
           ? nodeRaw
           : null,
+    iterationStart,
+    iterationEnd,
     spanInspectIndex,
     recordInspectId:
       ridRaw != null && ridRaw.length > 0 ? ridRaw : null,
@@ -80,6 +104,8 @@ export function serializeExplorerQuery(input: {
   window: string;
   runId: string | null;
   nodeId: string | null;
+  iterationStart?: number | null;
+  iterationEnd?: number | null;
   /** When set, opens record inspector (takes precedence over span index). */
   recordInspectId?: string | null;
   spanInspectIndex?: number | null;
@@ -94,6 +120,20 @@ export function serializeExplorerQuery(input: {
   }
   if (input.nodeId) {
     q.set(EXPLORER_PARAMS.node, input.nodeId);
+  }
+  if (
+    input.iterationStart != null &&
+    Number.isFinite(input.iterationStart) &&
+    input.iterationStart >= 0
+  ) {
+    q.set(EXPLORER_PARAMS.stepStart, String(input.iterationStart));
+  }
+  if (
+    input.iterationEnd != null &&
+    Number.isFinite(input.iterationEnd) &&
+    input.iterationEnd >= 0
+  ) {
+    q.set(EXPLORER_PARAMS.stepEnd, String(input.iterationEnd));
   }
   if (input.recordInspectId) {
     q.set(EXPLORER_PARAMS.recordInspect, input.recordInspectId);
@@ -115,6 +155,8 @@ export type ExplorerUrlState = {
   window: string;
   runId: string | null;
   nodeId: string | null;
+  iterationStart: number | null;
+  iterationEnd: number | null;
   /** Only serialized when ``activeView === \"spans\"``. */
   spanInspectIndex: number | null;
   recordInspectId: string | null;
@@ -127,6 +169,8 @@ export function buildExplorerUrl(input: ExplorerUrlState): string {
     window: input.window,
     runId: input.runId,
     nodeId: input.nodeId,
+    iterationStart: input.iterationStart,
+    iterationEnd: input.iterationEnd,
     recordInspectId: onSpans ? input.recordInspectId : null,
     spanInspectIndex: onSpans ? input.spanInspectIndex : null,
   });

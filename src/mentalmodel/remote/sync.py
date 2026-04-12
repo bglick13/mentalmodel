@@ -204,7 +204,7 @@ def sync_runs_for_project(
         environment_name=environment_name or config.default_environment,
         catalog_entry_id=catalog_entry_id,
         catalog_source=catalog_source,
-        api_key=config.resolve_api_key(),
+        api_key=config.resolve_optional_api_key(),
     )
 
 
@@ -299,7 +299,7 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
                     runtime_default_profile_name=self.runtime_default_profile_name,
                     runtime_profile_names=self.runtime_profile_names,
                 ).as_dict(),
-                api_key=self._config.resolve_api_key(),
+                api_key=self._config.resolve_optional_api_key(),
             )
             self._start_attempt_count += cast(int, response["attempt_count"])
             self._started = True
@@ -363,7 +363,7 @@ class RemoteServiceLiveExecutionSink(LiveExecutionSink):
                 f"{self.server_url.rstrip('/')}/api/remote/live/sessions/{self.run_id}",
                 method="POST",
                 payload=payload.as_dict(),
-                api_key=self._config.resolve_api_key(),
+                api_key=self._config.resolve_optional_api_key(),
             )
             self._update_attempt_count += cast(int, response["attempt_count"])
             self._delivered_record_count += record_count
@@ -425,7 +425,7 @@ class RemoteServiceCompletedRunSink(CompletedRunSink):
         receipt, attempt_count = upload_run_bundle_to_server(
             server_url=self._config.server_url,
             upload=upload,
-            api_key=self._config.resolve_api_key(),
+            api_key=self._config.resolve_optional_api_key(),
         )
         return CompletedRunPublishResult(
             transport="service-api",

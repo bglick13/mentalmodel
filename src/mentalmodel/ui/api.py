@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from mentalmodel.core.interfaces import JsonValue
+from mentalmodel.pagination import PageSlice
 from mentalmodel.remote.backend import (
     RemoteBackendConfig,
     RemoteEventStore,
@@ -563,18 +564,21 @@ def create_dashboard_app(
     def run_records(
         graph_id: str,
         run_id: str,
-        node_id: str | None = None,
+        node_id: Annotated[str | None, Query()] = None,
+        frame_id: Annotated[str | None, Query()] = None,
+        cursor: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 250,
     ) -> object:
         try:
-            return {
-                "records": list(
-                    service.get_run_records(
-                        graph_id=graph_id,
-                        run_id=run_id,
-                        node_id=node_id,
-                    )
-                )
-            }
+            page = service.get_run_records_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                node_id=node_id,
+                frame_id=frame_id,
+                cursor=cursor,
+                limit=limit,
+            )
+            return _page_to_json(page)
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -582,18 +586,21 @@ def create_dashboard_app(
     def run_spans(
         graph_id: str,
         run_id: str,
-        node_id: str | None = None,
+        node_id: Annotated[str | None, Query()] = None,
+        frame_id: Annotated[str | None, Query()] = None,
+        cursor: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     ) -> object:
         try:
-            return {
-                "spans": list(
-                    service.get_run_spans(
-                        graph_id=graph_id,
-                        run_id=run_id,
-                        node_id=node_id,
-                    )
-                )
-            }
+            page = service.get_run_spans_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                node_id=node_id,
+                frame_id=frame_id,
+                cursor=cursor,
+                limit=limit,
+            )
+            return _page_to_json(page)
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -700,6 +707,15 @@ def _catalog_entries_to_json(
     for entry in entries:
         payload.append(_as_json_object(entry.as_dict()))
     return payload
+
+
+def _page_to_json(page: PageSlice[dict[str, JsonValue]]) -> dict[str, JsonValue]:
+    return {
+        "items": [_as_json_object(item) for item in page.items],
+        "next_cursor": _as_json_value(page.next_cursor),
+        "total_count": _as_json_value(page.total_count),
+        "has_more": _as_json_value(page.has_more),
+    }
 
 
 def _as_json_object(value: object) -> dict[str, JsonValue]:

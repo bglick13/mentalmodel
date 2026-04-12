@@ -15,6 +15,12 @@ import psycopg
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
+from mentalmodel.pagination import (
+    PageSlice,
+    decode_sequence_cursor,
+    encode_sequence_cursor,
+    paginate_descending_sequence,
+)
 from mentalmodel.remote.contracts import (
     CatalogSource,
     ProjectCatalogSnapshot,
@@ -35,14 +41,42 @@ from mentalmodel.remote.events import (
     RemoteOperationKind,
     RemoteOperationStatus,
 )
+from mentalmodel.remote.schema import (
+    REMOTE_EVENT_MIGRATIONS,
+    REMOTE_LIVE_MIGRATIONS,
+    REMOTE_PROJECT_MIGRATIONS,
+    REMOTE_RUNS_MIGRATIONS,
+    apply_schema_migrations,
+)
 from mentalmodel.remote.sinks import CompletedRunPublishResult, CompletedRunSink
 from mentalmodel.remote.store import RunBundleUpload
 from mentalmodel.remote.sync import build_run_bundle_upload_from_run_dir
 from mentalmodel.runtime.runs import (
     RunSummary,
     cast_json_value,
+    load_run_records_page,
+    load_run_spans_page,
     normalize_summary_payload,
 )
+
+
+_REMOTE_LIVE_SPAN_INSERT_SQL = """
+insert into remote_live_spans (
+    graph_id,
+    run_id,
+    span_id,
+    sequence,
+    start_time_ns,
+    node_id,
+    frame_id,
+    loop_node_id,
+    iteration_index,
+    runtime_profile,
+    payload_json
+)
+values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+on conflict (graph_id, run_id, span_id) do nothing
+"""
 
 
 @dataclass(slots=True, frozen=True)
@@ -179,6 +213,28 @@ class LiveSessionIndex(Protocol):
         invocation_name: str | None = None,
     ) -> tuple[RemoteLiveSessionRecord, ...]: ...
 
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]: ...
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]: ...
+
 
 class EventIndex(Protocol):
     def record_event(self, event: RemoteOperationEvent) -> RemoteOperationEvent: ...
@@ -206,6 +262,53 @@ class EventIndex(Protocol):
         run_id: str,
         since_ms: int | None = None,
     ) -> RemoteDeliveryHealthSummary: ...
+
+
+class PersistedRunIndex(Protocol):
+    def has_indexed_run(self, *, graph_id: str, run_id: str) -> bool: ...
+
+    def replace_run_payloads(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        records: Sequence[dict[str, JsonValue]],
+        spans: Sequence[dict[str, JsonValue]],
+    ) -> None: ...
+
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]: ...
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]: ...
+
+    def aggregate_record_timeseries(
+        self,
+        *,
+        graph_id: str,
+        invocation_name: str,
+        since_ms: int,
+        until_ms: int,
+        rollup_ms: int,
+        run_id: str | None = None,
+        node_id: str | None = None,
+    ) -> tuple[tuple[int, int, int, int], ...]: ...
 
 
 class InMemoryArtifactStore:
@@ -384,6 +487,145 @@ class InMemoryProjectIndex:
         return updated
 
 
+class InMemoryPersistedRunIndex:
+    """Deterministic persisted run row index for tests."""
+
+    def __init__(self) -> None:
+        self._records: dict[tuple[str, str], tuple[dict[str, JsonValue], ...]] = {}
+        self._spans: dict[tuple[str, str], tuple[dict[str, JsonValue], ...]] = {}
+        self._invocations: dict[tuple[str, str], str | None] = {}
+
+    def has_indexed_run(self, *, graph_id: str, run_id: str) -> bool:
+        return (graph_id, run_id) in self._records or (graph_id, run_id) in self._spans
+
+    def replace_run_payloads(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        records: Sequence[dict[str, JsonValue]],
+        spans: Sequence[dict[str, JsonValue]],
+    ) -> None:
+        key = (graph_id, run_id)
+        self._records[key] = tuple(records)
+        self._spans[key] = tuple(spans)
+
+    def set_invocation_name(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        invocation_name: str | None,
+    ) -> None:
+        self._invocations[(graph_id, run_id)] = invocation_name
+
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        rows = self._records.get((graph_id, run_id))
+        if rows is None:
+            raise RunInspectionError(f"Remote run {graph_id}/{run_id} was not found.")
+        filtered = tuple(
+            row
+            for row in rows
+            if (node_id is None or row.get("node_id") == node_id)
+            and (frame_id is None or row.get("frame_id") == frame_id)
+        )
+        return paginate_descending_sequence(
+            filtered,
+            sequence_for=_live_row_sequence,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        rows = self._spans.get((graph_id, run_id))
+        if rows is None:
+            raise RunInspectionError(f"Remote run {graph_id}/{run_id} was not found.")
+        filtered = tuple(
+            row
+            for row in rows
+            if (node_id is None or _span_node_id(row) == node_id)
+            and (frame_id is None or _span_frame_id(row) == frame_id)
+        )
+        return paginate_descending_sequence(
+            filtered,
+            sequence_for=_live_row_sequence,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def aggregate_record_timeseries(
+        self,
+        *,
+        graph_id: str,
+        invocation_name: str,
+        since_ms: int,
+        until_ms: int,
+        rollup_ms: int,
+        run_id: str | None = None,
+        node_id: str | None = None,
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        bucket_state: dict[int, tuple[int, int, set[str]]] = {}
+        for (row_graph_id, row_run_id), rows in self._records.items():
+            if row_graph_id != graph_id:
+                continue
+            if run_id is not None and row_run_id != run_id:
+                continue
+            if run_id is None:
+                if self._invocations.get((row_graph_id, row_run_id)) != invocation_name:
+                    continue
+            for row in rows:
+                timestamp = row.get("timestamp_ms")
+                if not isinstance(timestamp, int):
+                    continue
+                if timestamp < since_ms or timestamp >= until_ms:
+                    continue
+                if node_id is not None and row.get("node_id") != node_id:
+                    continue
+                bucket_index = (timestamp - since_ms) // rollup_ms
+                record_count, loop_count, node_set = bucket_state.get(
+                    bucket_index,
+                    (0, 0, set()),
+                )
+                node_value = row.get("node_id")
+                if isinstance(node_value, str):
+                    node_set.add(node_value)
+                iteration_index = row.get("iteration_index")
+                bucket_state[bucket_index] = (
+                    record_count + 1,
+                    loop_count + (1 if isinstance(iteration_index, int) else 0),
+                    node_set,
+                )
+        return tuple(
+            (
+                bucket_index,
+                record_count,
+                loop_count,
+                len(node_set),
+            )
+            for bucket_index, (record_count, loop_count, node_set) in sorted(
+                bucket_state.items()
+            )
+        )
+
+
 class InMemoryLiveSessionIndex:
     """Deterministic live-session registry for tests and local service use."""
 
@@ -552,6 +794,54 @@ class InMemoryLiveSessionIndex:
         rows.sort(key=lambda row: (row.started_at_ms, row.run_id), reverse=True)
         return tuple(rows)
 
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        session = self.get_session(graph_id=graph_id, run_id=run_id)
+        filtered = tuple(
+            cast(dict[str, JsonValue], record)
+            for record in session.records
+            if (node_id is None or record.get("node_id") == node_id)
+            and (frame_id is None or record.get("frame_id") == frame_id)
+        )
+        return paginate_descending_sequence(
+            filtered,
+            sequence_for=_live_row_sequence,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        session = self.get_session(graph_id=graph_id, run_id=run_id)
+        filtered = tuple(
+            cast(dict[str, JsonValue], span)
+            for span in session.spans
+            if (node_id is None or _span_node_id(cast(dict[str, JsonValue], span)) == node_id)
+            and (frame_id is None or _span_frame_id(cast(dict[str, JsonValue], span)) == frame_id)
+        )
+        return paginate_descending_sequence(
+            filtered,
+            sequence_for=_live_row_sequence,
+            cursor=cursor,
+            limit=limit,
+        )
+
 
 class InMemoryEventIndex:
     """Deterministic remote operation event log for tests and local service use."""
@@ -689,6 +979,8 @@ class PostgresManifestIndex:
                     runtime_profile_names,
                     run_schema_version,
                     record_schema_version,
+                    records_indexed_at_ms,
+                    spans_indexed_at_ms,
                     manifest_json,
                     summary_json,
                     artifact_prefix,
@@ -696,7 +988,7 @@ class PostgresManifestIndex:
                 )
                 values (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s::jsonb, %s, %s, %s::jsonb, %s::jsonb, %s, %s
+                    %s::jsonb, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s
                 )
                 on conflict (graph_id, run_id) do update
                 set
@@ -714,6 +1006,8 @@ class PostgresManifestIndex:
                     runtime_profile_names = excluded.runtime_profile_names,
                     run_schema_version = excluded.run_schema_version,
                     record_schema_version = excluded.record_schema_version,
+                    records_indexed_at_ms = excluded.records_indexed_at_ms,
+                    spans_indexed_at_ms = excluded.spans_indexed_at_ms,
                     manifest_json = excluded.manifest_json,
                     summary_json = excluded.summary_json,
                     artifact_prefix = excluded.artifact_prefix,
@@ -736,6 +1030,8 @@ class PostgresManifestIndex:
                     json.dumps(list(manifest.runtime_profile_names)),
                     manifest.run_schema_version,
                     manifest.record_schema_version,
+                    None,
+                    None,
                     json.dumps(manifest.as_dict(), sort_keys=True),
                     json.dumps(summary_payload, sort_keys=True),
                     artifact_prefix,
@@ -803,45 +1099,283 @@ class PostgresManifestIndex:
             if self._schema_ready:
                 return
             with psycopg.connect(self.database_url) as conn:
-                conn.execute(
-                    """
-                    create table if not exists remote_runs (
-                        graph_id text not null,
-                        run_id text not null,
-                        created_at_ms bigint not null,
-                        completed_at_ms bigint,
-                        status text not null,
-                        success boolean,
-                        invocation_name text,
-                        project_id text,
-                        project_label text,
-                        environment_name text,
-                        catalog_entry_id text,
-                        catalog_source text,
-                        runtime_default_profile_name text,
-                        runtime_profile_names jsonb not null,
-                        run_schema_version integer not null,
-                        record_schema_version integer,
-                        manifest_json jsonb not null,
-                        summary_json jsonb not null,
-                        artifact_prefix text not null,
-                        updated_at_ms bigint not null,
-                        primary key (graph_id, run_id)
+                apply_schema_migrations(conn, REMOTE_RUNS_MIGRATIONS)
+                conn.commit()
+            self._schema_ready = True
+
+
+class PostgresPersistedRunIndex:
+    """Postgres-backed persisted run row index for hosted run inspection."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+        self._schema_lock = threading.Lock()
+        self._schema_ready = False
+
+    def has_indexed_run(self, *, graph_id: str, run_id: str) -> bool:
+        self._ensure_schema()
+        with psycopg.connect(self.database_url) as conn:
+            row = conn.execute(
+                """
+                select records_indexed_at_ms, spans_indexed_at_ms
+                from remote_runs
+                where graph_id = %s and run_id = %s
+                """,
+                (graph_id, run_id),
+            ).fetchone()
+        if row is None:
+            raise RunInspectionError(f"Remote run {graph_id}/{run_id} was not found.")
+        return row[0] is not None or row[1] is not None
+
+    def replace_run_payloads(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        records: Sequence[dict[str, JsonValue]],
+        spans: Sequence[dict[str, JsonValue]],
+    ) -> None:
+        self._ensure_schema()
+        now_ms = int(time.time() * 1000)
+        with psycopg.connect(self.database_url) as conn:
+            conn.execute(
+                "delete from remote_run_records where graph_id = %s and run_id = %s",
+                (graph_id, run_id),
+            )
+            conn.execute(
+                "delete from remote_run_spans where graph_id = %s and run_id = %s",
+                (graph_id, run_id),
+            )
+            if records:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        insert into remote_run_records (
+                            graph_id,
+                            run_id,
+                            record_id,
+                            sequence,
+                            timestamp_ms,
+                            node_id,
+                            frame_id,
+                            loop_node_id,
+                            iteration_index,
+                            event_type,
+                            payload_json
+                        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        """,
+                        [
+                            (
+                                graph_id,
+                                run_id,
+                                _persisted_record_id(record),
+                                _required_live_row_int(record, "sequence"),
+                                _required_live_row_int(record, "timestamp_ms"),
+                                _required_live_row_str(record, "node_id"),
+                                _required_live_row_str(record, "frame_id"),
+                                _optional_live_row_str(record, "loop_node_id"),
+                                _optional_live_row_int(record, "iteration_index"),
+                                _required_live_row_str(record, "event_type"),
+                                json.dumps(record, sort_keys=True),
+                            )
+                            for record in records
+                        ],
                     )
-                    """
-                )
-                conn.execute(
-                    "create index if not exists idx_remote_runs_created_at "
-                    "on remote_runs (created_at_ms desc)"
-                )
-                conn.execute(
-                    "create index if not exists idx_remote_runs_project_id "
-                    "on remote_runs (project_id)"
-                )
-                conn.execute(
-                    "create index if not exists idx_remote_runs_invocation_name "
-                    "on remote_runs (invocation_name)"
-                )
+            if spans:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        insert into remote_run_spans (
+                            graph_id,
+                            run_id,
+                            span_id,
+                            sequence,
+                            start_time_ns,
+                            node_id,
+                            frame_id,
+                            loop_node_id,
+                            iteration_index,
+                            runtime_profile,
+                            payload_json
+                        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        """,
+                        [
+                            (
+                                graph_id,
+                                run_id,
+                                _persisted_span_id(span),
+                                _required_live_row_int(span, "sequence"),
+                                _required_live_row_int(span, "start_time_ns"),
+                                _optional_span_node_id(span),
+                                _optional_span_frame_id(span),
+                                _optional_span_loop_node_id(span),
+                                _optional_span_iteration_index(span),
+                                _optional_span_runtime_profile(span),
+                                json.dumps(span, sort_keys=True),
+                            )
+                            for span in spans
+                        ],
+                    )
+            conn.execute(
+                """
+                update remote_runs
+                set records_indexed_at_ms = %s,
+                    spans_indexed_at_ms = %s,
+                    updated_at_ms = %s
+                where graph_id = %s and run_id = %s
+                """,
+                (now_ms, now_ms, now_ms, graph_id, run_id),
+            )
+            conn.commit()
+
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        self._ensure_schema()
+        after_sequence = decode_sequence_cursor(cursor)
+        clauses = ["graph_id = %s", "run_id = %s"]
+        params: list[object] = [graph_id, run_id]
+        if node_id is not None:
+            clauses.append("node_id = %s")
+            params.append(node_id)
+        if frame_id is not None:
+            clauses.append("frame_id = %s")
+            params.append(frame_id)
+        if after_sequence is not None:
+            clauses.append("sequence < %s")
+            params.append(after_sequence)
+        where_sql = " and ".join(clauses)
+        with psycopg.connect(self.database_url) as conn:
+            count_result = conn.execute(
+                f"select count(*) from remote_run_records where {where_sql}",
+                tuple(params),
+            ).fetchone()
+            rows = conn.execute(
+                f"""
+                select payload_json, sequence
+                from remote_run_records
+                where {where_sql}
+                order by sequence desc, timestamp_ms desc, record_id desc
+                limit %s
+                """,
+                tuple([*params, limit + 1]),
+            ).fetchall()
+        total_count = 0 if count_result is None else _int_from_db_scalar(count_result[0])
+        return _page_from_json_rows(rows, limit=limit, total_count=total_count)
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        self._ensure_schema()
+        after_sequence = decode_sequence_cursor(cursor)
+        clauses = ["graph_id = %s", "run_id = %s"]
+        params: list[object] = [graph_id, run_id]
+        if node_id is not None:
+            clauses.append("node_id = %s")
+            params.append(node_id)
+        if frame_id is not None:
+            clauses.append("frame_id = %s")
+            params.append(frame_id)
+        if after_sequence is not None:
+            clauses.append("sequence < %s")
+            params.append(after_sequence)
+        where_sql = " and ".join(clauses)
+        with psycopg.connect(self.database_url) as conn:
+            count_result = conn.execute(
+                f"select count(*) from remote_run_spans where {where_sql}",
+                tuple(params),
+            ).fetchone()
+            rows = conn.execute(
+                f"""
+                select payload_json, sequence
+                from remote_run_spans
+                where {where_sql}
+                order by sequence desc, start_time_ns desc, span_id desc
+                limit %s
+                """,
+                tuple([*params, limit + 1]),
+            ).fetchall()
+        total_count = 0 if count_result is None else _int_from_db_scalar(count_result[0])
+        return _page_from_json_rows(rows, limit=limit, total_count=total_count)
+
+    def aggregate_record_timeseries(
+        self,
+        *,
+        graph_id: str,
+        invocation_name: str,
+        since_ms: int,
+        until_ms: int,
+        rollup_ms: int,
+        run_id: str | None = None,
+        node_id: str | None = None,
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        self._ensure_schema()
+        params: list[object] = [since_ms, rollup_ms]
+        clauses = [
+            "records.graph_id = %s",
+            "records.timestamp_ms >= %s",
+            "records.timestamp_ms < %s",
+        ]
+        params.extend([graph_id, since_ms, until_ms])
+        join_sql = ""
+        if run_id is not None:
+            clauses.append("records.run_id = %s")
+            params.append(run_id)
+        else:
+            join_sql = (
+                " join remote_runs runs"
+                " on runs.graph_id = records.graph_id and runs.run_id = records.run_id"
+            )
+            clauses.append("runs.invocation_name = %s")
+            params.append(invocation_name)
+        if node_id is not None:
+            clauses.append("records.node_id = %s")
+            params.append(node_id)
+        where_sql = " and ".join(clauses)
+        query = f"""
+            select
+                floor((records.timestamp_ms - %s)::numeric / %s)::bigint as bucket_index,
+                count(*)::bigint as record_count,
+                count(*) filter (where records.iteration_index is not null)::bigint as loop_count,
+                count(distinct records.node_id)::bigint as unique_nodes
+            from remote_run_records records
+            {join_sql}
+            where {where_sql}
+            group by bucket_index
+            order by bucket_index asc
+        """
+        with psycopg.connect(self.database_url) as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return tuple(
+            (
+                _int_from_db_scalar(row[0]),
+                _int_from_db_scalar(row[1]),
+                _int_from_db_scalar(row[2]),
+                _int_from_db_scalar(row[3]),
+            )
+            for row in rows
+        )
+
+    def _ensure_schema(self) -> None:
+        with self._schema_lock:
+            if self._schema_ready:
+                return
+            with psycopg.connect(self.database_url) as conn:
+                apply_schema_migrations(conn, REMOTE_RUNS_MIGRATIONS)
                 conn.commit()
             self._schema_ready = True
 
@@ -1194,49 +1728,7 @@ class PostgresProjectIndex:
             if self._schema_ready:
                 return
             with psycopg.connect(self.database_url) as conn:
-                conn.execute(
-                    """
-                    create table if not exists remote_projects (
-                        project_id text primary key,
-                        label text not null,
-                        description text not null,
-                        default_environment text,
-                        catalog_provider text,
-                        default_runs_dir text,
-                        default_verify_spec text,
-                        linked_at_ms bigint not null,
-                        updated_at_ms bigint not null,
-                        catalog_snapshot_json jsonb,
-                        catalog_entry_count integer not null default 0,
-                        catalog_published_at_ms bigint,
-                        catalog_version integer,
-                        last_completed_run_upload_at_ms bigint,
-                        last_completed_run_graph_id text,
-                        last_completed_run_id text,
-                        last_completed_run_invocation_name text
-                    )
-                    """
-                )
-                conn.execute(
-                    "alter table remote_projects add column if not exists "
-                    "last_completed_run_upload_at_ms bigint"
-                )
-                conn.execute(
-                    "alter table remote_projects add column if not exists "
-                    "last_completed_run_graph_id text"
-                )
-                conn.execute(
-                    "alter table remote_projects add column if not exists "
-                    "last_completed_run_id text"
-                )
-                conn.execute(
-                    "alter table remote_projects add column if not exists "
-                    "last_completed_run_invocation_name text"
-                )
-                conn.execute(
-                    "create index if not exists idx_remote_projects_updated_at "
-                    "on remote_projects (updated_at_ms desc)"
-                )
+                apply_schema_migrations(conn, REMOTE_PROJECT_MIGRATIONS)
                 conn.commit()
             self._schema_ready = True
 
@@ -1350,9 +1842,11 @@ class PostgresLiveSessionIndex:
                             timestamp_ms,
                             node_id,
                             frame_id,
+                            loop_node_id,
+                            iteration_index,
                             payload_json
                         )
-                        values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                         on conflict (graph_id, run_id, record_id) do nothing
                         """,
                         (
@@ -1363,25 +1857,15 @@ class PostgresLiveSessionIndex:
                             _required_live_row_int(row, "timestamp_ms"),
                             _required_live_row_str(row, "node_id"),
                             _required_live_row_str(row, "frame_id"),
+                            _optional_live_row_str(row, "loop_node_id"),
+                            _optional_live_row_int(row, "iteration_index"),
                             json.dumps(row, sort_keys=True),
                         ),
                     )
             if payload.spans:
                 for row in payload.spans:
                     conn.execute(
-                        """
-                        insert into remote_live_spans (
-                            graph_id,
-                            run_id,
-                            span_id,
-                            sequence,
-                            start_time_ns,
-                            node_id,
-                            payload_json
-                        )
-                        values (%s, %s, %s, %s, %s, %s, %s::jsonb)
-                        on conflict (graph_id, run_id, span_id) do nothing
-                        """,
+                        _REMOTE_LIVE_SPAN_INSERT_SQL,
                         (
                             payload.graph_id,
                             payload.run_id,
@@ -1389,6 +1873,10 @@ class PostgresLiveSessionIndex:
                             _optional_live_row_int(row, "sequence") or 0,
                             _required_live_row_int(row, "start_time_ns"),
                             _optional_span_node_id(row),
+                            _optional_span_frame_id(row),
+                            _optional_span_loop_node_id(row),
+                            _optional_span_iteration_index(row),
+                            _optional_span_runtime_profile(row),
                             json.dumps(row, sort_keys=True),
                         ),
                     )
@@ -1482,24 +1970,18 @@ class PostgresLiveSessionIndex:
                 raise RunInspectionError(
                     f"Remote live session {graph_id}/{run_id} was not found."
                 )
-            records = conn.execute(
-                """
-                select payload_json
-                from remote_live_records
-                where graph_id = %s and run_id = %s
-                order by sequence asc, timestamp_ms asc, record_id asc
-                """,
-                (graph_id, run_id),
-            ).fetchall()
-            spans = conn.execute(
-                """
-                select payload_json
-                from remote_live_spans
-                where graph_id = %s and run_id = %s
-                order by sequence asc, start_time_ns asc, span_id asc
-                """,
-                (graph_id, run_id),
-            ).fetchall()
+            records = self._fetch_live_rows(
+                conn,
+                table_name="remote_live_records",
+                graph_id=graph_id,
+                run_id=run_id,
+            )
+            spans = self._fetch_live_rows(
+                conn,
+                table_name="remote_live_spans",
+                graph_id=graph_id,
+                run_id=run_id,
+            )
         return _remote_live_session_from_row(
             row,
             records=records,
@@ -1555,24 +2037,18 @@ class PostgresLiveSessionIndex:
             for row in rows:
                 session_graph_id = cast(str, row[0])
                 session_run_id = cast(str, row[1])
-                records = conn.execute(
-                    """
-                    select payload_json
-                    from remote_live_records
-                    where graph_id = %s and run_id = %s
-                    order by sequence asc, timestamp_ms asc, record_id asc
-                    """,
-                    (session_graph_id, session_run_id),
-                ).fetchall()
-                spans = conn.execute(
-                    """
-                    select payload_json
-                    from remote_live_spans
-                    where graph_id = %s and run_id = %s
-                    order by sequence asc, start_time_ns asc, span_id asc
-                    """,
-                    (session_graph_id, session_run_id),
-                ).fetchall()
+                records = self._fetch_live_rows(
+                    conn,
+                    table_name="remote_live_records",
+                    graph_id=session_graph_id,
+                    run_id=session_run_id,
+                )
+                spans = self._fetch_live_rows(
+                    conn,
+                    table_name="remote_live_spans",
+                    graph_id=session_graph_id,
+                    run_id=session_run_id,
+                )
                 results.append(
                     _remote_live_session_from_row(
                         row,
@@ -1582,6 +2058,128 @@ class PostgresLiveSessionIndex:
                 )
         return tuple(results)
 
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        self._ensure_schema()
+        before_sequence = decode_sequence_cursor(cursor)
+        conditions = ["graph_id = %s", "run_id = %s"]
+        params: list[object] = [graph_id, run_id]
+        if node_id is not None:
+            conditions.append("node_id = %s")
+            params.append(node_id)
+        if frame_id is not None:
+            conditions.append("frame_id = %s")
+            params.append(frame_id)
+        if before_sequence is not None:
+            conditions.append("sequence < %s")
+            params.append(before_sequence)
+        where_clause = " and ".join(conditions)
+        count_params = params[: 2 + int(node_id is not None) + int(frame_id is not None)]
+        count_where_clause = " and ".join(conditions[: len(count_params)])
+        with psycopg.connect(self.database_url) as conn:
+            count_row = conn.execute(
+                f"select count(*) from remote_live_records where {count_where_clause}",
+                tuple(count_params),
+            )
+            count_result = count_row.fetchone()
+            if count_result is None:
+                raise RunInspectionError(
+                    f"Remote live session {graph_id}/{run_id} was not found."
+                )
+            total_count = cast(int, count_result[0])
+            rows = conn.execute(
+                f"""
+                select payload_json, sequence
+                from remote_live_records
+                where {where_clause}
+                order by sequence desc, timestamp_ms desc, record_id desc
+                limit %s
+                """,
+                (*params, limit + 1),
+            ).fetchall()
+        items = tuple(
+            cast(
+                dict[str, JsonValue],
+                _json_object_from_db_payload(
+                    row[0], "remote_live_records.payload_json"
+                ),
+            )
+            for row in rows[:limit]
+        )
+        next_cursor = (
+            encode_sequence_cursor(cast(int, rows[limit - 1][1])) if len(rows) > limit else None
+        )
+        return PageSlice(items=items, next_cursor=next_cursor, total_count=total_count)
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        self._ensure_schema()
+        before_sequence = decode_sequence_cursor(cursor)
+        conditions = ["graph_id = %s", "run_id = %s"]
+        params: list[object] = [graph_id, run_id]
+        if node_id is not None:
+            conditions.append("node_id = %s")
+            params.append(node_id)
+        if frame_id is not None:
+            conditions.append("frame_id = %s")
+            params.append(frame_id)
+        if before_sequence is not None:
+            conditions.append("sequence < %s")
+            params.append(before_sequence)
+        where_clause = " and ".join(conditions)
+        count_params = params[: 2 + int(node_id is not None) + int(frame_id is not None)]
+        count_where_clause = " and ".join(conditions[: len(count_params)])
+        with psycopg.connect(self.database_url) as conn:
+            count_row = conn.execute(
+                f"select count(*) from remote_live_spans where {count_where_clause}",
+                tuple(count_params),
+            )
+            count_result = count_row.fetchone()
+            if count_result is None:
+                raise RunInspectionError(
+                    f"Remote live session {graph_id}/{run_id} was not found."
+                )
+            total_count = cast(int, count_result[0])
+            rows = conn.execute(
+                f"""
+                select payload_json, sequence
+                from remote_live_spans
+                where {where_clause}
+                order by sequence desc, start_time_ns desc, span_id desc
+                limit %s
+                """,
+                (*params, limit + 1),
+            ).fetchall()
+        items = tuple(
+            cast(
+                dict[str, JsonValue],
+                _json_object_from_db_payload(
+                    row[0], "remote_live_spans.payload_json"
+                ),
+            )
+            for row in rows[:limit]
+        )
+        next_cursor = (
+            encode_sequence_cursor(cast(int, rows[limit - 1][1])) if len(rows) > limit else None
+        )
+        return PageSlice(items=items, next_cursor=next_cursor, total_count=total_count)
+
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
@@ -1589,73 +2187,28 @@ class PostgresLiveSessionIndex:
             if self._schema_ready:
                 return
             with psycopg.connect(self.database_url) as conn:
-                conn.execute(
-                    """
-                    create table if not exists remote_live_sessions (
-                        graph_id text not null,
-                        run_id text not null,
-                        project_id text null,
-                        invocation_name text null,
-                        environment_name text null,
-                        catalog_entry_id text null,
-                        catalog_source text null,
-                        runtime_default_profile_name text null,
-                        runtime_profile_names jsonb not null default '[]'::jsonb,
-                        started_at_ms bigint not null,
-                        updated_at_ms bigint not null,
-                        finished_at_ms bigint null,
-                        status text not null,
-                        error text null,
-                        graph_json jsonb not null,
-                        analysis_json jsonb not null,
-                        bundle_committed_at_ms bigint null,
-                        primary key (graph_id, run_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists remote_live_records (
-                        graph_id text not null,
-                        run_id text not null,
-                        record_id text not null,
-                        sequence bigint not null,
-                        timestamp_ms bigint not null,
-                        node_id text not null,
-                        frame_id text not null,
-                        payload_json jsonb not null,
-                        primary key (graph_id, run_id, record_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists remote_live_spans (
-                        graph_id text not null,
-                        run_id text not null,
-                        span_id text not null,
-                        sequence bigint not null,
-                        start_time_ns bigint not null,
-                        node_id text null,
-                        payload_json jsonb not null,
-                        primary key (graph_id, run_id, span_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    "create index if not exists idx_remote_live_sessions_lookup "
-                    "on remote_live_sessions (graph_id, invocation_name, started_at_ms desc)"
-                )
-                conn.execute(
-                    "create index if not exists idx_remote_live_records_sequence "
-                    "on remote_live_records (graph_id, run_id, sequence asc)"
-                )
-                conn.execute(
-                    "create index if not exists idx_remote_live_spans_sequence "
-                    "on remote_live_spans (graph_id, run_id, sequence asc)"
-                )
+                apply_schema_migrations(conn, REMOTE_LIVE_MIGRATIONS)
                 conn.commit()
                 self._schema_ready = True
+
+    def _fetch_live_rows(
+        self,
+        conn: psycopg.Connection[object],
+        *,
+        table_name: str,
+        graph_id: str,
+        run_id: str,
+    ) -> list[tuple[object, ...]]:
+        rows = conn.execute(
+            f"""
+            select payload_json
+            from {table_name}
+            where graph_id = %s and run_id = %s
+            order by sequence asc
+            """,
+            (graph_id, run_id),
+        ).fetchall()
+        return cast(list[tuple[object, ...]], rows)
 
 
 class PostgresEventIndex:
@@ -1793,35 +2346,7 @@ class PostgresEventIndex:
             if self._schema_ready:
                 return
             with psycopg.connect(self.database_url) as conn:
-                conn.execute(
-                    """
-                    create table if not exists remote_operation_events (
-                        event_id text primary key,
-                        occurred_at_ms bigint not null,
-                        kind text not null,
-                        status text not null,
-                        project_id text,
-                        graph_id text,
-                        run_id text,
-                        invocation_name text,
-                        error_category text,
-                        error_message text,
-                        metadata_json jsonb not null default '{}'::jsonb
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create index if not exists remote_operation_events_project_idx
-                    on remote_operation_events (project_id, occurred_at_ms desc)
-                    """
-                )
-                conn.execute(
-                    """
-                    create index if not exists remote_operation_events_run_idx
-                    on remote_operation_events (graph_id, run_id, occurred_at_ms desc)
-                    """
-                )
+                apply_schema_migrations(conn, REMOTE_EVENT_MIGRATIONS)
                 conn.commit()
                 self._schema_ready = True
 
@@ -1834,10 +2359,12 @@ class RemoteRunStore:
         *,
         manifest_index: ManifestIndex,
         artifact_store: ArtifactStore,
+        persisted_run_index: PersistedRunIndex | None = None,
         cache_dir: Path | None = None,
     ) -> None:
         self._manifest_index = manifest_index
         self._artifact_store = artifact_store
+        self._persisted_run_index = persisted_run_index
         self.cache_dir = (
             cache_dir.expanduser().resolve()
             if cache_dir is not None
@@ -1849,12 +2376,20 @@ class RemoteRunStore:
         return cls(
             manifest_index=PostgresManifestIndex(config.database_url),
             artifact_store=S3ArtifactStore(config),
+            persisted_run_index=PostgresPersistedRunIndex(config.database_url),
             cache_dir=config.cache_dir,
         )
 
     @property
     def runs_root(self) -> Path:
         return self.cache_dir / ".runs"
+
+    def contains_run(self, *, graph_id: str, run_id: str) -> bool:
+        try:
+            self._manifest_index.get_run(graph_id=graph_id, run_id=run_id)
+        except RunInspectionError:
+            return False
+        return True
 
     def ingest(self, upload: RunBundleUpload) -> Path:
         artifact_map = _validated_artifact_payloads(upload)
@@ -1882,12 +2417,134 @@ class RemoteRunStore:
             summary_payload=summary_payload,
             artifact_prefix=artifact_prefix,
         )
+        if self._persisted_run_index is not None:
+            self._persisted_run_index.replace_run_payloads(
+                graph_id=stored_manifest.graph_id,
+                run_id=stored_manifest.run_id,
+                records=_decoded_jsonl_payloads(cached_bodies.get("records.jsonl", b"")),
+                spans=_decoded_jsonl_payloads(cached_bodies.get("otel-spans.jsonl", b"")),
+            )
+            if isinstance(self._persisted_run_index, InMemoryPersistedRunIndex):
+                self._persisted_run_index.set_invocation_name(
+                    graph_id=stored_manifest.graph_id,
+                    run_id=stored_manifest.run_id,
+                    invocation_name=stored_manifest.invocation_name,
+                )
         run_dir = self._write_materialized_bundle(
             manifest=stored_manifest,
             artifact_prefix=artifact_prefix,
             artifact_bodies=cached_bodies,
         )
         return run_dir
+
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        if self._persisted_run_index is not None:
+            self._ensure_persisted_payload_index(graph_id=graph_id, run_id=run_id)
+            return self._persisted_run_index.get_records_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=cursor,
+                limit=limit,
+                node_id=node_id,
+                frame_id=frame_id,
+            )
+        self.materialize_run(graph_id=graph_id, run_id=run_id)
+        return load_run_records_page(
+            runs_dir=self.runs_root,
+            graph_id=graph_id,
+            run_id=run_id,
+            node_id=node_id,
+            frame_id=frame_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        if self._persisted_run_index is not None:
+            self._ensure_persisted_payload_index(graph_id=graph_id, run_id=run_id)
+            return self._persisted_run_index.get_spans_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=cursor,
+                limit=limit,
+                node_id=node_id,
+                frame_id=frame_id,
+            )
+        self.materialize_run(graph_id=graph_id, run_id=run_id)
+        return load_run_spans_page(
+            runs_dir=self.runs_root,
+            graph_id=graph_id,
+            run_id=run_id,
+            node_id=node_id,
+            frame_id=frame_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def aggregate_record_timeseries(
+        self,
+        *,
+        graph_id: str,
+        invocation_name: str,
+        since_ms: int,
+        until_ms: int,
+        rollup_ms: int,
+        run_id: str | None = None,
+        node_id: str | None = None,
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        if self._persisted_run_index is None:
+            raise RunInspectionError("Persisted run index is not configured.")
+        if run_id is not None:
+            self._ensure_persisted_payload_index(graph_id=graph_id, run_id=run_id)
+        else:
+            for summary in self.list_run_summaries(
+                graph_id=graph_id,
+                invocation_name=invocation_name,
+            ):
+                self._ensure_persisted_payload_index(
+                    graph_id=summary.graph_id,
+                    run_id=summary.run_id,
+                )
+        return self._persisted_run_index.aggregate_record_timeseries(
+            graph_id=graph_id,
+            invocation_name=invocation_name,
+            since_ms=since_ms,
+            until_ms=until_ms,
+            rollup_ms=rollup_ms,
+            run_id=run_id,
+            node_id=node_id,
+        )
+
+    def _ensure_persisted_payload_index(self, *, graph_id: str, run_id: str) -> None:
+        if self._persisted_run_index is None:
+            return
+        if self._persisted_run_index.has_indexed_run(graph_id=graph_id, run_id=run_id):
+            return
+        run_dir = self.materialize_run(graph_id=graph_id, run_id=run_id)
+        self._persisted_run_index.replace_run_payloads(
+            graph_id=graph_id,
+            run_id=run_id,
+            records=_decoded_jsonl_payloads(_read_optional_bytes(run_dir / "records.jsonl")),
+            spans=_decoded_jsonl_payloads(_read_optional_bytes(run_dir / "otel-spans.jsonl")),
+        )
 
     def list_run_summaries(
         self,
@@ -2044,6 +2701,44 @@ class RemoteLiveSessionStore:
         return self._live_session_index.list_sessions(
             graph_id=graph_id,
             invocation_name=invocation_name,
+        )
+
+    def get_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        return self._live_session_index.get_records_page(
+            graph_id=graph_id,
+            run_id=run_id,
+            cursor=cursor,
+            limit=limit,
+            node_id=node_id,
+            frame_id=frame_id,
+        )
+
+    def get_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        return self._live_session_index.get_spans_page(
+            graph_id=graph_id,
+            run_id=run_id,
+            cursor=cursor,
+            limit=limit,
+            node_id=node_id,
+            frame_id=frame_id,
         )
 
 
@@ -2347,8 +3042,8 @@ def _remote_live_session_from_row(
         finished_at_ms=cast(int | None, row[11]),
         status=RemoteLiveSessionStatus(cast(str, row[12])),
         error=cast(str | None, row[13]),
-        graph=cast(dict[str, object], graph_json),
-        analysis=cast(dict[str, object], analysis_json),
+        graph=graph_json,
+        analysis=analysis_json,
         bundle_committed_at_ms=cast(int | None, row[16]),
         records=normalized_records,
         spans=normalized_spans,
@@ -2389,21 +3084,21 @@ def _merge_live_rows(
     return tuple(ordered)
 
 
-def _required_live_row_str(row: dict[str, object], key: str) -> str:
+def _required_live_row_str(row: Mapping[str, object], key: str) -> str:
     value = row.get(key)
     if isinstance(value, str) and value:
         return value
     raise RemoteContractError(f"Live row {key!r} must be a non-empty string.")
 
 
-def _required_live_row_int(row: dict[str, object], key: str) -> int:
+def _required_live_row_int(row: Mapping[str, object], key: str) -> int:
     value = row.get(key)
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     raise RemoteContractError(f"Live row {key!r} must be an integer.")
 
 
-def _optional_live_row_int(row: dict[str, object], key: str) -> int | None:
+def _optional_live_row_int(row: Mapping[str, object], key: str) -> int | None:
     value = row.get(key)
     if value is None:
         return None
@@ -2412,12 +3107,162 @@ def _optional_live_row_int(row: dict[str, object], key: str) -> int | None:
     raise RemoteContractError(f"Live row {key!r} must be an integer when present.")
 
 
-def _optional_span_node_id(row: dict[str, object]) -> str | None:
+def _optional_live_row_str(row: Mapping[str, object], key: str) -> str | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if isinstance(value, str) and value:
+        return value
+    raise RemoteContractError(f"Live row {key!r} must be a string when present.")
+
+
+def _optional_span_node_id(row: Mapping[str, object]) -> str | None:
     attributes = row.get("attributes")
     if not isinstance(attributes, dict):
         return None
     value = attributes.get("mentalmodel.node.id")
     return value if isinstance(value, str) else None
+
+
+def _optional_span_frame_id(row: Mapping[str, object]) -> str | None:
+    value = row.get("frame_id")
+    if isinstance(value, str) and value:
+        return value
+    attributes = row.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    attr = attributes.get("mentalmodel.frame.id")
+    return attr if isinstance(attr, str) and attr else None
+
+
+def _optional_span_loop_node_id(row: Mapping[str, object]) -> str | None:
+    value = row.get("loop_node_id")
+    if isinstance(value, str) and value:
+        return value
+    attributes = row.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    attr = attributes.get("mentalmodel.loop.node_id")
+    return attr if isinstance(attr, str) and attr else None
+
+
+def _optional_span_iteration_index(row: Mapping[str, object]) -> int | None:
+    value = row.get("iteration_index")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    attributes = row.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    attr = attributes.get("mentalmodel.loop.iteration_index")
+    if isinstance(attr, int) and not isinstance(attr, bool):
+        return attr
+    if isinstance(attr, str) and attr:
+        try:
+            return int(attr)
+        except ValueError as exc:
+            raise RemoteContractError(
+                "Live span mentalmodel.loop.iteration_index must be an integer when present."
+            ) from exc
+    return None
+
+
+def _optional_span_runtime_profile(row: Mapping[str, object]) -> str | None:
+    attributes = row.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    for key in ("mentalmodel.runtime.profile", "mentalmodel.runtime.context"):
+        value = attributes.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _span_node_id(span: dict[str, JsonValue]) -> str | None:
+    attributes = span.get("attributes")
+    if isinstance(attributes, dict):
+        value = attributes.get("mentalmodel.node.id")
+        if isinstance(value, str):
+            return value
+    value = span.get("node_id")
+    return value if isinstance(value, str) else None
+
+
+def _span_frame_id(span: dict[str, JsonValue]) -> str | None:
+    value = span.get("frame_id")
+    return value if isinstance(value, str) else None
+
+
+def _live_row_sequence(row: dict[str, JsonValue]) -> int:
+    value = row.get("sequence")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _persisted_record_id(row: dict[str, JsonValue]) -> str:
+    value = row.get("record_id")
+    if isinstance(value, str) and value:
+        return value
+    sequence = row.get("sequence")
+    node_id = row.get("node_id")
+    if isinstance(sequence, int) and isinstance(node_id, str) and node_id:
+        return f"{node_id}:{sequence}"
+    raise RemoteContractError("Persisted record rows must include record_id or sequence+node_id.")
+
+
+def _persisted_span_id(row: dict[str, JsonValue]) -> str:
+    value = row.get("span_id")
+    if isinstance(value, str) and value:
+        return value
+    sequence = row.get("sequence")
+    name = row.get("name")
+    if isinstance(sequence, int) and isinstance(name, str) and name:
+        return f"{name}:{sequence}"
+    raise RemoteContractError("Persisted span rows must include span_id or sequence+name.")
+
+
+def _decoded_jsonl_payloads(content: bytes) -> tuple[dict[str, JsonValue], ...]:
+    if not content:
+        return ()
+    rows: list[dict[str, JsonValue]] = []
+    for raw_line in content.decode("utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        decoded = json.loads(line)
+        if not isinstance(decoded, dict):
+            raise RemoteContractError("Persisted JSONL rows must decode to objects.")
+        rows.append(
+            {
+                str(key): cast_json_value(value)
+                for key, value in decoded.items()
+            }
+        )
+    return tuple(rows)
+
+
+def _read_optional_bytes(path: Path) -> bytes:
+    return path.read_bytes() if path.is_file() else b""
+
+
+def _page_from_json_rows(
+    rows: Sequence[tuple[object, ...]],
+    *,
+    limit: int,
+    total_count: int,
+) -> PageSlice[dict[str, JsonValue]]:
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    items = tuple(
+        cast(dict[str, JsonValue], _json_object_from_db_payload(row[0], "payload_json"))
+        for row in page_rows
+    )
+    next_cursor = None
+    if has_more and page_rows:
+        next_cursor = encode_sequence_cursor(_int_from_db_scalar(page_rows[-1][1]))
+    return PageSlice(
+        items=items,
+        next_cursor=next_cursor,
+        total_count=total_count,
+    )
 
 
 def _json_value_from_db_payload(raw: object, field_name: str) -> JsonValue:
@@ -2431,6 +3276,16 @@ def _json_value_from_db_payload(raw: object, field_name: str) -> JsonValue:
         raise RemoteContractError(
             f"Stored {field_name} must decode to valid JSON-compatible data."
         ) from exc
+
+
+def _int_from_db_scalar(value: object) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value:
+        return int(value)
+    raise RemoteContractError("Stored database scalar must be coercible to int.")
 
 
 def _json_object_from_db_payload(raw: object, field_name: str) -> dict[str, object]:

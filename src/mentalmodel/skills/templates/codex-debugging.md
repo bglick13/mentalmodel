@@ -13,6 +13,9 @@ generated artifact.
 1. `mentalmodel check`
 2. `mentalmodel docs`
 3. `mentalmodel doctor`
+   If `doctor` warns about coarse topology, treat that as an observability
+   problem first: spans and records are usually too coarse because orchestration
+   is hidden inside one effect.
 4. `mentalmodel verify`
    Use `--params-json` or `--params-file` when the workflow entrypoint is parameterized.
    Use `--environment-entrypoint` when the runtime environment is built separately.
@@ -41,6 +44,8 @@ When loops are involved, add:
 - runtime failures: `verification.json`, `summary.json`, `records.jsonl`, and
   `outputs.json`
 - OTel detail: `otel-spans.jsonl` when no external sink is configured
+- if a large workflow only shows one or two spans in the UI, inspect the node
+  topology before assuming tracing/export is broken
 - `runs inputs` shows the exact bound input payload persisted by
   `node.inputs_resolved`
 - `replay` shows the full semantic event timeline for one run

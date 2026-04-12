@@ -20,6 +20,7 @@ from mentalmodel.observability.export import (
     write_jsonl,
 )
 from mentalmodel.observability.tracing import RecordedSpan
+from mentalmodel.pagination import PageSlice, paginate_descending_sequence
 from mentalmodel.remote import (
     ArtifactDescriptor,
     ArtifactName,
@@ -644,6 +645,33 @@ def load_run_records(
     return tuple(loaded)
 
 
+def load_run_records_page(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    invocation_name: str | None = None,
+    node_id: str | None = None,
+    frame_id: str | None = None,
+    cursor: str | None = None,
+    limit: int = 100,
+) -> PageSlice[dict[str, JsonValue]]:
+    records = load_run_records(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+        node_id=node_id,
+        frame_id=frame_id,
+    )
+    return paginate_descending_sequence(
+        records,
+        sequence_for=lambda record: _require_int(record, "sequence"),
+        cursor=cursor,
+        limit=limit,
+    )
+
+
 def load_run_spans(
     *,
     runs_dir: Path | None = None,
@@ -687,6 +715,33 @@ def load_run_spans(
             continue
         loaded.append(span)
     return tuple(loaded)
+
+
+def load_run_spans_page(
+    *,
+    runs_dir: Path | None = None,
+    graph_id: str | None = None,
+    run_id: str | None = None,
+    invocation_name: str | None = None,
+    node_id: str | None = None,
+    frame_id: str | None = None,
+    cursor: str | None = None,
+    limit: int = 100,
+) -> PageSlice[dict[str, JsonValue]]:
+    spans = load_run_spans(
+        runs_dir=runs_dir,
+        graph_id=graph_id,
+        run_id=run_id,
+        invocation_name=invocation_name,
+        node_id=node_id,
+        frame_id=frame_id,
+    )
+    return paginate_descending_sequence(
+        spans,
+        sequence_for=lambda span: _require_int(span, "sequence"),
+        cursor=cursor,
+        limit=limit,
+    )
 
 
 def load_run_node_output(

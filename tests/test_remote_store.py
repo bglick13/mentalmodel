@@ -9,6 +9,7 @@ from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
     InMemoryLiveSessionIndex,
     InMemoryManifestIndex,
+    InMemoryPersistedRunIndex,
     InMemoryProjectIndex,
     RemoteCompletedRunSink,
     RemoteLiveSessionStore,
@@ -76,9 +77,11 @@ class RemoteStoreTest(unittest.TestCase):
                 project_id="mentalmodel-examples",
                 project_label="Mentalmodel Examples",
             )
+            persisted_index = InMemoryPersistedRunIndex()
             store = RemoteRunStore(
                 manifest_index=InMemoryManifestIndex(),
                 artifact_store=InMemoryArtifactStore(),
+                persisted_run_index=persisted_index,
                 cache_dir=cache_root,
             )
             run_dir = store.ingest(upload)
@@ -94,6 +97,27 @@ class RemoteStoreTest(unittest.TestCase):
             self.assertTrue(
                 (cache_root / ".runs" / "async_rl_demo" / report.runtime.run_id).exists()
             )
+            records_page = store.get_records_page(
+                graph_id="async_rl_demo",
+                run_id=report.runtime.run_id,
+                cursor=None,
+                limit=5,
+            )
+            self.assertGreater(records_page.total_count, 0)
+            self.assertLessEqual(len(records_page.items), 5)
+            self.assertEqual(
+                records_page.total_count,
+                len(persisted_index._records[("async_rl_demo", report.runtime.run_id)]),
+            )
+            bucket_rows = store.aggregate_record_timeseries(
+                graph_id="async_rl_demo",
+                invocation_name=report.runtime.invocation_name or "async_rl_demo",
+                since_ms=resolved.created_at_ms - 1,
+                until_ms=resolved.created_at_ms + 60_000,
+                rollup_ms=5_000,
+                run_id=report.runtime.run_id,
+            )
+            self.assertTrue(bucket_rows)
 
     def test_remote_completed_run_sink_indexes_existing_local_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as local_tmp, tempfile.TemporaryDirectory() as cache_tmp:

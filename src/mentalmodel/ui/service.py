@@ -23,6 +23,7 @@ from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.export import execution_record_to_json
+from mentalmodel.pagination import PageSlice, paginate_descending_sequence
 from mentalmodel.remote.backend import (
     RemoteCompletedRunSink,
     RemoteEventStore,
@@ -47,7 +48,9 @@ from mentalmodel.runtime.runs import (
     load_run_node_trace,
     load_run_payload,
     load_run_records,
+    load_run_records_page,
     load_run_spans,
+    load_run_spans_page,
     load_run_summary,
     resolve_run_summary,
 )
@@ -768,6 +771,66 @@ class DashboardService:
             node_id=node_id,
         )
 
+    def get_run_records_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            filtered = tuple(
+                record
+                for record in session.records
+                if (node_id is None or record.get("node_id") == node_id)
+                and (frame_id is None or record.get("frame_id") == frame_id)
+            )
+            return paginate_descending_sequence(
+                filtered,
+                sequence_for=_record_sequence,
+                cursor=cursor,
+                limit=limit,
+            )
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if remote_live is not None and self.remote_live_session_store is not None:
+            return self.remote_live_session_store.get_records_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=cursor,
+                limit=limit,
+                node_id=node_id,
+                frame_id=frame_id,
+            )
+        if (
+            self.remote_run_store is not None
+            and self.remote_run_store.contains_run(graph_id=graph_id, run_id=run_id)
+        ):
+            return self.remote_run_store.get_records_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=cursor,
+                limit=limit,
+                node_id=node_id,
+                frame_id=frame_id,
+            )
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
+        return load_run_records_page(
+            runs_dir=history_runs_dir,
+            graph_id=graph_id,
+            run_id=run_id,
+            node_id=node_id,
+            frame_id=frame_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
     def get_run_spans(
         self,
         *,
@@ -803,6 +866,66 @@ class DashboardService:
             graph_id=graph_id,
             run_id=run_id,
             node_id=node_id,
+        )
+
+    def get_run_spans_page(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        cursor: str | None,
+        limit: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> PageSlice[dict[str, JsonValue]]:
+        session = self._session_for_run(graph_id=graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        ):
+            filtered = tuple(
+                span
+                for span in session.spans
+                if (node_id is None or _span_node_id(span) == node_id)
+                and (frame_id is None or _span_frame_id(span) == frame_id)
+            )
+            return paginate_descending_sequence(
+                filtered,
+                sequence_for=_span_sequence,
+                cursor=cursor,
+                limit=limit,
+            )
+        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        if remote_live is not None and self.remote_live_session_store is not None:
+            return self.remote_live_session_store.get_spans_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=cursor,
+                limit=limit,
+                node_id=node_id,
+                frame_id=frame_id,
+            )
+        if (
+            self.remote_run_store is not None
+            and self.remote_run_store.contains_run(graph_id=graph_id, run_id=run_id)
+        ):
+            return self.remote_run_store.get_spans_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=cursor,
+                limit=limit,
+                node_id=node_id,
+                frame_id=frame_id,
+            )
+        history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
+        return load_run_spans_page(
+            runs_dir=history_runs_dir,
+            graph_id=graph_id,
+            run_id=run_id,
+            node_id=node_id,
+            frame_id=frame_id,
+            cursor=cursor,
+            limit=limit,
         )
 
     def get_run_replay(
@@ -1713,46 +1836,68 @@ class DashboardService:
 
         record_counts = [0] * num_buckets
         loop_counts = [0] * num_buckets
-        node_sets: list[set[str]] = [set() for _ in range(num_buckets)]
+        unique_node_counts = [0] * num_buckets
 
-        for summary in summaries:
-            if self.remote_run_store is not None:
-                self.remote_run_store.materialize_run(
-                    graph_id=summary.graph_id,
-                    run_id=summary.run_id,
-                )
-            records_path = summary.run_dir / "records.jsonl"
-            if not records_path.is_file():
-                continue
-            with records_path.open(encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(row, dict):
-                        continue
-                    ts = row.get("timestamp_ms")
-                    if not isinstance(ts, int):
-                        continue
-                    if ts < since_ms or ts >= until_ms:
-                        continue
-                    nid = row.get("node_id")
-                    if node_id is not None:
-                        if nid != node_id:
+        if self.remote_run_store is not None and any(
+            self.remote_run_store.contains_run(graph_id=summary.graph_id, run_id=summary.run_id)
+            for summary in summaries
+        ):
+            bucket_rows = self.remote_run_store.aggregate_record_timeseries(
+                graph_id=graph_id,
+                invocation_name=invocation_name,
+                since_ms=since_ms,
+                until_ms=until_ms,
+                rollup_ms=rollup_ms,
+                run_id=run_id,
+                node_id=node_id,
+            )
+            for bucket_index, record_count, loop_count, unique_nodes in bucket_rows:
+                if bucket_index < 0 or bucket_index >= num_buckets:
+                    continue
+                record_counts[bucket_index] = record_count
+                loop_counts[bucket_index] = loop_count
+                unique_node_counts[bucket_index] = unique_nodes
+        else:
+            node_sets: list[set[str]] = [set() for _ in range(num_buckets)]
+            for summary in summaries:
+                if self.remote_run_store is not None:
+                    self.remote_run_store.materialize_run(
+                        graph_id=summary.graph_id,
+                        run_id=summary.run_id,
+                    )
+                records_path = summary.run_dir / "records.jsonl"
+                if not records_path.is_file():
+                    continue
+                with records_path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
                             continue
-                    bi = (ts - since_ms) // rollup_ms
-                    if bi < 0 or bi >= num_buckets:
-                        continue
-                    record_counts[bi] += 1
-                    if isinstance(nid, str):
-                        node_sets[bi].add(nid)
-                    it = row.get("iteration_index")
-                    if isinstance(it, int):
-                        loop_counts[bi] += 1
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(row, dict):
+                            continue
+                        ts = row.get("timestamp_ms")
+                        if not isinstance(ts, int):
+                            continue
+                        if ts < since_ms or ts >= until_ms:
+                            continue
+                        nid = row.get("node_id")
+                        if node_id is not None:
+                            if nid != node_id:
+                                continue
+                        bi = (ts - since_ms) // rollup_ms
+                        if bi < 0 or bi >= num_buckets:
+                            continue
+                        record_counts[bi] += 1
+                        if isinstance(nid, str):
+                            node_sets[bi].add(nid)
+                        it = row.get("iteration_index")
+                        if isinstance(it, int):
+                            loop_counts[bi] += 1
+            unique_node_counts = [len(node_set) for node_set in node_sets]
 
         secs = rollup_ms / 1000.0
         buckets: list[dict[str, JsonValue]] = []
@@ -1761,7 +1906,7 @@ class DashboardService:
             end = min(start + rollup_ms, until_ms)
             rc = record_counts[i]
             lc = loop_counts[i]
-            un = len(node_sets[i])
+            un = unique_node_counts[i]
             buckets.append(
                 {
                     "start_ms": start,
@@ -1985,6 +2130,17 @@ def _span_node_id(span: dict[str, JsonValue]) -> str | None:
         return None
     value = attributes.get("mentalmodel.node.id")
     return value if isinstance(value, str) else None
+
+
+def _span_frame_id(span: dict[str, JsonValue]) -> str | None:
+    value = span.get("frame_id")
+    if isinstance(value, str):
+        return value
+    attributes = span.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    attr_value = attributes.get("mentalmodel.frame.id")
+    return attr_value if isinstance(attr_value, str) else None
 
 
 def _graph_node_count(graph: dict[str, object]) -> int:

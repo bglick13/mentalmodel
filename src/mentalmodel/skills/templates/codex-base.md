@@ -35,6 +35,18 @@ authoring model.
 - Prefer semantic primitives over ad hoc orchestration.
 - Route all impure work through `Effect`.
 - Keep dependencies explicit with `Ref`.
+- When a remote capability is shared across workflows, expose it as a reusable
+  `Effect` plus typed resource/service boundary instead of hiding it inside a
+  study-local service implementation.
+- If an effect owns batching, retries, multi-phase orchestration, or other
+  meaningful control flow, lift that structure into the workflow with
+  `Block`, `Use`, `StepLoop`, additional effects, or joins instead of hiding it
+  inside one handler.
+- If a loop performs meaningful sub-steps such as sampling, scoring, or
+  materialization, model those as distinct child nodes so spans, records, and
+  loop history expose them directly.
+- Prefer loop work items that already carry the context a step needs over
+  relying on closure-like outer references for operationally significant state.
 - Treat container children as structure, not data flow.
 - Add or update invariants when adding joins, state transitions, or policy
   boundaries.
@@ -136,6 +148,7 @@ program = Workflow(
 ## Working loop
 
 1. Run `mentalmodel doctor` when setup, entrypoints, skills, or tracing look suspicious.
+   Treat topology warnings as an observability smell, not just a style note.
 2. Lower and inspect structure with `mentalmodel check`.
 3. Render artifacts with `mentalmodel graph` and `mentalmodel docs`.
 4. Run `mentalmodel verify` after meaningful changes.

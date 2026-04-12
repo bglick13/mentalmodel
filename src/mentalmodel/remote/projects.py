@@ -18,7 +18,7 @@ def link_project_to_server(
         f"{config.server_url.rstrip('/')}/api/remote/projects/link",
         method="POST",
         payload=payload,
-        api_key=config.resolve_api_key(),
+        api_key=config.resolve_optional_api_key(),
     )
     project_payload = response.get("project")
     if not isinstance(project_payload, dict):
@@ -33,7 +33,7 @@ def fetch_remote_project_status(
         f"{config.server_url.rstrip('/')}/api/remote/projects/{config.project_id}",
         method="GET",
         payload=None,
-        api_key=config.resolve_api_key(),
+        api_key=config.resolve_optional_api_key(),
     )
     project_payload = response.get("project")
     if not isinstance(project_payload, dict):
@@ -49,7 +49,7 @@ def publish_catalog_to_server(
         f"{config.server_url.rstrip('/')}/api/remote/projects/{config.project_id}/catalog",
         method="POST",
         payload=payload,
-        api_key=config.resolve_api_key(),
+        api_key=config.resolve_optional_api_key(),
     )
     project_payload = response.get("project")
     if not isinstance(project_payload, dict):
@@ -62,7 +62,7 @@ def _request_json(
     *,
     method: str,
     payload: dict[str, object] | None,
-    api_key: str,
+    api_key: str | None,
 ) -> dict[str, object]:
     return request_json_with_retry(
         url=url,

@@ -87,6 +87,15 @@ class MentalModelProjectConfig:
             )
         return value
 
+    def resolve_optional_api_key(self) -> str | None:
+        value = os.environ.get(self.api_key_env)
+        if value is None:
+            return None
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        return stripped
+
     def to_local_project_registration(self) -> ProjectRegistration:
         return ProjectRegistration(
             project_id=self.project_id,

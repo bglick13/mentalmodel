@@ -17,6 +17,8 @@ primitives for remote-compatible run handling:
 - dedicated catalog republish support for already linked projects
 - automatic completed-run upload from repo-linked `mentalmodel verify`
 - automatic live execution streaming from repo-linked `mentalmodel verify`
+- automatic completed-run upload and live execution streaming from
+  programmatic `run_managed(...)` execution in linked repos
 - project-scoped catalog provider shape
 - canonical run bundle upload payloads
 - a deterministic file-backed remote ingest store
@@ -118,13 +120,15 @@ demo-shaped:
     inspection APIs until the final bundle arrives.
 12. After local materialization succeeds, `mentalmodel verify` uploads the
     completed bundle automatically through `POST /api/remote/runs`.
-13. Completed bundle ingest marks the matching live session committed so the
+13. `run_managed(...)` follows the same local-bundle plus live/completed remote
+    delivery path without requiring CLI verification entrypoints.
+14. Completed bundle ingest marks the matching live session committed so the
     dashboard can hand off cleanly from temporary live state to canonical
     persisted inspection.
-14. The remote service records project- and run-scoped remote operation events
+15. The remote service records project- and run-scoped remote operation events
     for link, catalog publish, live start/update/commit, and completed run
     upload outcomes.
-15. `mentalmodel remote sync` remains the manual recovery and backfill path
+16. `mentalmodel remote sync` remains the manual recovery and backfill path
     when automatic upload fails or older local bundles need to be published.
 
 ## Verification

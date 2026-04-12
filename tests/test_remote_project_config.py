@@ -113,6 +113,32 @@ class RemoteProjectConfigTest(unittest.TestCase):
                 with self.assertRaises(ProjectConfigError):
                     loaded.resolve_api_key()
 
+    def test_resolve_optional_api_key_allows_missing_env_var(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config_path = root / "mentalmodel.toml"
+            config_path.write_text(
+                "\n".join(
+                    (
+                        "[project]",
+                        'project_id = "demo-project"',
+                        'label = "Demo Project"',
+                        "",
+                        "[remote]",
+                        'server_url = "http://127.0.0.1:8765"',
+                        'api_key_env = "MENTALMODEL_API_KEY"',
+                        "",
+                        "[catalog]",
+                        'provider = "mentalmodel.ui.catalog:default_dashboard_catalog"',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            loaded = load_project_config(config_path)
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertIsNone(loaded.resolve_optional_api_key())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -314,6 +314,28 @@ function spanToView(span: Record<string, unknown>): GenericSpan {
   const frameId =
     readStringField(attrs, ["mentalmodel.frame.id"]) ??
     (typeof span.frame_id === "string" ? span.frame_id : null);
+  const runtimeProfile =
+    readStringField(attrs, ["mentalmodel.runtime.profile"]) ??
+    readStringField(attrs, ["mentalmodel.runtime.context"]);
+  const rawIterationIndex =
+    typeof span.iteration_index === "number"
+      ? span.iteration_index
+      : (() => {
+          const attrValue = attrs["mentalmodel.loop.iteration_index"];
+          if (typeof attrValue === "number" && Number.isFinite(attrValue)) {
+            return attrValue;
+          }
+          if (typeof attrValue === "string" && attrValue.length > 0) {
+            const parsed = Number(attrValue);
+            if (Number.isFinite(parsed)) {
+              return parsed;
+            }
+          }
+          return null;
+        })();
+  const loopNodeId =
+    readStringField(attrs, ["mentalmodel.loop.node_id"]) ??
+    (typeof span.loop_node_id === "string" ? span.loop_node_id : null);
 
   const nodeKindRaw = readStringField(attrs, ["mentalmodel.node.kind"]);
   const kindTag = classifyNodeKind(nodeKindRaw);
@@ -322,6 +344,9 @@ function spanToView(span: Record<string, unknown>): GenericSpan {
   const subtitleParts: string[] = [];
   if (frameId && frameId !== "root") {
     subtitleParts.push(frameId);
+  }
+  if (runtimeProfile) {
+    subtitleParts.push(runtimeProfile);
   }
   const subtitle =
     subtitleParts.length > 0 ? subtitleParts.join(" · ") : null;
@@ -339,6 +364,7 @@ function spanToView(span: Record<string, unknown>): GenericSpan {
 
   return {
     label,
+    nodeId,
     title,
     subtitle,
     nodeKind: nodeKindRaw,
@@ -348,6 +374,13 @@ function spanToView(span: Record<string, unknown>): GenericSpan {
     latencyMs: Math.max(0, latencyMs),
     startTimeMs,
     endTimeMs,
+    frameId: frameNorm,
+    loopNodeId,
+    iterationIndex:
+      typeof rawIterationIndex === "number" && Number.isFinite(rawIterationIndex)
+        ? rawIterationIndex
+        : null,
+    runtimeProfile,
     statusLabel,
     traceIdDisplay,
     summaryLine,

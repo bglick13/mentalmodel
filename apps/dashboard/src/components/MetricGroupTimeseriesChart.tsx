@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import {
+  Brush,
   CartesianGrid,
   Legend,
   Line,
@@ -29,6 +30,9 @@ type SeriesDefinition = {
   points: SeriesPoint[];
   latestValue: number;
   latestIteration: number;
+  deltaValue: number | null;
+  minValue: number;
+  maxValue: number;
 };
 
 type ChartRow = {
@@ -86,7 +90,7 @@ export function MetricGroupTimeseriesChart({
               tickLine={false}
               width={52}
               axisLine={{ stroke: "rgba(142, 213, 255, 0.12)" }}
-              tickFormatter={formatMetricValue}
+              tickFormatter={(value) => formatMetricValue(value, model.unit)}
             />
             <Tooltip
               contentStyle={{
@@ -97,7 +101,10 @@ export function MetricGroupTimeseriesChart({
                 color: "#dae2fd",
               }}
               labelFormatter={(value) => `iteration ${String(value)}`}
-              formatter={(value, name) => [formatMetricValue(Number(value)), String(name)]}
+              formatter={(value, name) => [
+                formatMetricValue(Number(value), model.unit),
+                String(name),
+              ]}
             />
             <Legend
               wrapperStyle={{ fontSize: 12, color: "#aab7d7" }}
@@ -117,6 +124,14 @@ export function MetricGroupTimeseriesChart({
                 isAnimationActive={false}
               />
             ))}
+            {model.rows.length > 24 ? (
+              <Brush
+                dataKey="iteration"
+                height={18}
+                stroke="rgba(142, 213, 255, 0.25)"
+                travellerWidth={10}
+              />
+            ) : null}
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -129,8 +144,13 @@ export function MetricGroupTimeseriesChart({
             />
             <span className="metric-timeseries-footer-label">{series.label}</span>
             <strong className="metric-timeseries-footer-value">
-              {formatMetricValue(series.latestValue)}
+              {formatMetricValue(series.latestValue, model.unit)}
             </strong>
+            {series.deltaValue != null ? (
+              <span className="metric-timeseries-footer-value">
+                {formatSignedDelta(series.deltaValue, model.unit)}
+              </span>
+            ) : null}
           </div>
         ))}
       </div>
@@ -168,6 +188,9 @@ function buildChartModel(group: MetricGroup, metrics: NumericMetric[]) {
         ],
         latestValue: metric.value,
         latestIteration: iteration,
+        deltaValue: null,
+        minValue: metric.value,
+        maxValue: metric.value,
       });
       continue;
     }
@@ -186,9 +209,12 @@ function buildChartModel(group: MetricGroup, metrics: NumericMetric[]) {
       });
     }
     if (iteration >= existing.latestIteration) {
+      existing.deltaValue = metric.value - existing.latestValue;
       existing.latestIteration = iteration;
       existing.latestValue = metric.value;
     }
+    existing.minValue = Math.min(existing.minValue, metric.value);
+    existing.maxValue = Math.max(existing.maxValue, metric.value);
   }
 
   const allSeries = [...seriesByKey.values()]
@@ -234,6 +260,7 @@ function buildChartModel(group: MetricGroup, metrics: NumericMetric[]) {
     rows,
     series,
     hiddenSeriesCount: Math.max(0, allSeries.length - series.length),
+    unit: inferMetricUnit(metrics),
   };
 }
 
@@ -269,18 +296,59 @@ function displayLabelForMetric(
   return metric.path || normalizedLabel;
 }
 
-function formatMetricValue(value: number): string {
+function inferMetricUnit(metrics: NumericMetric[]): "count" | "ms" | "pct" | "generic" {
+  const combined = metrics
+    .map((metric) => `${metric.path} ${metric.label}`.toLowerCase())
+    .join(" ");
+  if (
+    combined.includes("latency") ||
+    combined.includes("duration") ||
+    combined.includes("_ms") ||
+    combined.includes(".ms")
+  ) {
+    return "ms";
+  }
+  if (
+    combined.includes("percent") ||
+    combined.includes("_pct") ||
+    combined.includes(".pct") ||
+    combined.includes("accuracy")
+  ) {
+    return "pct";
+  }
+  return metrics.every((metric) => Number.isInteger(metric.value)) ? "count" : "generic";
+}
+
+function formatMetricValue(
+  value: number,
+  unit: "count" | "ms" | "pct" | "generic" = "generic",
+): string {
   if (!Number.isFinite(value)) {
     return "n/a";
   }
+  let rendered: string;
   if (Math.abs(value) >= 1000) {
-    return value.toFixed(0);
+    rendered = value.toFixed(0);
+  } else if (Number.isInteger(value)) {
+    rendered = String(value);
+  } else if (Math.abs(value) >= 10) {
+    rendered = value.toFixed(2);
+  } else {
+    rendered = value.toFixed(4);
   }
-  if (Number.isInteger(value)) {
-    return String(value);
+  if (unit === "ms") {
+    return `${rendered} ms`;
   }
-  if (Math.abs(value) >= 10) {
-    return value.toFixed(2);
+  if (unit === "pct") {
+    return `${rendered}%`;
   }
-  return value.toFixed(4);
+  return rendered;
+}
+
+function formatSignedDelta(
+  value: number,
+  unit: "count" | "ms" | "pct" | "generic",
+): string {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${formatMetricValue(value, unit)}`;
 }
