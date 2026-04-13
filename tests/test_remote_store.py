@@ -118,6 +118,12 @@ class RemoteStoreTest(unittest.TestCase):
                 run_id=report.runtime.run_id,
             )
             self.assertTrue(bucket_rows)
+            metric_rows = store.list_metrics(
+                graph_id="async_rl_demo",
+                run_id=report.runtime.run_id,
+            )
+            self.assertTrue(metric_rows)
+            self.assertTrue(persisted_index._metrics[("async_rl_demo", report.runtime.run_id)])
 
     def test_remote_completed_run_sink_indexes_existing_local_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as local_tmp, tempfile.TemporaryDirectory() as cache_tmp:

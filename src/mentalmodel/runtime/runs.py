@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -20,7 +22,11 @@ from mentalmodel.observability.export import (
     write_jsonl,
 )
 from mentalmodel.observability.tracing import RecordedSpan
-from mentalmodel.pagination import PageSlice, paginate_descending_sequence
+from mentalmodel.pagination import (
+    PageSlice,
+    decode_sequence_cursor,
+    encode_sequence_cursor,
+)
 from mentalmodel.remote import (
     ArtifactDescriptor,
     ArtifactName,
@@ -655,21 +661,38 @@ def load_run_records_page(
     frame_id: str | None = None,
     cursor: str | None = None,
     limit: int = 100,
+    include_payload: bool = True,
 ) -> PageSlice[dict[str, JsonValue]]:
-    records = load_run_records(
+    summary = resolve_run_summary(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
         invocation_name=invocation_name,
-        node_id=node_id,
-        frame_id=frame_id,
     )
-    return paginate_descending_sequence(
-        records,
-        sequence_for=lambda record: _require_int(record, "sequence"),
-        cursor=cursor,
-        limit=limit,
-    )
+    records_path = summary.run_dir / "records.jsonl"
+    if not records_path.exists():
+        raise RunInspectionError(f"Run {summary.run_id!r} does not contain records.jsonl.")
+    before = decode_sequence_cursor(cursor)
+    total_count = 0
+    page_match_count = 0
+    page_items: deque[dict[str, JsonValue]] = deque(maxlen=limit)
+    for record in _iter_jsonl_object_rows(records_path):
+        if node_id is not None and record.get("node_id") != node_id:
+            continue
+        if frame_id is not None and record.get("frame_id") != frame_id:
+            continue
+        total_count += 1
+        sequence = _require_int(record, "sequence")
+        if before is not None and sequence >= before:
+            continue
+        page_match_count += 1
+        row = record if include_payload else _record_without_payload(record)
+        page_items.append(row)
+    items = tuple(reversed(page_items))
+    next_cursor = None
+    if page_match_count > limit and items:
+        next_cursor = encode_sequence_cursor(_require_int(items[-1], "sequence"))
+    return PageSlice(items=items, next_cursor=next_cursor, total_count=total_count)
 
 
 def load_run_spans(
@@ -728,20 +751,35 @@ def load_run_spans_page(
     cursor: str | None = None,
     limit: int = 100,
 ) -> PageSlice[dict[str, JsonValue]]:
-    spans = load_run_spans(
+    summary = resolve_run_summary(
         runs_dir=runs_dir,
         graph_id=graph_id,
         run_id=run_id,
         invocation_name=invocation_name,
-        node_id=node_id,
-        frame_id=frame_id,
     )
-    return paginate_descending_sequence(
-        spans,
-        sequence_for=lambda span: _require_int(span, "sequence"),
-        cursor=cursor,
-        limit=limit,
-    )
+    spans_path = summary.run_dir / "otel-spans.jsonl"
+    if not spans_path.exists():
+        return PageSlice(items=tuple(), next_cursor=None, total_count=0)
+    before = decode_sequence_cursor(cursor)
+    total_count = 0
+    page_match_count = 0
+    page_items: deque[dict[str, JsonValue]] = deque(maxlen=limit)
+    for span in _iter_jsonl_object_rows(spans_path):
+        if node_id is not None and _span_node_id(span) != node_id:
+            continue
+        if frame_id is not None and _span_frame_id(span) != frame_id:
+            continue
+        total_count += 1
+        sequence = _require_int(span, "sequence")
+        if before is not None and sequence >= before:
+            continue
+        page_match_count += 1
+        page_items.append(span)
+    items = tuple(reversed(page_items))
+    next_cursor = None
+    if page_match_count > limit and items:
+        next_cursor = encode_sequence_cursor(_require_int(items[-1], "sequence"))
+    return PageSlice(items=items, next_cursor=next_cursor, total_count=total_count)
 
 
 def load_run_node_output(
@@ -909,6 +947,17 @@ def read_json(path: Path) -> dict[str, JsonValue]:
     if not isinstance(payload, dict):
         raise RunInspectionError(f"Expected JSON object in {path}.")
     return {str(key): cast_json_value(value) for key, value in payload.items()}
+
+
+def _iter_jsonl_object_rows(path: Path) -> Iterator[dict[str, JsonValue]]:
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise RunInspectionError(f"Malformed JSONL row in {path}.")
+            yield {str(key): cast_json_value(value) for key, value in payload.items()}
 
 
 def cast_json_value(value: object) -> JsonValue:
@@ -1218,3 +1267,18 @@ def _span_node_id(span: dict[str, JsonValue]) -> str | None:
         return None
     value = attributes.get("mentalmodel.node.id")
     return value if isinstance(value, str) else None
+
+
+def _span_frame_id(span: dict[str, JsonValue]) -> str | None:
+    value = span.get("frame_id")
+    if isinstance(value, str):
+        return value
+    attributes = span.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    attr_value = attributes.get("mentalmodel.frame.id")
+    return attr_value if isinstance(attr_value, str) else None
+
+
+def _record_without_payload(row: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {key: value for key, value in row.items() if key != "payload"}

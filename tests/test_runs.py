@@ -32,6 +32,8 @@ from mentalmodel.runtime.runs import (
     load_run_node_trace,
     load_run_payload,
     load_run_records,
+    load_run_records_page,
+    load_run_spans_page,
     load_run_summary,
     plan_run_repairs,
     resolve_run_summary,
@@ -487,6 +489,104 @@ class RunsTest(unittest.TestCase):
             self.assertEqual(node_summary.node_id, "step_result")
             self.assertEqual(node_summary.frame_id, "steps[1]")
             self.assertEqual(node_summary.iteration_index, 1)
+
+    def test_load_run_records_page_streams_and_respects_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_id = self._materialize_framed_run(root)
+
+            first_page = load_run_records_page(
+                runs_dir=root,
+                graph_id="framed_graph",
+                run_id=run_id,
+                limit=2,
+                include_payload=False,
+            )
+            self.assertEqual(first_page.total_count, 4)
+            self.assertEqual([item["sequence"] for item in first_page.items], [4, 3])
+            self.assertTrue(all("payload" not in item for item in first_page.items))
+            self.assertEqual(first_page.next_cursor, "3")
+
+            second_page = load_run_records_page(
+                runs_dir=root,
+                graph_id="framed_graph",
+                run_id=run_id,
+                cursor=first_page.next_cursor,
+                limit=2,
+            )
+            self.assertEqual([item["sequence"] for item in second_page.items], [2, 1])
+            self.assertIsNone(second_page.next_cursor)
+
+    def test_load_run_spans_page_streams_and_respects_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_id = "run-spans"
+            run_dir = root / ".runs" / "span_graph" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            write_json(
+                run_dir / "summary.json",
+                {
+                    "schema_version": RUN_SCHEMA_VERSION,
+                    "graph_id": "span_graph",
+                    "run_id": run_id,
+                    "created_at_ms": 1000,
+                    "success": True,
+                    "node_count": 1,
+                    "edge_count": 0,
+                    "record_count": 0,
+                    "output_count": 0,
+                    "state_count": 0,
+                    "trace_sink_configured": True,
+                    "trace_mode": "disk",
+                    "trace_otlp_endpoint": None,
+                    "trace_mirror_to_disk": True,
+                    "trace_capture_local_spans": True,
+                    "trace_service_name": "mentalmodel",
+                },
+            )
+            write_jsonl(
+                run_dir / "otel-spans.jsonl",
+                [
+                    {
+                        "sequence": 1,
+                        "name": "node.started",
+                        "node_id": "worker",
+                        "frame_id": "root",
+                    },
+                    {
+                        "sequence": 2,
+                        "name": "node.succeeded",
+                        "node_id": "worker",
+                        "frame_id": "root",
+                    },
+                    {
+                        "sequence": 3,
+                        "name": "node.started",
+                        "node_id": "worker",
+                        "frame_id": "root",
+                    },
+                ],
+            )
+
+            first_page = load_run_spans_page(
+                runs_dir=root,
+                graph_id="span_graph",
+                run_id=run_id,
+                limit=2,
+            )
+            self.assertEqual(first_page.total_count, 3)
+            self.assertEqual([item["sequence"] for item in first_page.items], [3, 2])
+            self.assertEqual(first_page.next_cursor, "2")
+
+            second_page = load_run_spans_page(
+                runs_dir=root,
+                graph_id="span_graph",
+                run_id=run_id,
+                cursor=first_page.next_cursor,
+                limit=2,
+            )
+            self.assertEqual([item["sequence"] for item in second_page.items], [1])
+            self.assertIsNone(second_page.next_cursor)
 
     def test_build_run_diff_detects_changed_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

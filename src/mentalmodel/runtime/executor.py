@@ -13,7 +13,6 @@ from mentalmodel.environment import (
 from mentalmodel.ir.graph import IRGraph, IRNode
 from mentalmodel.ir.records import ExecutionRecord
 from mentalmodel.observability.config import TracingConfig
-from mentalmodel.observability.export import serialize_runtime_value
 from mentalmodel.observability.metrics import (
     MetricEmitter,
     create_metric_emitter,
@@ -30,6 +29,10 @@ from mentalmodel.observability.tracing import (
     create_tracing_adapter,
 )
 from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.runtime.execution import (
+    capture_framed_output,
+    runtime_value_payload,
+)
 from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 from mentalmodel.runtime.plan import (
@@ -219,16 +222,20 @@ class AsyncExecutor:
                 payload={
                     "kind": node.metadata.kind,
                     "output_type": type(output).__name__,
-                    "output": serialize_runtime_value(output),
+                    "output": runtime_value_payload(
+                        value=output,
+                        metadata=node.metadata,
+                    ),
                 },
             )
-            node_ctx.framed_outputs.append(
-                FramedNodeValue(
-                    node_id=node.metadata.node_id,
-                    frame=node_ctx.frame,
-                    value=output,
+            if capture_framed_output(node.metadata):
+                node_ctx.framed_outputs.append(
+                    FramedNodeValue(
+                        node_id=node.metadata.node_id,
+                        frame=node_ctx.frame,
+                        value=output,
+                    )
                 )
-            )
             if node.metadata.kind == "invariant":
                 return node.metadata.node_id, output
             return node.metadata.node_id, output

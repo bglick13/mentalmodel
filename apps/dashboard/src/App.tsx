@@ -1,4 +1,5 @@
 import {
+  startTransition,
   useCallback,
   useEffect,
   useMemo,
@@ -17,6 +18,7 @@ import {
 import { ExplorerTimeseriesChart } from "./components/ExplorerTimeseriesChart";
 import { GraphPanel } from "./components/GraphPanel";
 import { MetricGroupTimeseriesChart } from "./components/MetricGroupTimeseriesChart";
+import { MetricSparkline } from "./components/MetricSparkline";
 import { SpanLatencyInsights } from "./components/SpanLatencyInsights";
 import { SpanFlamegraph } from "./components/SpanFlamegraph";
 import {
@@ -26,6 +28,7 @@ import {
   fetchNodeDetail,
   fetchRemoteEvents,
   fetchRunCustomView,
+  fetchRunMetricGroups,
   fetchRunOverview,
   fetchRunRecords,
   fetchRunReplay,
@@ -60,9 +63,9 @@ import type {
   GenericSpan,
   GraphEdge,
   GraphPayload,
-  MetricGroup,
+  MetricGroupQueryResult,
+  MetricSeries,
   NodeDetail,
-  NumericMetric,
   ReplayNodeSummary,
   ReplayReport,
   RemoteOperationEvent,
@@ -76,12 +79,6 @@ type SpansInspector =
   | { kind: "span"; index: number }
   | { kind: "record"; id: string };
 
-type MetricGroupView = {
-  group: MetricGroup;
-  metrics: NumericMetric[];
-  hasIterationSeries: boolean;
-};
-
 type ViewId =
   | "overview"
   | "views"
@@ -89,6 +86,14 @@ type ViewId =
   | "node"
   | "spans"
   | "launch";
+
+function viewNeedsRunRecords(view: ViewId): boolean {
+  return view === "node" || view === "spans";
+}
+
+function viewNeedsRunSpans(view: ViewId): boolean {
+  return view === "spans";
+}
 
 type ScopeToken = {
   label: string;
@@ -129,7 +134,7 @@ const VIEWS: Array<{
 ];
 
 const SPEC_PATH_STORAGE_KEY = "mentalmodel.dashboard.specPath";
-const RUN_LIST_POLL_MS = 2000;
+const RUN_LIST_POLL_MS = 10000;
 const SELECTED_RUN_POLL_MS = 2000;
 
 function readStoredSpecPath(): string {
@@ -240,6 +245,8 @@ const EXPLORE_PRESET_LABEL: Record<ExploreTimePreset, string> = {
 function App() {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [selectedSpecId, setSelectedSpecId] = useState<string | null>(null);
+  const [displayedSpecId, setDisplayedSpecId] = useState<string | null>(null);
+  const [specSwitchLoading, setSpecSwitchLoading] = useState(false);
   const [activeView, setActiveView] = useState<ViewId>("overview");
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [graphPreview, setGraphPreview] = useState<GraphPayload | null>(null);
@@ -277,6 +284,10 @@ function App() {
   const [timeseriesLoading, setTimeseriesLoading] = useState(false);
   const [timeseriesPollBusy, setTimeseriesPollBusy] = useState(false);
   const [timeseriesError, setTimeseriesError] = useState<string | null>(null);
+  const [metricGroupsResponse, setMetricGroupsResponse] =
+    useState<MetricGroupQueryResult[]>([]);
+  const [metricGroupsLoading, setMetricGroupsLoading] = useState(false);
+  const [metricGroupsRefreshing, setMetricGroupsRefreshing] = useState(false);
   const [runSpans, setRunSpans] = useState<Record<string, unknown>[] | null>(
     null,
   );
@@ -324,9 +335,16 @@ function App() {
     return () => window.removeEventListener("hashchange", applyHash);
   }, []);
 
-  const selectedCatalog = useMemo(
+  const requestedCatalog = useMemo(
     () => catalog.find((entry) => entry.spec_id === selectedSpecId) ?? null,
     [catalog, selectedSpecId],
+  );
+  const selectedCatalog = useMemo(
+    () =>
+      catalog.find((entry) => entry.spec_id === displayedSpecId) ??
+      requestedCatalog ??
+      null,
+    [catalog, displayedSpecId, requestedCatalog],
   );
 
   useEffect(() => {
@@ -374,7 +392,7 @@ function App() {
   const iterationBounds = useMemo(
     () =>
       collectIterationBounds({
-        metrics: activeRun?.metrics ?? [],
+        metricGroups: metricGroupsResponse,
         records:
           activeRun?.summary.run_id === exploreRunId ? activeRecords : liveRunRecords,
         spans:
@@ -387,11 +405,11 @@ function App() {
     [
       activeExecution?.run_id,
       activeExecution?.spans,
-      activeRun?.metrics,
       activeRun?.summary.run_id,
       activeRecords,
       exploreRunId,
       liveRunRecords,
+      metricGroupsResponse,
       runSpans,
     ],
   );
@@ -410,12 +428,8 @@ function App() {
     runId: string,
     options?: { preserveFrameSelection?: boolean },
   ) => {
-    const [overview, replay] = await Promise.all([
-      fetchRunOverview(entry.graph_id, runId),
-      fetchRunReplay(entry.graph_id, runId, entry.default_loop_node_id ?? undefined),
-    ]);
+    const overview = await fetchRunOverview(entry.graph_id, runId);
     setActiveRun(overview);
-    setActiveReplay(replay);
     if (!options?.preserveFrameSelection) {
       setSelectedFrameId(null);
     }
@@ -470,6 +484,7 @@ function App() {
         frameId: selectedFrameId,
         cursor: activeRecordsCursor,
         limit: RUN_RECORDS_PAGE_SIZE,
+        includePayload: activeView === "spans",
       });
       setActiveRecords((current) => current.concat(page.items));
       setActiveRecordsCursor(page.next_cursor);
@@ -542,7 +557,9 @@ function App() {
           entries.some((entry) => entry.spec_id === parsed.specId)
             ? parsed.specId
             : null;
-        setSelectedSpecId(specFromUrl ?? entries[0]?.spec_id ?? null);
+        const initialSpecId = specFromUrl ?? entries[0]?.spec_id ?? null;
+        setSelectedSpecId(initialSpecId);
+        setDisplayedSpecId(initialSpecId);
         if (parsed.window && isExplorerWindowParam(parsed.window)) {
           setExploreTimePreset(parsed.window);
         }
@@ -570,65 +587,103 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedCatalog) {
+    if (!requestedCatalog) {
       return;
     }
-    const specId = selectedCatalog.spec_id;
-    const prevSpec = prevExplorerSpecIdRef.current;
-    prevExplorerSpecIdRef.current = specId;
-    if (prevSpec != null && prevSpec !== specId) {
-      setExploreRunId(null);
-      setExploreNodeId(null);
-      setExploreIterationStart("");
-      setExploreIterationEnd("");
-      setExploreTimePreset("1h");
-      setSpansInspector(null);
+    if (displayedSpecId === requestedCatalog.spec_id && graphPreview != null) {
+      return;
     }
-    setError(null);
-    setRuns([]);
-    setGraphPreview(null);
-    setGraphFindings([]);
-    setActiveRun(null);
-    setActiveReplay(null);
-    setActiveRecords([]);
-    setActiveRecordsCursor(null);
-    setActiveRecordsHasMore(false);
-    setActiveRecordsTotalCount(0);
-    setActiveRecordsLoading(false);
-    setActiveRecordsLoadingMore(false);
-    setSelectedFrameId(null);
-    setNodeDetail(null);
-    setTimeseries(null);
-    setRunSpans(null);
-    setRunSpansCursor(null);
-    setRunSpansHasMore(false);
-    setRunSpansTotalCount(0);
-    setRunSpansLoading(false);
-    setRunSpansLoadingMore(false);
+    let cancelled = false;
+    const nextSpecId = requestedCatalog.spec_id;
+    const prevSpecId = prevExplorerSpecIdRef.current;
+    setSpecSwitchLoading(true);
     void (async () => {
       try {
         const [catalogGraph, runData] = await Promise.all([
-          fetchCatalogGraph(selectedCatalog.spec_id),
-          refreshRuns(selectedCatalog),
+          fetchCatalogGraph(nextSpecId),
+          fetchRuns(requestedCatalog.graph_id, requestedCatalog.invocation_name),
         ]);
+        if (cancelled) {
+          return;
+        }
+        const nextRunId = runData[0]?.run_id ?? null;
+        let nextOverview: RunOverview | null = null;
+        if (nextRunId) {
+          nextOverview = await fetchRunOverview(requestedCatalog.graph_id, nextRunId);
+          if (cancelled) {
+            return;
+          }
+        }
+        setRuns(runData);
         setGraphPreview(catalogGraph.graph);
         setGraphFindings(catalogGraph.analysis.findings);
-        setError(null);
-        if (runData.length === 0) {
-          setSelectedNodeId(
-            selectedCatalog.pinned_nodes[0]?.node_id ??
-              catalogGraph.graph.nodes[0]?.node_id ??
-              null,
-          );
+        setActiveRun(nextOverview);
+        setActiveReplay(null);
+        setExploreRunId(nextRunId);
+        setSelectedFrameId(null);
+        setNodeDetail(null);
+        setActiveRecords([]);
+        setActiveRecordsCursor(null);
+        setActiveRecordsHasMore(false);
+        setActiveRecordsTotalCount(0);
+        setRunSpans(null);
+        setRunSpansCursor(null);
+        setRunSpansHasMore(false);
+        setRunSpansTotalCount(0);
+        setMetricGroupsResponse([]);
+        setTimeseries(null);
+        if (prevSpecId != null && prevSpecId !== nextSpecId) {
+          setExploreNodeId(null);
+          setExploreIterationStart("");
+          setExploreIterationEnd("");
+          setExploreTimePreset("1h");
+          setSpansInspector(null);
         }
+        setSelectedNodeId(() => {
+          if (nextOverview) {
+            return (
+              requestedCatalog.pinned_nodes[0]?.node_id ??
+              nextOverview.graph.nodes[0]?.node_id ??
+              null
+            );
+          }
+          return (
+            requestedCatalog.pinned_nodes[0]?.node_id ??
+            catalogGraph.graph.nodes[0]?.node_id ??
+            null
+          );
+        });
+        prevExplorerSpecIdRef.current = nextSpecId;
+        setDisplayedSpecId(nextSpecId);
+        setError(null);
       } catch (fetchError) {
-        setError(String(fetchError));
+        if (!cancelled) {
+          setError(String(fetchError));
+        }
+      } finally {
+        if (!cancelled) {
+          setSpecSwitchLoading(false);
+        }
       }
     })();
-  }, [selectedCatalog, refreshRuns]);
+    return () => {
+      cancelled = true;
+    };
+  }, [requestedCatalog, displayedSpecId, graphPreview]);
 
   useEffect(() => {
     if (!selectedCatalog) {
+      return;
+    }
+    const shouldPollRunList =
+      activeExecution != null ||
+      runs.some(
+        (run) =>
+          run.status === "running" ||
+          run.status === "pending" ||
+          run.source === "remote-live",
+      );
+    if (!shouldPollRunList) {
       return;
     }
     let cancelled = false;
@@ -653,7 +708,7 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selectedCatalog, refreshRuns]);
+  }, [activeExecution, refreshRuns, runs, selectedCatalog]);
 
   useEffect(() => {
     if (
@@ -721,6 +776,53 @@ function App() {
   ]);
 
   useEffect(() => {
+    if (
+      !selectedCatalog ||
+      !activeRun ||
+      exploreRunId == null ||
+      activeRun.summary.run_id !== exploreRunId
+    ) {
+      setActiveReplay(null);
+      return;
+    }
+    const shouldLoadReplay =
+      activeView === "graph" ||
+      activeView === "node" ||
+      selectedFrameId != null;
+    if (!shouldLoadReplay) {
+      setActiveReplay(null);
+      return;
+    }
+    let cancelled = false;
+    void fetchRunReplay(
+      selectedCatalog.graph_id,
+      activeRun.summary.run_id,
+      selectedCatalog.default_loop_node_id ?? undefined,
+    )
+      .then((replay) => {
+        if (!cancelled) {
+          setActiveReplay(replay);
+          setError(null);
+        }
+      })
+      .catch((replayError: unknown) => {
+        if (!cancelled) {
+          setError(String(replayError));
+          setActiveReplay(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeRun,
+    activeView,
+    exploreRunId,
+    selectedCatalog,
+    selectedFrameId,
+  ]);
+
+  useEffect(() => {
     if (!selectedCatalog || !exploreRunId) {
       return;
     }
@@ -765,6 +867,16 @@ function App() {
       setActiveRecordsHasMore(false);
       setActiveRecordsTotalCount(0);
       setActiveRecordsLoading(false);
+      setActiveRecordsLoadingMore(false);
+      return;
+    }
+    if (!viewNeedsRunRecords(activeView)) {
+      setActiveRecords([]);
+      setActiveRecordsCursor(null);
+      setActiveRecordsHasMore(false);
+      setActiveRecordsTotalCount(0);
+      setActiveRecordsLoading(false);
+      setActiveRecordsLoadingMore(false);
       return;
     }
     if (activeRun.summary.run_id !== exploreRunId) {
@@ -776,6 +888,7 @@ function App() {
       nodeId: exploreNodeId,
       frameId: selectedFrameId,
       limit: RUN_RECORDS_PAGE_SIZE,
+      includePayload: activeView === "spans",
     })
       .then((records) => {
         if (!cancelled) {
@@ -810,11 +923,21 @@ function App() {
     exploreRunId,
     exploreNodeId,
     selectedFrameId,
+    activeView,
     selectedRunRefreshTick,
   ]);
 
   useEffect(() => {
     if (!selectedCatalog || !activeRun || exploreRunId == null) {
+      setRunSpansLoading(false);
+      setRunSpansLoadingMore(false);
+      setRunSpans(null);
+      setRunSpansCursor(null);
+      setRunSpansHasMore(false);
+      setRunSpansTotalCount(0);
+      return;
+    }
+    if (!viewNeedsRunSpans(activeView)) {
       setRunSpansLoading(false);
       setRunSpansLoadingMore(false);
       setRunSpans(null);
@@ -864,6 +987,7 @@ function App() {
     exploreRunId,
     exploreNodeId,
     selectedFrameId,
+    activeView,
     selectedRunRefreshTick,
   ]);
 
@@ -949,6 +1073,62 @@ function App() {
     activeRun?.summary.run_id,
     exploreRunId,
     selectedCustomViewId,
+    selectedRunRefreshTick,
+  ]);
+
+  useEffect(() => {
+    if (!selectedCatalog || !activeRun || exploreRunId == null) {
+      setMetricGroupsResponse([]);
+      setMetricGroupsLoading(false);
+      setMetricGroupsRefreshing(false);
+      return;
+    }
+    if (activeRun.summary.run_id !== exploreRunId) {
+      return;
+    }
+    let cancelled = false;
+    const shouldRefreshOnly = metricGroupsResponse.length > 0;
+    if (!shouldRefreshOnly) {
+      setMetricGroupsLoading(true);
+    } else {
+      setMetricGroupsRefreshing(true);
+    }
+    void fetchRunMetricGroups(selectedCatalog.spec_id, activeRun.summary.run_id, {
+      stepStart: normalizedIterationRange.start,
+      stepEnd: normalizedIterationRange.end,
+      maxPoints: 120,
+      nodeId: exploreNodeId,
+      frameId: selectedFrameId,
+    })
+      .then((payload) => {
+        if (!cancelled) {
+          setMetricGroupsResponse(payload.groups);
+          setError(null);
+        }
+      })
+      .catch((metricGroupsError: unknown) => {
+        if (!cancelled) {
+          setError(String(metricGroupsError));
+          setMetricGroupsResponse([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setMetricGroupsLoading(false);
+          setMetricGroupsRefreshing(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedCatalog,
+    activeRun?.summary.run_id,
+    exploreRunId,
+    exploreNodeId,
+    selectedFrameId,
+    normalizedIterationRange.start,
+    normalizedIterationRange.end,
     selectedRunRefreshTick,
   ]);
 
@@ -1040,6 +1220,14 @@ function App() {
       return;
     }
     let cancelled = false;
+    const shouldPollTimeseries =
+      activeExecution != null ||
+      runs.some(
+        (run) =>
+          run.status === "running" ||
+          run.status === "pending" ||
+          run.source === "remote-live",
+      );
 
     const pull = (isPoll: boolean) => {
       const { sinceMs, untilMs, rollupMs } = computeExploreWindow(
@@ -1084,18 +1272,24 @@ function App() {
     };
 
     pull(false);
-    const intervalMs = 15_000;
-    const timer = window.setInterval(() => {
-      if (cancelled || document.visibilityState !== "visible") {
-        return;
-      }
-      pull(true);
-    }, intervalMs);
+    let timer: number | null = null;
+    if (shouldPollTimeseries) {
+      const intervalMs = 15_000;
+      timer = window.setInterval(() => {
+        if (cancelled || document.visibilityState !== "visible") {
+          return;
+        }
+        pull(true);
+      }, intervalMs);
+    }
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer != null) {
+        window.clearInterval(timer);
+      }
     };
   }, [
+    activeExecution,
     selectedCatalog,
     exploreTimePreset,
     exploreRunId,
@@ -1190,33 +1384,9 @@ function App() {
   }
 
   const summaryGraph = activeRun?.graph ?? graphPreview;
-  const metricGroups = useMemo(() => {
-    const groups = buildMetricGroups(
-      selectedCatalog,
-      filterMetricsByIterationRange(
-        activeRun?.metrics ?? [],
-        normalizedIterationRange,
-      ),
-    );
-    if (!exploreNodeId) {
-      return groups;
-    }
-    return groups
-      .map((groupView) => ({
-        ...groupView,
-        metrics: groupView.metrics.filter(
-          (metric) => metric.node_id === exploreNodeId,
-        ),
-      }))
-      .filter((groupView) => groupView.metrics.length > 0);
-  }, [
-    selectedCatalog,
-    activeRun?.metrics,
-    exploreNodeId,
-    normalizedIterationRange,
-  ]);
+  const metricGroups = metricGroupsResponse;
   const metricTrendGroups = useMemo(
-    () => metricGroups.filter((groupView) => groupView.hasIterationSeries),
+    () => metricGroups.filter((groupView) => groupView.has_iteration_series),
     [metricGroups],
   );
   const metricCounterSummaries = useMemo(
@@ -1518,7 +1688,12 @@ function App() {
             id="nav-spec-select"
             className="nav-spec-select"
             value={selectedSpecId ?? ""}
-            onChange={(event) => setSelectedSpecId(event.target.value || null)}
+            onChange={(event) => {
+              const nextSpecId = event.target.value || null;
+              startTransition(() => {
+                setSelectedSpecId(nextSpecId);
+              });
+            }}
           >
             {catalog.map((entry) => (
               <option key={entry.spec_id} value={entry.spec_id}>
@@ -1619,6 +1794,8 @@ function App() {
           metricCounterSummaries,
           metricGroups,
           metricTrendGroups,
+          metricGroupsLoading,
+          metricGroupsRefreshing,
           remoteEvents,
           activeRecordsHasMore,
           activeRecordsLoading,
@@ -1665,6 +1842,7 @@ function App() {
           runSpansLoadingMore,
           runSpansTotalCount,
           openTracesAtSpanIndex,
+          specSwitchLoading,
         })}
       </main>
     </div>
@@ -1693,6 +1871,8 @@ function renderCurrentView({
   metricCounterSummaries,
   metricGroups,
   metricTrendGroups,
+  metricGroupsLoading,
+  metricGroupsRefreshing,
   remoteEvents,
   nodeDetail,
   recentRunSuccessLabel,
@@ -1739,6 +1919,7 @@ function renderCurrentView({
   runSpansLoadingMore,
   runSpansTotalCount,
   openTracesAtSpanIndex,
+  specSwitchLoading,
 }: {
   activeExecution: ExecutionSession | null;
   activeCustomView: EvaluatedCustomView | null;
@@ -1759,8 +1940,10 @@ function renderCurrentView({
   liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
   metricCounterSummaries: MetricSummary[];
-  metricGroups: MetricGroupView[];
-  metricTrendGroups: MetricGroupView[];
+  metricGroups: MetricGroupQueryResult[];
+  metricTrendGroups: MetricGroupQueryResult[];
+  metricGroupsLoading: boolean;
+  metricGroupsRefreshing: boolean;
   remoteEvents: RemoteOperationEvent[];
   activeRecordsHasMore: boolean;
   activeRecordsLoading: boolean;
@@ -1807,6 +1990,7 @@ function renderCurrentView({
   runSpansLoadingMore: boolean;
   runSpansTotalCount: number;
   openTracesAtSpanIndex: (spanIndex: number) => void;
+  specSwitchLoading: boolean;
 }) {
   switch (activeView) {
     case "overview":
@@ -1826,6 +2010,8 @@ function renderCurrentView({
           metricCounterSummaries={metricCounterSummaries}
           metricGroups={metricGroups}
           metricTrendGroups={metricTrendGroups}
+          metricGroupsLoading={metricGroupsLoading}
+          metricGroupsRefreshing={metricGroupsRefreshing}
           remoteEvents={remoteEvents}
           recentRunSuccessLabel={recentRunSuccessLabel}
           recordsInTimeWindow={recordsInTimeWindow}
@@ -1842,6 +2028,7 @@ function renderCurrentView({
           timeseriesPollBusy={timeseriesPollBusy}
           warningInvariantCount={warningInvariantCount}
           spanItems={spanItems}
+          specSwitchLoading={specSwitchLoading}
         />
       );
     case "views":
@@ -1954,6 +2141,8 @@ function OverviewView({
   metricCounterSummaries,
   metricGroups,
   metricTrendGroups,
+  metricGroupsLoading,
+  metricGroupsRefreshing,
   remoteEvents,
   recentRunSuccessLabel,
   recordsInTimeWindow,
@@ -1970,6 +2159,7 @@ function OverviewView({
   timeseriesPollBusy,
   warningInvariantCount,
   spanItems,
+  specSwitchLoading,
 }: {
   activeExecution: ExecutionSession | null;
   activeCustomView: EvaluatedCustomView | null;
@@ -1983,8 +2173,10 @@ function OverviewView({
   liveMessages: ExecutionMessage[];
   liveRecords: ExecutionRecord[];
   metricCounterSummaries: MetricSummary[];
-  metricGroups: MetricGroupView[];
-  metricTrendGroups: MetricGroupView[];
+  metricGroups: MetricGroupQueryResult[];
+  metricTrendGroups: MetricGroupQueryResult[];
+  metricGroupsLoading: boolean;
+  metricGroupsRefreshing: boolean;
   remoteEvents: RemoteOperationEvent[];
   recentRunSuccessLabel: string;
   recordsInTimeWindow: ExecutionRecord[];
@@ -2001,6 +2193,7 @@ function OverviewView({
   timeseriesPollBusy: boolean;
   warningInvariantCount: string;
   spanItems: GenericSpan[];
+  specSwitchLoading: boolean;
 }) {
   const currentRecordCount = String(explorerRecordsInWindowCount);
   const frameCountKpi =
@@ -2054,6 +2247,16 @@ function OverviewView({
               tone="error"
             />
           ))}
+        </section>
+      ) : null}
+
+      {specSwitchLoading ? (
+        <section className="analysis-stack">
+          <AlertCard
+            copy="Switching specs. Keeping the current surface visible until the next spec hydrates to avoid destructive flicker."
+            label="loading next spec"
+            tone="warning"
+          />
         </section>
       ) : null}
 
@@ -2113,18 +2316,20 @@ function OverviewView({
             title="Learning and stability trends"
             subtitle="Iteration-scoped metric groups answer the training questions that matter: is reward moving, is loss stable, is KL under control, and are updates drifting."
           >
-            {metricTrendGroups.length > 0 ? (
+            {metricGroupsLoading && metricTrendGroups.length === 0 ? (
+              <EmptyState copy="Loading grouped metrics…" />
+            ) : metricTrendGroups.length > 0 ? (
               <div className="metric-groups-stack">
                 {metricTrendGroups.map((groupView) => (
                   <MetricTrendPanel
-                    key={groupView.group.group_id}
-                    group={groupView.group}
-                    metrics={groupView.metrics}
-                    onInspectMetric={(metric) => {
+                    key={groupView.group_id}
+                    group={groupView}
+                    refreshing={metricGroupsRefreshing}
+                    onInspectMetric={(series) => {
                       selectNodeAndExplorer(
-                        metric.node_id,
-                        metric.frame_id && metric.frame_id !== "root"
-                          ? metric.frame_id
+                        series.node_id,
+                        series.frame_id && series.frame_id !== "root"
+                          ? series.frame_id
                           : null,
                       );
                       setActiveView("node");
@@ -2191,20 +2396,22 @@ function OverviewView({
 
           <Panel
             title="Run counters and gauges"
-            subtitle="Use this strip for cumulative state over the visible run window: completed work, promotions, failures, and other operator counters."
+            subtitle="Summary widgets are reserved for counters, snapshots, and sparse gauges. Trend-heavy metrics stay in charts above."
           >
-            {metricCounterSummaries.length > 0 ? (
+            {metricGroupsLoading && metricCounterSummaries.length === 0 ? (
+              <EmptyState copy="Loading counter and gauge summaries…" />
+            ) : metricCounterSummaries.length > 0 ? (
               <div className="metric-counter-grid">
                 {metricCounterSummaries.map((summary) => (
                   <button
                     key={summary.key}
                     className="metric-counter-card"
-                    title={`${summary.label} · ${summary.sourceLabel}`}
+                    title={`${summary.label} · ${summary.kindLabel}`}
                     onClick={() => {
                       selectNodeAndExplorer(
-                        summary.metric.node_id,
-                        summary.metric.frame_id && summary.metric.frame_id !== "root"
-                          ? summary.metric.frame_id
+                        summary.series.node_id,
+                        summary.series.frame_id && summary.series.frame_id !== "root"
+                          ? summary.series.frame_id
                           : null,
                       );
                       setActiveView("node");
@@ -2217,11 +2424,12 @@ function OverviewView({
                     <div className="metric-counter-primary">
                       {formatMetricValueWithUnit(summary.latestValue, summary.unit)}
                     </div>
+                    <MetricSparkline series={summary.series} />
                     <div className="metric-counter-meta">
                       {summary.pointCount > 1 ? (
                         <strong>
                           {formatMetricDelta(
-                            summary.latestValue - summary.firstValue,
+                            summary.series.summary.window_delta,
                             summary.unit,
                           )}{" "}
                           visible window
@@ -2232,7 +2440,7 @@ function OverviewView({
                       <span>{summary.pointsLabel}</span>
                     </div>
                     <div className="metric-counter-foot">
-                      <span>{summary.sourceLabel}</span>
+                      <span>{summary.kindLabel}</span>
                       <span>{summary.extremaLabel}</span>
                     </div>
                   </button>
@@ -3830,40 +4038,43 @@ function StatusChip({
 
 function MetricTrendPanel({
   group,
-  metrics,
+  refreshing,
   onInspectMetric,
 }: {
-  group: MetricGroup;
-  metrics: NumericMetric[];
-  onInspectMetric: (metric: NumericMetric) => void;
+  group: MetricGroupQueryResult;
+  refreshing: boolean;
+  onInspectMetric: (series: MetricSeries) => void;
 }) {
-  const summaries = summarizeMetricGroup(metrics);
+  const summaries = summarizeMetricGroup(group);
 
   return (
     <div className="metric-trend-panel">
       <div className="metric-group-head">
-        <div className="panel-title">{group.title}</div>
-        <div className="panel-subtitle">{group.description}</div>
+        <div>
+          <div className="panel-title">{group.title}</div>
+          <div className="panel-subtitle">{group.description}</div>
+        </div>
+        {refreshing ? <StatusChip label="refreshing metrics…" tone="accent" /> : null}
       </div>
-      <MetricGroupTimeseriesChart group={group} metrics={metrics} />
+      <MetricGroupTimeseriesChart group={group} />
       <div className="metric-summary-grid compact">
         {summaries.map((summary) => (
           <button
             key={summary.key}
             className="metric-summary-card"
-            onClick={() => onInspectMetric(summary.metric)}
+            onClick={() => onInspectMetric(summary.series)}
           >
             <div className="metric-summary-header">
               <span className="metric-summary-label">{summary.label}</span>
-              {summary.iterationRange ? (
-                <span className="metric-summary-range">{summary.iterationRange}</span>
+              {summary.rangeLabel ? (
+                <span className="metric-summary-range">{summary.rangeLabel}</span>
               ) : null}
             </div>
             <div className="metric-summary-primary">
               {formatMetricValueWithUnit(summary.latestValue, summary.unit)}
             </div>
             <div className="metric-summary-meta">
-              <span>{summary.sourceLabel}</span>
+              <span>{summary.kindLabel}</span>
               {summary.deltaLabel ? <strong>{summary.deltaLabel}</strong> : null}
             </div>
             <div className="metric-summary-foot">
@@ -3884,44 +4095,43 @@ type MetricSummary = {
   deltaLabel: string | null;
   extremaLabel: string;
   pointsLabel: string;
-  sourceLabel: string;
-  iterationRange: string | null;
-  unit: MetricUnit;
-  metric: NumericMetric;
-  firstValue: number;
+  kindLabel: string;
+  rangeLabel: string | null;
+  unit: MetricSeries["unit"];
+  series: MetricSeries;
   pointCount: number;
   seriesKind: "counter" | "gauge" | "trend";
 };
 
-type MetricUnit = "count" | "ms" | "pct" | "ratio" | "bytes" | "generic";
-
-function summarizeMetricGroup(metrics: NumericMetric[]): MetricSummary[] {
-  const byKey = new Map<
-    string,
-    {
-      label: string;
-      unit: MetricUnit;
-      metrics: NumericMetric[];
-    }
-  >();
-  for (const metric of metrics) {
-    const label = normalizeMetricSummaryLabel(metric);
-    const existing = byKey.get(label);
-    if (existing) {
-      existing.metrics.push(metric);
-      continue;
-    }
-    byKey.set(label, {
-      label,
-      unit: inferMetricUnit(metric),
-      metrics: [metric],
-    });
-  }
-  return [...byKey.values()]
-    .map((group) => buildMetricSummary(group.label, group.unit, group.metrics))
+function summarizeMetricGroup(group: MetricGroupQueryResult): MetricSummary[] {
+  return group.series
+    .map((series) => {
+      const summary = series.summary;
+      return {
+        key: series.series_id,
+        label: series.label,
+        latestValue: summary.latest,
+        deltaLabel:
+          summary.delta == null ? null : formatMetricDelta(summary.delta, series.unit),
+        extremaLabel: `min ${formatMetricValueWithUnit(summary.min, series.unit)} · max ${formatMetricValueWithUnit(summary.max, series.unit)}`,
+        pointsLabel:
+          summary.latest_iteration == null
+            ? `${summary.point_count} gauges`
+            : `${summary.point_count} samples`,
+        kindLabel: metricKindLabel(series),
+        rangeLabel:
+          summary.latest_iteration == null
+            ? null
+            : buildSeriesRangeLabel(series),
+        unit: series.unit,
+        series,
+        pointCount: summary.point_count,
+        seriesKind: summary.semantic_kind,
+      };
+    })
     .sort((left, right) => {
-      const leftIteration = extractIterationForSummary(left.metric);
-      const rightIteration = extractIterationForSummary(right.metric);
+      const leftIteration = left.series.summary.latest_iteration ?? -1;
+      const rightIteration = right.series.summary.latest_iteration ?? -1;
       if (leftIteration !== rightIteration) {
         return rightIteration - leftIteration;
       }
@@ -3929,74 +4139,11 @@ function summarizeMetricGroup(metrics: NumericMetric[]): MetricSummary[] {
     });
 }
 
-function buildMetricSummary(
-  label: string,
-  unit: MetricUnit,
-  metrics: NumericMetric[],
-): MetricSummary {
-  const ordered = [...metrics].sort((left, right) => {
-    const leftIteration = extractIterationForSummary(left);
-    const rightIteration = extractIterationForSummary(right);
-    if (leftIteration !== rightIteration) {
-      return leftIteration - rightIteration;
-    }
-    return left.value - right.value;
-  });
-  const latest = ordered[ordered.length - 1] ?? metrics[0]!;
-  const previous = ordered.length > 1 ? ordered[ordered.length - 2] : null;
-  const first = ordered[0] ?? latest;
-  const values = ordered.map((metric) => metric.value);
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
-  const firstIteration = ordered[0]?.iteration_index ?? null;
-  const lastIteration = latest.iteration_index;
-  return {
-    key: `${latest.node_id}:${label}:${latest.frame_id ?? "root"}`,
-    label,
-    latestValue: latest.value,
-    deltaLabel:
-      previous == null
-        ? null
-        : formatMetricDelta(latest.value - previous.value, unit),
-    extremaLabel: `min ${formatMetricValueWithUnit(minValue, unit)} · max ${formatMetricValueWithUnit(maxValue, unit)}`,
-    pointsLabel:
-      latest.iteration_index == null
-        ? `${ordered.length} gauges`
-        : `${ordered.length} points`,
-    sourceLabel:
-      latest.iteration_index == null
-        ? latest.node_id
-        : `${latest.node_id} · ${formatIterationSeriesRange(firstIteration, lastIteration)}`,
-    iterationRange:
-      latest.iteration_index == null
-        ? null
-        : formatIterationSeriesRange(firstIteration, lastIteration),
-    unit,
-    metric: latest,
-    firstValue: first.value,
-    pointCount: ordered.length,
-    seriesKind: classifyMetricSeries(label, unit, ordered),
-  };
-}
-
-function normalizeMetricSummaryLabel(metric: NumericMetric): string {
-  const framePrefix =
-    metric.frame_id && metric.frame_id !== "root" ? `${metric.frame_id}.` : null;
-  if (framePrefix && metric.label.startsWith(framePrefix)) {
-    return metric.label.slice(framePrefix.length);
-  }
-  return metric.path || metric.label;
-}
-
-function extractIterationForSummary(metric: NumericMetric): number {
-  return metric.iteration_index ?? -1;
-}
-
 function buildMetricCounterSummaries(
-  metricGroups: MetricGroupView[],
+  metricGroups: MetricGroupQueryResult[],
 ): MetricSummary[] {
   return metricGroups
-    .flatMap((groupView) => summarizeMetricGroup(groupView.metrics))
+    .flatMap((group) => summarizeMetricGroup(group))
     .filter((summary) => summary.seriesKind !== "trend")
     .sort((left, right) => {
       const leftPriority = left.seriesKind === "counter" ? 0 : 1;
@@ -4006,70 +4153,41 @@ function buildMetricCounterSummaries(
       }
       return right.latestValue - left.latestValue;
     })
-    .slice(0, 12);
+    .slice(0, 10);
 }
 
-function classifyMetricSeries(
-  label: string,
-  unit: MetricUnit,
-  metrics: NumericMetric[],
-): "counter" | "gauge" | "trend" {
-  const normalized = label.toLowerCase();
-  const counterish =
-    unit === "count" ||
-    normalized.includes("count") ||
-    normalized.includes("total") ||
-    normalized.includes("failure") ||
-    normalized.includes("error") ||
-    normalized.includes("success") ||
-    normalized.includes("promotion") ||
-    normalized.includes("completed") ||
-    normalized.includes("requests") ||
-    normalized.includes("tokens") ||
-    normalized.includes("batches") ||
-    normalized.includes("steps");
-  if (!counterish) {
-    return "trend";
+function metricKindLabel(series: MetricSeries): string {
+  if (series.semantic_kind === "counter") {
+    return "counter";
   }
-  if (metrics.length <= 1) {
-    return "gauge";
+  if (series.render_hint === "bar") {
+    return "sparse gauge";
   }
-  const monotonic = metrics.every((metric, index) => {
-    if (index === 0) {
-      return true;
-    }
-    const previous = metrics[index - 1];
-    return previous != null && metric.value >= previous.value;
-  });
-  return monotonic ? "counter" : "gauge";
+  if (series.summary.latest_iteration == null) {
+    return "snapshot gauge";
+  }
+  return "gauge";
 }
 
-function inferMetricUnit(metric: NumericMetric): MetricUnit {
-  const key = `${metric.path} ${metric.label}`.toLowerCase();
-  if (key.includes("latency") || key.includes("duration") || key.endsWith("_ms") || key.includes(".ms")) {
-    return "ms";
+function buildSeriesRangeLabel(series: MetricSeries): string | null {
+  const iterations = series.points
+    .map((point) => point.iteration_index)
+    .filter((value): value is number => value != null);
+  if (iterations.length === 0) {
+    return null;
   }
-  if (key.includes("percent") || key.endsWith("_pct") || key.includes(".pct") || key.includes("accuracy")) {
-    return "pct";
-  }
-  if (key.includes("ratio") || key.includes("rate") || key.includes("score") || key.includes("loss") || key.includes("reward") || key.includes("kl")) {
-    return "ratio";
-  }
-  if (key.includes("bytes") || key.includes("tokens")) {
-    return "bytes";
-  }
-  if (Number.isInteger(metric.value)) {
-    return "count";
-  }
-  return "generic";
+  return formatIterationSeriesRange(iterations[0] ?? null, iterations[iterations.length - 1] ?? null);
 }
 
-function formatMetricValueWithUnit(value: number, unit: MetricUnit): string {
+function formatMetricValueWithUnit(value: number, unit: MetricSeries["unit"]): string {
   if (!Number.isFinite(value)) {
     return "n/a";
   }
   if (unit === "ms") {
     return `${formatMetricValue(value)} ms`;
+  }
+  if (unit === "s") {
+    return `${formatMetricValue(value)} s`;
   }
   if (unit === "pct") {
     return `${formatMetricValue(value)}%`;
@@ -4080,7 +4198,7 @@ function formatMetricValueWithUnit(value: number, unit: MetricUnit): string {
   return formatMetricValue(value);
 }
 
-function formatMetricDelta(delta: number, unit: MetricUnit): string {
+function formatMetricDelta(delta: number, unit: MetricSeries["unit"]): string {
   const sign = delta > 0 ? "+" : "";
   return `${sign}${formatMetricValueWithUnit(delta, unit)}`;
 }
@@ -4437,14 +4555,18 @@ type NormalizedIterationRange = {
 };
 
 function collectIterationBounds(input: {
-  metrics: NumericMetric[];
+  metricGroups: MetricGroupQueryResult[];
   records: ExecutionRecord[];
   spans: Array<{ iteration_index?: unknown }> | null;
 }): IterationBounds | null {
   const values: number[] = [];
-  for (const metric of input.metrics) {
-    if (metric.iteration_index != null) {
-      values.push(metric.iteration_index);
+  for (const group of input.metricGroups) {
+    for (const series of group.series) {
+      for (const point of series.points) {
+        if (point.iteration_index != null) {
+          values.push(point.iteration_index);
+        }
+      }
     }
   }
   for (const record of input.records) {
@@ -4521,15 +4643,6 @@ function isWithinIterationRange(
   return true;
 }
 
-function filterMetricsByIterationRange(
-  metrics: NumericMetric[],
-  range: NormalizedIterationRange,
-): NumericMetric[] {
-  return metrics.filter((metric) =>
-    isWithinIterationRange(metric.iteration_index, range),
-  );
-}
-
 function filterRecordsByIterationRange(
   records: ExecutionRecord[],
   range: NormalizedIterationRange,
@@ -4576,44 +4689,6 @@ function formatIterationRangeLabel(range: NormalizedIterationRange): string {
     return `i${range.start}+`;
   }
   return `≤ i${range.end}`;
-}
-
-function buildMetricGroups(
-  catalog: CatalogEntry | null,
-  metrics: NumericMetric[],
-): MetricGroupView[] {
-  if (!catalog) {
-    return [];
-  }
-  return catalog.metric_groups
-    .map((group) => {
-      const matchingMetrics = metrics.filter((metric) => metricMatchesGroup(metric, group));
-      return {
-        group,
-        metrics: dedupeMetrics(matchingMetrics)
-          .sort((left, right) => right.value - left.value)
-          .slice(0, group.max_items),
-        hasIterationSeries: matchingMetrics.some(
-          (metric) => metric.iteration_index != null,
-        ),
-      };
-    })
-    .filter((groupView) => groupView.metrics.length > 0);
-}
-
-function metricMatchesGroup(metric: NumericMetric, group: MetricGroup): boolean {
-  const metricNodePath = `${metric.node_id}.${metric.path}`;
-  const normalizedLabel =
-    metric.frame_id && metric.frame_id !== "root"
-      ? metric.label.replace(`${metric.frame_id}.`, "")
-      : metric.label;
-  return group.metric_path_prefixes.some(
-    (prefix) =>
-      metric.path.startsWith(prefix) ||
-      metricNodePath.startsWith(prefix) ||
-      metric.label.startsWith(prefix) ||
-      normalizedLabel.startsWith(prefix),
-  );
 }
 
 function formatMetricValue(value: number) {
@@ -4748,25 +4823,6 @@ function customViewColumnClassName(column: { column_id: string; title: string })
     return "custom-view-col narrative";
   }
   return "custom-view-col";
-}
-
-function dedupeMetrics(metrics: NumericMetric[]) {
-  const seen = new Set<string>();
-  return metrics.filter((metric) => {
-    const key = [
-      metric.node_id,
-      metric.path,
-      metric.label,
-      metric.frame_id ?? "root",
-      metric.loop_node_id ?? "none",
-      metric.iteration_index ?? "none",
-    ].join("::");
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
 }
 
 function buildRecordCadenceBars(records: ExecutionRecord[]) {

@@ -31,6 +31,7 @@ class ExecutionNodeMetadata:
     kind: str
     label: str
     runtime_context: str | None
+    metadata: dict[str, str]
     dependencies: tuple[str, ...]
     input_bindings: tuple[tuple[str, InputBindingSource], ...]
     resource_keys: tuple[ResourceKey[object], ...] = field(default_factory=tuple)
@@ -131,6 +132,24 @@ def summarize_runtime_value(value: RuntimeValue) -> dict[str, JsonValue]:
     return {"type": type(value).__name__}
 
 
+def runtime_value_payload(
+    *,
+    value: RuntimeValue,
+    metadata: ExecutionNodeMetadata,
+) -> JsonValue:
+    mode = metadata.metadata.get("record_payload_mode", "full").strip().lower()
+    if mode == "summary":
+        return summarize_runtime_value(value)
+    if mode == "none":
+        return {"type": "suppressed"}
+    return serialize_runtime_value(value)
+
+
+def capture_framed_output(metadata: ExecutionNodeMetadata) -> bool:
+    raw_value = metadata.metadata.get("capture_framed_output", "true").strip().lower()
+    return raw_value not in {"false", "0", "no"}
+
+
 def record_resolved_inputs(
     *,
     context: ExecutionContext,
@@ -147,6 +166,9 @@ def record_resolved_inputs(
         frame=context.frame,
         payload={
             "input_keys": [alias for alias, _ in metadata.input_bindings],
-            "inputs": serialize_runtime_value(inputs),
+            "inputs": runtime_value_payload(
+                value=cast(RuntimeValue, inputs),
+                metadata=metadata,
+            ),
         },
     )

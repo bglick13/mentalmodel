@@ -12,9 +12,15 @@ from typing import Protocol, cast
 
 import boto3  # type: ignore[import-untyped]
 import psycopg
+from psycopg_pool import ConnectionPool
 
 from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import RunInspectionError
+from mentalmodel.observability.dashboard_metrics import (
+    IndexedMetricRow,
+    metric_rows_from_live_records,
+    metric_rows_from_outputs_payload,
+)
 from mentalmodel.pagination import (
     PageSlice,
     decode_sequence_cursor,
@@ -54,11 +60,11 @@ from mentalmodel.remote.sync import build_run_bundle_upload_from_run_dir
 from mentalmodel.runtime.runs import (
     RunSummary,
     cast_json_value,
+    load_run_payload,
     load_run_records_page,
     load_run_spans_page,
     normalize_summary_payload,
 )
-
 
 _REMOTE_LIVE_SPAN_INSERT_SQL = """
 insert into remote_live_spans (
@@ -77,6 +83,28 @@ insert into remote_live_spans (
 values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
 on conflict (graph_id, run_id, span_id) do nothing
 """
+
+_POSTGRES_POOL_LOCK = threading.Lock()
+PostgresRow = tuple[object, ...]
+
+_POSTGRES_POOLS: dict[str, ConnectionPool[psycopg.Connection[PostgresRow]]] = {}
+
+
+def _shared_connection_pool(
+    database_url: str,
+) -> ConnectionPool[psycopg.Connection[PostgresRow]]:
+    with _POSTGRES_POOL_LOCK:
+        pool = _POSTGRES_POOLS.get(database_url)
+        if pool is None:
+            pool = ConnectionPool(
+                conninfo=database_url,
+                min_size=1,
+                max_size=12,
+                kwargs={"autocommit": True},
+                timeout=30.0,
+            )
+            _POSTGRES_POOLS[database_url] = pool
+        return pool
 
 
 @dataclass(slots=True, frozen=True)
@@ -204,13 +232,20 @@ class LiveSessionIndex(Protocol):
         committed_at_ms: int,
     ) -> RemoteLiveSessionRecord | None: ...
 
-    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord: ...
+    def get_session(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        include_payloads: bool = True,
+    ) -> RemoteLiveSessionRecord: ...
 
     def list_sessions(
         self,
         *,
         graph_id: str | None = None,
         invocation_name: str | None = None,
+        include_payloads: bool = False,
     ) -> tuple[RemoteLiveSessionRecord, ...]: ...
 
     def get_records_page(
@@ -222,6 +257,7 @@ class LiveSessionIndex(Protocol):
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]: ...
 
     def get_spans_page(
@@ -234,6 +270,25 @@ class LiveSessionIndex(Protocol):
         node_id: str | None = None,
         frame_id: str | None = None,
     ) -> PageSlice[dict[str, JsonValue]]: ...
+
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]: ...
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]: ...
 
 
 class EventIndex(Protocol):
@@ -274,6 +329,7 @@ class PersistedRunIndex(Protocol):
         run_id: str,
         records: Sequence[dict[str, JsonValue]],
         spans: Sequence[dict[str, JsonValue]],
+        metrics: Sequence[IndexedMetricRow],
     ) -> None: ...
 
     def get_records_page(
@@ -285,6 +341,7 @@ class PersistedRunIndex(Protocol):
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]: ...
 
     def get_spans_page(
@@ -309,6 +366,25 @@ class PersistedRunIndex(Protocol):
         run_id: str | None = None,
         node_id: str | None = None,
     ) -> tuple[tuple[int, int, int, int], ...]: ...
+
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]: ...
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]: ...
 
 
 class InMemoryArtifactStore:
@@ -493,10 +569,12 @@ class InMemoryPersistedRunIndex:
     def __init__(self) -> None:
         self._records: dict[tuple[str, str], tuple[dict[str, JsonValue], ...]] = {}
         self._spans: dict[tuple[str, str], tuple[dict[str, JsonValue], ...]] = {}
+        self._metrics: dict[tuple[str, str], tuple[IndexedMetricRow, ...]] = {}
         self._invocations: dict[tuple[str, str], str | None] = {}
 
     def has_indexed_run(self, *, graph_id: str, run_id: str) -> bool:
-        return (graph_id, run_id) in self._records or (graph_id, run_id) in self._spans
+        key = (graph_id, run_id)
+        return key in self._records and key in self._spans and key in self._metrics
 
     def replace_run_payloads(
         self,
@@ -505,10 +583,12 @@ class InMemoryPersistedRunIndex:
         run_id: str,
         records: Sequence[dict[str, JsonValue]],
         spans: Sequence[dict[str, JsonValue]],
+        metrics: Sequence[IndexedMetricRow],
     ) -> None:
         key = (graph_id, run_id)
         self._records[key] = tuple(records)
         self._spans[key] = tuple(spans)
+        self._metrics[key] = tuple(metrics)
 
     def set_invocation_name(
         self,
@@ -528,6 +608,7 @@ class InMemoryPersistedRunIndex:
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]:
         rows = self._records.get((graph_id, run_id))
         if rows is None:
@@ -538,8 +619,13 @@ class InMemoryPersistedRunIndex:
             if (node_id is None or row.get("node_id") == node_id)
             and (frame_id is None or row.get("frame_id") == frame_id)
         )
+        items = (
+            filtered
+            if include_payload
+            else tuple(_record_without_payload(row) for row in filtered)
+        )
         return paginate_descending_sequence(
-            filtered,
+            items,
             sequence_for=_live_row_sequence,
             cursor=cursor,
             limit=limit,
@@ -623,6 +709,62 @@ class InMemoryPersistedRunIndex:
             for bucket_index, (record_count, loop_count, node_set) in sorted(
                 bucket_state.items()
             )
+        )
+
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]:
+        rows = self._metrics.get((graph_id, run_id))
+        if rows is None:
+            raise RunInspectionError(f"Remote run {graph_id}/{run_id} was not found.")
+        return tuple(
+            row
+            for row in rows
+            if (node_id is None or row.node_id == node_id)
+            and (frame_id is None or row.frame_id == frame_id)
+            and (
+                step_start is None
+                or row.iteration_index is None
+                or row.iteration_index >= step_start
+            )
+            and (
+                step_end is None
+                or row.iteration_index is None
+                or row.iteration_index <= step_end
+            )
+            and (
+                not path_prefixes
+                or any(
+                    row.path.startswith(prefix)
+                    or row.metric_node_path.startswith(prefix)
+                    or row.label.startswith(prefix)
+                    or row.normalized_label.startswith(prefix)
+                    for prefix in path_prefixes
+                )
+            )
+        )
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        rows = self._records.get((graph_id, run_id))
+        if rows is None:
+            raise RunInspectionError(f"Remote run {graph_id}/{run_id} was not found.")
+        return tuple(
+            row
+            for row in rows
+            if row.get("event_type") == "invariant.checked"
         )
 
 
@@ -772,19 +914,29 @@ class InMemoryLiveSessionIndex:
         self._rows[(graph_id, run_id)] = updated
         return updated
 
-    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord:
+    def get_session(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        include_payloads: bool = True,
+    ) -> RemoteLiveSessionRecord:
         try:
-            return self._rows[(graph_id, run_id)]
+            row = self._rows[(graph_id, run_id)]
         except KeyError as exc:
             raise RunInspectionError(
                 f"Remote live session {graph_id}/{run_id} was not found."
             ) from exc
+        if include_payloads:
+            return row
+        return replace(row, records=(), spans=())
 
     def list_sessions(
         self,
         *,
         graph_id: str | None = None,
         invocation_name: str | None = None,
+        include_payloads: bool = False,
     ) -> tuple[RemoteLiveSessionRecord, ...]:
         rows = list(self._rows.values())
         if graph_id is not None:
@@ -792,7 +944,16 @@ class InMemoryLiveSessionIndex:
         if invocation_name is not None:
             rows = [row for row in rows if row.invocation_name == invocation_name]
         rows.sort(key=lambda row: (row.started_at_ms, row.run_id), reverse=True)
-        return tuple(rows)
+        if include_payloads:
+            return tuple(rows)
+        return tuple(
+            replace(
+                row,
+                records=(),
+                spans=(),
+            )
+            for row in rows
+        )
 
     def get_records_page(
         self,
@@ -803,6 +964,7 @@ class InMemoryLiveSessionIndex:
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]:
         session = self.get_session(graph_id=graph_id, run_id=run_id)
         filtered = tuple(
@@ -811,11 +973,71 @@ class InMemoryLiveSessionIndex:
             if (node_id is None or record.get("node_id") == node_id)
             and (frame_id is None or record.get("frame_id") == frame_id)
         )
+        items = (
+            filtered
+            if include_payload
+            else tuple(_record_without_payload(row) for row in filtered)
+        )
         return paginate_descending_sequence(
-            filtered,
+            items,
             sequence_for=_live_row_sequence,
             cursor=cursor,
             limit=limit,
+        )
+
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]:
+        session = self.get_session(graph_id=graph_id, run_id=run_id)
+        rows = metric_rows_from_live_records(
+            cast(Sequence[dict[str, object]], session.records)
+        )
+        return tuple(
+            row
+            for row in rows
+            if (node_id is None or row.node_id == node_id)
+            and (frame_id is None or row.frame_id == frame_id)
+            and (
+                step_start is None
+                or row.iteration_index is None
+                or row.iteration_index >= step_start
+            )
+            and (
+                step_end is None
+                or row.iteration_index is None
+                or row.iteration_index <= step_end
+            )
+            and (
+                not path_prefixes
+                or any(
+                    row.path.startswith(prefix)
+                    or row.metric_node_path.startswith(prefix)
+                    or row.label.startswith(prefix)
+                    or row.normalized_label.startswith(prefix)
+                    for prefix in path_prefixes
+                )
+            )
+        )
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        session = self.get_session(graph_id=graph_id, run_id=run_id)
+        return tuple(
+            cast(dict[str, JsonValue], record)
+            for record in session.records
+            if record.get("event_type") == "invariant.checked"
         )
 
     def get_spans_page(
@@ -947,6 +1169,7 @@ class PostgresManifestIndex:
 
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
+        self._pool = _shared_connection_pool(database_url)
         self._schema_lock = threading.Lock()
         self._schema_ready = False
 
@@ -959,7 +1182,7 @@ class PostgresManifestIndex:
     ) -> None:
         self._ensure_schema()
         now_ms = int(time.time() * 1000)
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 """
                 insert into remote_runs (
@@ -1042,7 +1265,7 @@ class PostgresManifestIndex:
 
     def get_run(self, *, graph_id: str, run_id: str) -> IndexedRemoteRun:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 select manifest_json::text, summary_json::text, artifact_prefix
@@ -1083,7 +1306,7 @@ class PostgresManifestIndex:
             f"{where_sql} "
             "order by created_at_ms desc, run_id desc"
         )
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(query, params).fetchall()
         return tuple(
             _indexed_run_from_row(
@@ -1098,7 +1321,7 @@ class PostgresManifestIndex:
         with self._schema_lock:
             if self._schema_ready:
                 return
-            with psycopg.connect(self.database_url) as conn:
+            with self._pool.connection() as conn:
                 apply_schema_migrations(conn, REMOTE_RUNS_MIGRATIONS)
                 conn.commit()
             self._schema_ready = True
@@ -1109,15 +1332,16 @@ class PostgresPersistedRunIndex:
 
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
+        self._pool = _shared_connection_pool(database_url)
         self._schema_lock = threading.Lock()
         self._schema_ready = False
 
     def has_indexed_run(self, *, graph_id: str, run_id: str) -> bool:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                select records_indexed_at_ms, spans_indexed_at_ms
+                select records_indexed_at_ms, spans_indexed_at_ms, metrics_indexed_at_ms
                 from remote_runs
                 where graph_id = %s and run_id = %s
                 """,
@@ -1125,7 +1349,7 @@ class PostgresPersistedRunIndex:
             ).fetchone()
         if row is None:
             raise RunInspectionError(f"Remote run {graph_id}/{run_id} was not found.")
-        return row[0] is not None or row[1] is not None
+        return row[0] is not None and row[1] is not None and row[2] is not None
 
     def replace_run_payloads(
         self,
@@ -1134,16 +1358,21 @@ class PostgresPersistedRunIndex:
         run_id: str,
         records: Sequence[dict[str, JsonValue]],
         spans: Sequence[dict[str, JsonValue]],
+        metrics: Sequence[IndexedMetricRow],
     ) -> None:
         self._ensure_schema()
         now_ms = int(time.time() * 1000)
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "delete from remote_run_records where graph_id = %s and run_id = %s",
                 (graph_id, run_id),
             )
             conn.execute(
                 "delete from remote_run_spans where graph_id = %s and run_id = %s",
+                (graph_id, run_id),
+            )
+            conn.execute(
+                "delete from remote_run_metrics where graph_id = %s and run_id = %s",
                 (graph_id, run_id),
             )
             if records:
@@ -1216,15 +1445,57 @@ class PostgresPersistedRunIndex:
                             for span in spans
                         ],
                     )
+            if metrics:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        insert into remote_run_metrics (
+                            graph_id,
+                            run_id,
+                            metric_row_id,
+                            node_id,
+                            frame_id,
+                            loop_node_id,
+                            iteration_index,
+                            path,
+                            label,
+                            normalized_label,
+                            metric_node_path,
+                            unit,
+                            semantic_kind,
+                            value
+                        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        [
+                            (
+                                graph_id,
+                                run_id,
+                                f"metric-{index}",
+                                metric.node_id,
+                                metric.frame_id,
+                                metric.loop_node_id,
+                                metric.iteration_index,
+                                metric.path,
+                                metric.label,
+                                metric.normalized_label,
+                                metric.metric_node_path,
+                                metric.unit,
+                                metric.semantic_kind,
+                                metric.value,
+                            )
+                            for index, metric in enumerate(metrics, start=1)
+                        ],
+                    )
             conn.execute(
                 """
                 update remote_runs
                 set records_indexed_at_ms = %s,
                     spans_indexed_at_ms = %s,
+                    metrics_indexed_at_ms = %s,
                     updated_at_ms = %s
                 where graph_id = %s and run_id = %s
                 """,
-                (now_ms, now_ms, now_ms, graph_id, run_id),
+                (now_ms, now_ms, now_ms, now_ms, graph_id, run_id),
             )
             conn.commit()
 
@@ -1237,6 +1508,7 @@ class PostgresPersistedRunIndex:
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]:
         self._ensure_schema()
         after_sequence = decode_sequence_cursor(cursor)
@@ -1252,21 +1524,45 @@ class PostgresPersistedRunIndex:
             clauses.append("sequence < %s")
             params.append(after_sequence)
         where_sql = " and ".join(clauses)
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             count_result = conn.execute(
                 f"select count(*) from remote_run_records where {where_sql}",
                 tuple(params),
             ).fetchone()
-            rows = conn.execute(
-                f"""
-                select payload_json, sequence
-                from remote_run_records
-                where {where_sql}
-                order by sequence desc, timestamp_ms desc, record_id desc
-                limit %s
-                """,
-                tuple([*params, limit + 1]),
-            ).fetchall()
+            if include_payload:
+                rows = conn.execute(
+                    f"""
+                    select payload_json, sequence
+                    from remote_run_records
+                    where {where_sql}
+                    order by sequence desc, timestamp_ms desc, record_id desc
+                    limit %s
+                    """,
+                    tuple([*params, limit + 1]),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    select
+                        jsonb_build_object(
+                            'record_id', record_id,
+                            'run_id', run_id,
+                            'node_id', node_id,
+                            'frame_id', frame_id,
+                            'loop_node_id', loop_node_id,
+                            'iteration_index', iteration_index,
+                            'event_type', event_type,
+                            'sequence', sequence,
+                            'timestamp_ms', timestamp_ms
+                        ),
+                        sequence
+                    from remote_run_records
+                    where {where_sql}
+                    order by sequence desc, timestamp_ms desc, record_id desc
+                    limit %s
+                    """,
+                    tuple([*params, limit + 1]),
+                ).fetchall()
         total_count = 0 if count_result is None else _int_from_db_scalar(count_result[0])
         return _page_from_json_rows(rows, limit=limit, total_count=total_count)
 
@@ -1294,7 +1590,7 @@ class PostgresPersistedRunIndex:
             clauses.append("sequence < %s")
             params.append(after_sequence)
         where_sql = " and ".join(clauses)
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             count_result = conn.execute(
                 f"select count(*) from remote_run_spans where {where_sql}",
                 tuple(params),
@@ -1358,7 +1654,7 @@ class PostgresPersistedRunIndex:
             group by bucket_index
             order by bucket_index asc
         """
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
         return tuple(
             (
@@ -1370,11 +1666,121 @@ class PostgresPersistedRunIndex:
             for row in rows
         )
 
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]:
+        self._ensure_schema()
+        clauses = ["graph_id = %s", "run_id = %s"]
+        params: list[object] = [graph_id, run_id]
+        if node_id is not None:
+            clauses.append("node_id = %s")
+            params.append(node_id)
+        if frame_id is not None:
+            clauses.append("frame_id = %s")
+            params.append(frame_id)
+        if step_start is not None:
+            clauses.append("(iteration_index is null or iteration_index >= %s)")
+            params.append(step_start)
+        if step_end is not None:
+            clauses.append("(iteration_index is null or iteration_index <= %s)")
+            params.append(step_end)
+        if path_prefixes:
+            prefix_clauses: list[str] = []
+            for prefix in path_prefixes:
+                prefix_like = f"{prefix}%"
+                prefix_clauses.extend(
+                    [
+                        "path like %s",
+                        "metric_node_path like %s",
+                        "label like %s",
+                        "normalized_label like %s",
+                    ]
+                )
+                params.extend([prefix_like, prefix_like, prefix_like, prefix_like])
+            clauses.append("(" + " or ".join(prefix_clauses) + ")")
+        where_sql = " and ".join(clauses)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"""
+                select
+                    node_id,
+                    path,
+                    label,
+                    normalized_label,
+                    metric_node_path,
+                    frame_id,
+                    loop_node_id,
+                    iteration_index,
+                    value,
+                    unit,
+                    semantic_kind
+                from remote_run_metrics
+                where {where_sql}
+                order by
+                    coalesce(iteration_index, -1) asc,
+                    node_id asc,
+                    frame_id asc nulls first,
+                    path asc
+                """,
+                tuple(params),
+            ).fetchall()
+        return tuple(
+            IndexedMetricRow(
+                node_id=cast(str, row[0]),
+                path=cast(str, row[1]),
+                label=cast(str, row[2]),
+                normalized_label=cast(str, row[3]),
+                metric_node_path=cast(str, row[4]),
+                frame_id=cast(str | None, row[5]),
+                loop_node_id=cast(str | None, row[6]),
+                iteration_index=cast(int | None, row[7]),
+                value=float(cast(float | int | str, row[8])),
+                unit=cast(str, row[9]),
+                semantic_kind=cast(str, row[10]),
+            )
+            for row in rows
+        )
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        self._ensure_schema()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                select payload_json
+                from remote_run_records
+                where graph_id = %s
+                  and run_id = %s
+                  and event_type = 'invariant.checked'
+                order by sequence asc
+                """,
+                (graph_id, run_id),
+            ).fetchall()
+        return tuple(
+            cast(dict[str, JsonValue], _json_object_from_db_payload(
+                row[0],
+                "remote_run_records.payload_json",
+            ))
+            for row in rows
+        )
+
     def _ensure_schema(self) -> None:
         with self._schema_lock:
             if self._schema_ready:
                 return
-            with psycopg.connect(self.database_url) as conn:
+            with self._pool.connection() as conn:
                 apply_schema_migrations(conn, REMOTE_RUNS_MIGRATIONS)
                 conn.commit()
             self._schema_ready = True
@@ -1385,6 +1791,7 @@ class PostgresProjectIndex:
 
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
+        self._pool = _shared_connection_pool(database_url)
         self._schema_lock = threading.Lock()
         self._schema_ready = False
 
@@ -1399,7 +1806,7 @@ class PostgresProjectIndex:
             if payload.catalog_snapshot is None
             else json.dumps(payload.catalog_snapshot.as_dict(), sort_keys=True)
         )
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 insert into remote_projects (
@@ -1506,7 +1913,7 @@ class PostgresProjectIndex:
 
     def get_project(self, *, project_id: str) -> RemoteProjectRecord:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 select
@@ -1555,7 +1962,7 @@ class PostgresProjectIndex:
         self._ensure_schema()
         now_ms = int(time.time() * 1000)
         snapshot_json = json.dumps(payload.catalog_snapshot.as_dict(), sort_keys=True)
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 update remote_projects
@@ -1615,7 +2022,7 @@ class PostgresProjectIndex:
 
     def list_projects(self) -> tuple[RemoteProjectRecord, ...]:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 """
                 select
@@ -1667,7 +2074,7 @@ class PostgresProjectIndex:
         uploaded_at_ms: int,
     ) -> RemoteProjectRecord:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 update remote_projects
@@ -1727,7 +2134,7 @@ class PostgresProjectIndex:
         with self._schema_lock:
             if self._schema_ready:
                 return
-            with psycopg.connect(self.database_url) as conn:
+            with self._pool.connection() as conn:
                 apply_schema_migrations(conn, REMOTE_PROJECT_MIGRATIONS)
                 conn.commit()
             self._schema_ready = True
@@ -1738,6 +2145,7 @@ class PostgresLiveSessionIndex:
 
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
+        self._pool = _shared_connection_pool(database_url)
         self._schema_lock = threading.Lock()
         self._schema_ready = False
 
@@ -1746,7 +2154,7 @@ class PostgresLiveSessionIndex:
         payload: RemoteLiveSessionStartRequest,
     ) -> RemoteLiveSessionRecord:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 """
                 insert into remote_live_sessions (
@@ -1828,8 +2236,13 @@ class PostgresLiveSessionIndex:
         payload: RemoteLiveSessionUpdateRequest,
     ) -> RemoteLiveSessionRecord:
         self._ensure_schema()
-        existing = self.get_session(graph_id=payload.graph_id, run_id=payload.run_id)
-        with psycopg.connect(self.database_url) as conn:
+        existing = self.get_session(
+            graph_id=payload.graph_id,
+            run_id=payload.run_id,
+            include_payloads=False,
+        )
+        live_metric_rows = _live_metric_rows_with_ids(payload.records)
+        with self._pool.connection() as conn:
             if payload.records:
                 for row in payload.records:
                     conn.execute(
@@ -1844,9 +2257,9 @@ class PostgresLiveSessionIndex:
                             frame_id,
                             loop_node_id,
                             iteration_index,
+                            event_type,
                             payload_json
-                        )
-                        values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                         on conflict (graph_id, run_id, record_id) do nothing
                         """,
                         (
@@ -1859,8 +2272,51 @@ class PostgresLiveSessionIndex:
                             _required_live_row_str(row, "frame_id"),
                             _optional_live_row_str(row, "loop_node_id"),
                             _optional_live_row_int(row, "iteration_index"),
+                            _required_live_row_str(row, "event_type"),
                             json.dumps(row, sort_keys=True),
                         ),
+                    )
+            if live_metric_rows:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        insert into remote_live_metrics (
+                            graph_id,
+                            run_id,
+                            metric_row_id,
+                            node_id,
+                            frame_id,
+                            loop_node_id,
+                            iteration_index,
+                            path,
+                            label,
+                            normalized_label,
+                            metric_node_path,
+                            unit,
+                            semantic_kind,
+                            value
+                        ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        on conflict (graph_id, run_id, metric_row_id) do nothing
+                        """,
+                        [
+                            (
+                                payload.graph_id,
+                                payload.run_id,
+                                metric_row_id,
+                                metric.node_id,
+                                metric.frame_id,
+                                metric.loop_node_id,
+                                metric.iteration_index,
+                                metric.path,
+                                metric.label,
+                                metric.normalized_label,
+                                metric.metric_node_path,
+                                metric.unit,
+                                metric.semantic_kind,
+                                metric.value,
+                            )
+                            for metric_row_id, metric in live_metric_rows
+                        ],
                     )
             if payload.spans:
                 for row in payload.spans:
@@ -1920,7 +2376,7 @@ class PostgresLiveSessionIndex:
         committed_at_ms: int,
     ) -> RemoteLiveSessionRecord | None:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             cursor = conn.execute(
                 """
                 update remote_live_sessions
@@ -1938,9 +2394,15 @@ class PostgresLiveSessionIndex:
             return None
         return self.get_session(graph_id=graph_id, run_id=run_id)
 
-    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord:
+    def get_session(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        include_payloads: bool = True,
+    ) -> RemoteLiveSessionRecord:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 """
                 select
@@ -1970,18 +2432,21 @@ class PostgresLiveSessionIndex:
                 raise RunInspectionError(
                     f"Remote live session {graph_id}/{run_id} was not found."
                 )
-            records = self._fetch_live_rows(
-                conn,
-                table_name="remote_live_records",
-                graph_id=graph_id,
-                run_id=run_id,
-            )
-            spans = self._fetch_live_rows(
-                conn,
-                table_name="remote_live_spans",
-                graph_id=graph_id,
-                run_id=run_id,
-            )
+            records: list[tuple[object, ...]] = []
+            spans: list[tuple[object, ...]] = []
+            if include_payloads:
+                records = self._fetch_live_rows(
+                    conn,
+                    table_name="remote_live_records",
+                    graph_id=graph_id,
+                    run_id=run_id,
+                )
+                spans = self._fetch_live_rows(
+                    conn,
+                    table_name="remote_live_spans",
+                    graph_id=graph_id,
+                    run_id=run_id,
+                )
         return _remote_live_session_from_row(
             row,
             records=records,
@@ -1993,6 +2458,7 @@ class PostgresLiveSessionIndex:
         *,
         graph_id: str | None = None,
         invocation_name: str | None = None,
+        include_payloads: bool = False,
     ) -> tuple[RemoteLiveSessionRecord, ...]:
         self._ensure_schema()
         conditions: list[str] = []
@@ -2006,7 +2472,7 @@ class PostgresLiveSessionIndex:
         where_clause = ""
         if conditions:
             where_clause = "where " + " and ".join(conditions)
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 f"""
                 select
@@ -2035,20 +2501,24 @@ class PostgresLiveSessionIndex:
             ).fetchall()
             results: list[RemoteLiveSessionRecord] = []
             for row in rows:
-                session_graph_id = cast(str, row[0])
-                session_run_id = cast(str, row[1])
-                records = self._fetch_live_rows(
-                    conn,
-                    table_name="remote_live_records",
-                    graph_id=session_graph_id,
-                    run_id=session_run_id,
-                )
-                spans = self._fetch_live_rows(
-                    conn,
-                    table_name="remote_live_spans",
-                    graph_id=session_graph_id,
-                    run_id=session_run_id,
-                )
+                if include_payloads:
+                    session_graph_id = cast(str, row[0])
+                    session_run_id = cast(str, row[1])
+                    records = self._fetch_live_rows(
+                        conn,
+                        table_name="remote_live_records",
+                        graph_id=session_graph_id,
+                        run_id=session_run_id,
+                    )
+                    spans = self._fetch_live_rows(
+                        conn,
+                        table_name="remote_live_spans",
+                        graph_id=session_graph_id,
+                        run_id=session_run_id,
+                    )
+                else:
+                    records = []
+                    spans = []
                 results.append(
                     _remote_live_session_from_row(
                         row,
@@ -2067,6 +2537,7 @@ class PostgresLiveSessionIndex:
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]:
         self._ensure_schema()
         before_sequence = decode_sequence_cursor(cursor)
@@ -2084,7 +2555,7 @@ class PostgresLiveSessionIndex:
         where_clause = " and ".join(conditions)
         count_params = params[: 2 + int(node_id is not None) + int(frame_id is not None)]
         count_where_clause = " and ".join(conditions[: len(count_params)])
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             count_row = conn.execute(
                 f"select count(*) from remote_live_records where {count_where_clause}",
                 tuple(count_params),
@@ -2095,16 +2566,40 @@ class PostgresLiveSessionIndex:
                     f"Remote live session {graph_id}/{run_id} was not found."
                 )
             total_count = cast(int, count_result[0])
-            rows = conn.execute(
-                f"""
-                select payload_json, sequence
-                from remote_live_records
-                where {where_clause}
-                order by sequence desc, timestamp_ms desc, record_id desc
-                limit %s
-                """,
-                (*params, limit + 1),
-            ).fetchall()
+            if include_payload:
+                rows = conn.execute(
+                    f"""
+                    select payload_json, sequence
+                    from remote_live_records
+                    where {where_clause}
+                    order by sequence desc, timestamp_ms desc, record_id desc
+                    limit %s
+                    """,
+                    (*params, limit + 1),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    select
+                        jsonb_build_object(
+                            'record_id', record_id,
+                            'run_id', run_id,
+                            'node_id', node_id,
+                            'frame_id', frame_id,
+                            'loop_node_id', loop_node_id,
+                            'iteration_index', iteration_index,
+                            'event_type', event_type,
+                            'sequence', sequence,
+                            'timestamp_ms', timestamp_ms
+                        ),
+                        sequence
+                    from remote_live_records
+                    where {where_clause}
+                    order by sequence desc, timestamp_ms desc, record_id desc
+                    limit %s
+                    """,
+                    (*params, limit + 1),
+                ).fetchall()
         items = tuple(
             cast(
                 dict[str, JsonValue],
@@ -2145,7 +2640,7 @@ class PostgresLiveSessionIndex:
         where_clause = " and ".join(conditions)
         count_params = params[: 2 + int(node_id is not None) + int(frame_id is not None)]
         count_where_clause = " and ".join(conditions[: len(count_params)])
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             count_row = conn.execute(
                 f"select count(*) from remote_live_spans where {count_where_clause}",
                 tuple(count_params),
@@ -2180,16 +2675,146 @@ class PostgresLiveSessionIndex:
         )
         return PageSlice(items=items, next_cursor=next_cursor, total_count=total_count)
 
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]:
+        self._ensure_schema()
+        clauses = ["graph_id = %s", "run_id = %s"]
+        params: list[object] = [graph_id, run_id]
+        if node_id is not None:
+            clauses.append("node_id = %s")
+            params.append(node_id)
+        if frame_id is not None:
+            clauses.append("frame_id = %s")
+            params.append(frame_id)
+        if step_start is not None:
+            clauses.append("(iteration_index is null or iteration_index >= %s)")
+            params.append(step_start)
+        if step_end is not None:
+            clauses.append("(iteration_index is null or iteration_index <= %s)")
+            params.append(step_end)
+        if path_prefixes:
+            prefix_clauses: list[str] = []
+            for prefix in path_prefixes:
+                prefix_like = f"{prefix}%"
+                prefix_clauses.extend(
+                    [
+                        "path like %s",
+                        "metric_node_path like %s",
+                        "label like %s",
+                        "normalized_label like %s",
+                    ]
+                )
+                params.extend([prefix_like, prefix_like, prefix_like, prefix_like])
+            clauses.append("(" + " or ".join(prefix_clauses) + ")")
+        where_sql = " and ".join(clauses)
+        query = f"""
+            select
+                node_id,
+                path,
+                label,
+                normalized_label,
+                metric_node_path,
+                frame_id,
+                loop_node_id,
+                iteration_index,
+                value,
+                unit,
+                semantic_kind
+            from remote_live_metrics
+            where {where_sql}
+            order by
+                coalesce(iteration_index, -1) asc,
+                node_id asc,
+                frame_id asc nulls first,
+                path asc
+        """
+        with self._pool.connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            if not rows:
+                record_rows = self._fetch_live_rows(
+                    conn,
+                    table_name="remote_live_records",
+                    graph_id=graph_id,
+                    run_id=run_id,
+                )
+                self._backfill_live_metrics(
+                    conn,
+                    graph_id=graph_id,
+                    run_id=run_id,
+                    record_rows=record_rows,
+                )
+                if record_rows:
+                    conn.commit()
+                    rows = conn.execute(query, tuple(params)).fetchall()
+        return tuple(
+            IndexedMetricRow(
+                node_id=cast(str, row[0]),
+                path=cast(str, row[1]),
+                label=cast(str, row[2]),
+                normalized_label=cast(str, row[3]),
+                metric_node_path=cast(str, row[4]),
+                frame_id=cast(str | None, row[5]),
+                loop_node_id=cast(str | None, row[6]),
+                iteration_index=cast(int | None, row[7]),
+                value=float(cast(float | int | str, row[8])),
+                unit=cast(str, row[9]),
+                semantic_kind=cast(str, row[10]),
+            )
+            for row in rows
+        )
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        self._ensure_schema()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                select payload_json
+                from remote_live_records
+                where graph_id = %s
+                  and run_id = %s
+                  and (
+                    event_type = 'invariant.checked'
+                    or (
+                        event_type = ''
+                        and payload_json->>'event_type' = 'invariant.checked'
+                    )
+                  )
+                order by sequence asc
+                """,
+                (graph_id, run_id),
+            ).fetchall()
+        return tuple(
+            cast(
+                dict[str, JsonValue],
+                _json_object_from_db_payload(row[0], "remote_live_records.payload_json"),
+            )
+            for row in rows
+        )
+
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
         with self._schema_lock:
             if self._schema_ready:
                 return
-            with psycopg.connect(self.database_url) as conn:
+            with self._pool.connection() as conn:
                 apply_schema_migrations(conn, REMOTE_LIVE_MIGRATIONS)
                 conn.commit()
-                self._schema_ready = True
+            self._schema_ready = True
 
     def _fetch_live_rows(
         self,
@@ -2210,18 +2835,80 @@ class PostgresLiveSessionIndex:
         ).fetchall()
         return cast(list[tuple[object, ...]], rows)
 
+    def _backfill_live_metrics(
+        self,
+        conn: psycopg.Connection[object],
+        *,
+        graph_id: str,
+        run_id: str,
+        record_rows: Sequence[Sequence[object]],
+    ) -> None:
+        metric_rows = _live_metric_rows_with_ids(
+            tuple(
+                _json_object_from_db_payload(
+                    record_row[0],
+                    "remote_live_records.payload_json",
+                )
+                for record_row in record_rows
+            )
+        )
+        if not metric_rows:
+            return
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                insert into remote_live_metrics (
+                    graph_id,
+                    run_id,
+                    metric_row_id,
+                    node_id,
+                    frame_id,
+                    loop_node_id,
+                    iteration_index,
+                    path,
+                    label,
+                    normalized_label,
+                    metric_node_path,
+                    unit,
+                    semantic_kind,
+                    value
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                on conflict (graph_id, run_id, metric_row_id) do nothing
+                """,
+                [
+                    (
+                        graph_id,
+                        run_id,
+                        metric_row_id,
+                        metric.node_id,
+                        metric.frame_id,
+                        metric.loop_node_id,
+                        metric.iteration_index,
+                        metric.path,
+                        metric.label,
+                        metric.normalized_label,
+                        metric.metric_node_path,
+                        metric.unit,
+                        metric.semantic_kind,
+                        metric.value,
+                    )
+                    for metric_row_id, metric in metric_rows
+                ],
+            )
+
 
 class PostgresEventIndex:
     """Postgres-backed remote operation event log for hosted operator visibility."""
 
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
+        self._pool = _shared_connection_pool(database_url)
         self._schema_lock = threading.Lock()
         self._schema_ready = False
 
     def record_event(self, event: RemoteOperationEvent) -> RemoteOperationEvent:
         self._ensure_schema()
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 """
                 insert into remote_operation_events (
@@ -2292,7 +2979,7 @@ class PostgresEventIndex:
         if conditions:
             where_clause = "where " + " and ".join(conditions)
         params.append(max(1, limit))
-        with psycopg.connect(self.database_url) as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 f"""
                 select
@@ -2345,7 +3032,7 @@ class PostgresEventIndex:
         with self._schema_lock:
             if self._schema_ready:
                 return
-            with psycopg.connect(self.database_url) as conn:
+            with self._pool.connection() as conn:
                 apply_schema_migrations(conn, REMOTE_EVENT_MIGRATIONS)
                 conn.commit()
                 self._schema_ready = True
@@ -2418,11 +3105,15 @@ class RemoteRunStore:
             artifact_prefix=artifact_prefix,
         )
         if self._persisted_run_index is not None:
+            metrics = metric_rows_from_outputs_payload(
+                _decoded_json_object(cached_bodies.get("outputs.json", b"{}"))
+            )
             self._persisted_run_index.replace_run_payloads(
                 graph_id=stored_manifest.graph_id,
                 run_id=stored_manifest.run_id,
                 records=_decoded_jsonl_payloads(cached_bodies.get("records.jsonl", b"")),
                 spans=_decoded_jsonl_payloads(cached_bodies.get("otel-spans.jsonl", b"")),
+                metrics=metrics,
             )
             if isinstance(self._persisted_run_index, InMemoryPersistedRunIndex):
                 self._persisted_run_index.set_invocation_name(
@@ -2446,6 +3137,7 @@ class RemoteRunStore:
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]:
         if self._persisted_run_index is not None:
             self._ensure_persisted_payload_index(graph_id=graph_id, run_id=run_id)
@@ -2456,9 +3148,10 @@ class RemoteRunStore:
                 limit=limit,
                 node_id=node_id,
                 frame_id=frame_id,
+                include_payload=include_payload,
             )
         self.materialize_run(graph_id=graph_id, run_id=run_id)
-        return load_run_records_page(
+        page = load_run_records_page(
             runs_dir=self.runs_root,
             graph_id=graph_id,
             run_id=run_id,
@@ -2466,6 +3159,13 @@ class RemoteRunStore:
             frame_id=frame_id,
             cursor=cursor,
             limit=limit,
+        )
+        if include_payload:
+            return page
+        return PageSlice(
+            items=tuple(_record_without_payload(row) for row in page.items),
+            next_cursor=page.next_cursor,
+            total_count=page.total_count,
         )
 
     def get_spans_page(
@@ -2544,6 +3244,52 @@ class RemoteRunStore:
             run_id=run_id,
             records=_decoded_jsonl_payloads(_read_optional_bytes(run_dir / "records.jsonl")),
             spans=_decoded_jsonl_payloads(_read_optional_bytes(run_dir / "otel-spans.jsonl")),
+            metrics=metric_rows_from_outputs_payload(
+                load_run_payload(
+                    runs_dir=self.runs_root,
+                    graph_id=graph_id,
+                    run_id=run_id,
+                    filename="outputs.json",
+                )
+            ),
+        )
+
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]:
+        if self._persisted_run_index is None:
+            raise RunInspectionError("Persisted run index is not configured.")
+        self._ensure_persisted_payload_index(graph_id=graph_id, run_id=run_id)
+        return self._persisted_run_index.list_metrics(
+            graph_id=graph_id,
+            run_id=run_id,
+            step_start=step_start,
+            step_end=step_end,
+            node_id=node_id,
+            frame_id=frame_id,
+            path_prefixes=path_prefixes,
+        )
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        if self._persisted_run_index is None:
+            raise RunInspectionError("Persisted run index is not configured.")
+        self._ensure_persisted_payload_index(graph_id=graph_id, run_id=run_id)
+        return self._persisted_run_index.list_invariants(
+            graph_id=graph_id,
+            run_id=run_id,
         )
 
     def list_run_summaries(
@@ -2689,18 +3435,30 @@ class RemoteLiveSessionStore:
             committed_at_ms=committed_at_ms,
         )
 
-    def get_session(self, *, graph_id: str, run_id: str) -> RemoteLiveSessionRecord:
-        return self._live_session_index.get_session(graph_id=graph_id, run_id=run_id)
+    def get_session(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        include_payloads: bool = True,
+    ) -> RemoteLiveSessionRecord:
+        return self._live_session_index.get_session(
+            graph_id=graph_id,
+            run_id=run_id,
+            include_payloads=include_payloads,
+        )
 
     def list_sessions(
         self,
         *,
         graph_id: str | None = None,
         invocation_name: str | None = None,
+        include_payloads: bool = False,
     ) -> tuple[RemoteLiveSessionRecord, ...]:
         return self._live_session_index.list_sessions(
             graph_id=graph_id,
             invocation_name=invocation_name,
+            include_payloads=include_payloads,
         )
 
     def get_records_page(
@@ -2712,6 +3470,7 @@ class RemoteLiveSessionStore:
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]:
         return self._live_session_index.get_records_page(
             graph_id=graph_id,
@@ -2720,6 +3479,7 @@ class RemoteLiveSessionStore:
             limit=limit,
             node_id=node_id,
             frame_id=frame_id,
+            include_payload=include_payload,
         )
 
     def get_spans_page(
@@ -2739,6 +3499,38 @@ class RemoteLiveSessionStore:
             limit=limit,
             node_id=node_id,
             frame_id=frame_id,
+        )
+
+    def list_metrics(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        step_start: int | None = None,
+        step_end: int | None = None,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+        path_prefixes: Sequence[str] = (),
+    ) -> tuple[IndexedMetricRow, ...]:
+        return self._live_session_index.list_metrics(
+            graph_id=graph_id,
+            run_id=run_id,
+            step_start=step_start,
+            step_end=step_end,
+            node_id=node_id,
+            frame_id=frame_id,
+            path_prefixes=path_prefixes,
+        )
+
+    def list_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, JsonValue], ...]:
+        return self._live_session_index.list_invariants(
+            graph_id=graph_id,
+            run_id=run_id,
         )
 
 
@@ -3197,6 +3989,10 @@ def _live_row_sequence(row: dict[str, JsonValue]) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _record_without_payload(row: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {key: value for key, value in row.items() if key != "payload"}
+
+
 def _persisted_record_id(row: dict[str, JsonValue]) -> str:
     value = row.get("record_id")
     if isinstance(value, str) and value:
@@ -3219,6 +4015,20 @@ def _persisted_span_id(row: dict[str, JsonValue]) -> str:
     raise RemoteContractError("Persisted span rows must include span_id or sequence+name.")
 
 
+def _live_metric_rows_with_ids(
+    records: Sequence[Mapping[str, object]],
+) -> list[tuple[str, IndexedMetricRow]]:
+    indexed: list[tuple[str, IndexedMetricRow]] = []
+    for row in records:
+        record_id = _required_live_row_str(row, "record_id")
+        for metric_index, metric in enumerate(
+            metric_rows_from_live_records((dict(row),)),
+            start=1,
+        ):
+            indexed.append((f"{record_id}:{metric_index}:{metric.path}", metric))
+    return indexed
+
+
 def _decoded_jsonl_payloads(content: bytes) -> tuple[dict[str, JsonValue], ...]:
     if not content:
         return ()
@@ -3237,6 +4047,15 @@ def _decoded_jsonl_payloads(content: bytes) -> tuple[dict[str, JsonValue], ...]:
             }
         )
     return tuple(rows)
+
+
+def _decoded_json_object(content: bytes) -> dict[str, JsonValue]:
+    if not content:
+        return {}
+    decoded = json.loads(content.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise RemoteContractError("Persisted JSON payloads must decode to objects.")
+    return {str(key): cast_json_value(value) for key, value in decoded.items()}
 
 
 def _read_optional_bytes(path: Path) -> bytes:

@@ -35,6 +35,7 @@ REMOTE_RUNS_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
             record_schema_version integer,
             records_indexed_at_ms bigint,
             spans_indexed_at_ms bigint,
+            metrics_indexed_at_ms bigint,
             manifest_json jsonb not null,
             summary_json jsonb not null,
             artifact_prefix text not null,
@@ -50,6 +51,10 @@ REMOTE_RUNS_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
     SchemaMigration(
         "remote_runs_spans_indexed_column",
         "alter table remote_runs add column if not exists spans_indexed_at_ms bigint",
+    ),
+    SchemaMigration(
+        "remote_runs_metrics_indexed_column",
+        "alter table remote_runs add column if not exists metrics_indexed_at_ms bigint",
     ),
     SchemaMigration(
         "remote_runs_created_idx",
@@ -141,6 +146,58 @@ REMOTE_RUNS_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
         "remote_run_spans_iteration_idx",
         "create index if not exists idx_remote_run_spans_iteration "
         "on remote_run_spans (graph_id, run_id, iteration_index)",
+    ),
+    SchemaMigration(
+        "remote_run_metrics_table",
+        """
+        create table if not exists remote_run_metrics (
+            graph_id text not null,
+            run_id text not null,
+            metric_row_id text not null,
+            node_id text not null,
+            frame_id text null,
+            loop_node_id text null,
+            iteration_index integer null,
+            path text not null,
+            label text not null,
+            normalized_label text not null,
+            metric_node_path text not null,
+            unit text not null,
+            semantic_kind text not null,
+            value double precision not null,
+            primary key (graph_id, run_id, metric_row_id)
+        )
+        """,
+    ),
+    SchemaMigration(
+        "remote_run_metrics_iteration_idx",
+        "create index if not exists idx_remote_run_metrics_iteration "
+        "on remote_run_metrics (graph_id, run_id, iteration_index)",
+    ),
+    SchemaMigration(
+        "remote_run_metrics_node_frame_iteration_idx",
+        "create index if not exists idx_remote_run_metrics_node_frame_iteration "
+        "on remote_run_metrics (graph_id, run_id, node_id, frame_id, iteration_index)",
+    ),
+    SchemaMigration(
+        "remote_run_metrics_path_prefix_idx",
+        "create index if not exists idx_remote_run_metrics_path_prefix "
+        "on remote_run_metrics (graph_id, run_id, path text_pattern_ops)",
+    ),
+    SchemaMigration(
+        "remote_run_metrics_label_prefix_idx",
+        "create index if not exists idx_remote_run_metrics_label_prefix "
+        "on remote_run_metrics (graph_id, run_id, label text_pattern_ops)",
+    ),
+    SchemaMigration(
+        "remote_run_metrics_normalized_label_prefix_idx",
+        "create index if not exists idx_remote_run_metrics_normalized_label_prefix "
+        "on remote_run_metrics (graph_id, run_id, normalized_label text_pattern_ops)",
+    ),
+    SchemaMigration(
+        "remote_run_metrics_metric_node_path_prefix_idx",
+        "create index if not exists idx_remote_run_metrics_metric_node_path_prefix "
+        "on remote_run_metrics (graph_id, run_id, metric_node_path text_pattern_ops)",
     ),
 )
 
@@ -235,8 +292,31 @@ REMOTE_LIVE_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
             frame_id text not null,
             loop_node_id text null,
             iteration_index integer null,
+            event_type text not null default '',
             payload_json jsonb not null,
             primary key (graph_id, run_id, record_id)
+        )
+        """,
+    ),
+    SchemaMigration(
+        "remote_live_metrics_table",
+        """
+        create table if not exists remote_live_metrics (
+            graph_id text not null,
+            run_id text not null,
+            metric_row_id text not null,
+            node_id text not null,
+            frame_id text null,
+            loop_node_id text null,
+            iteration_index integer null,
+            path text not null,
+            label text not null,
+            normalized_label text not null,
+            metric_node_path text not null,
+            unit text not null,
+            semantic_kind text not null,
+            value double precision not null,
+            primary key (graph_id, run_id, metric_row_id)
         )
         """,
     ),
@@ -266,6 +346,10 @@ REMOTE_LIVE_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
     SchemaMigration(
         "remote_live_records_iteration_column",
         "alter table remote_live_records add column if not exists iteration_index integer null",
+    ),
+    SchemaMigration(
+        "remote_live_records_event_type_column",
+        "alter table remote_live_records add column if not exists event_type text not null default ''",
     ),
     SchemaMigration(
         "remote_live_spans_frame_column",
@@ -299,6 +383,11 @@ REMOTE_LIVE_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
         "on remote_live_records (graph_id, run_id, node_id, frame_id, sequence desc)",
     ),
     SchemaMigration(
+        "remote_live_records_event_type_idx",
+        "create index if not exists idx_remote_live_records_event_type "
+        "on remote_live_records (graph_id, run_id, event_type, sequence desc)",
+    ),
+    SchemaMigration(
         "remote_live_spans_sequence_idx",
         "create index if not exists idx_remote_live_spans_sequence "
         "on remote_live_spans (graph_id, run_id, sequence desc)",
@@ -307,6 +396,36 @@ REMOTE_LIVE_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
         "remote_live_spans_node_frame_sequence_idx",
         "create index if not exists idx_remote_live_spans_node_frame_sequence "
         "on remote_live_spans (graph_id, run_id, node_id, frame_id, sequence desc)",
+    ),
+    SchemaMigration(
+        "remote_live_metrics_iteration_idx",
+        "create index if not exists idx_remote_live_metrics_iteration "
+        "on remote_live_metrics (graph_id, run_id, iteration_index)",
+    ),
+    SchemaMigration(
+        "remote_live_metrics_node_frame_iteration_idx",
+        "create index if not exists idx_remote_live_metrics_node_frame_iteration "
+        "on remote_live_metrics (graph_id, run_id, node_id, frame_id, iteration_index)",
+    ),
+    SchemaMigration(
+        "remote_live_metrics_path_prefix_idx",
+        "create index if not exists idx_remote_live_metrics_path_prefix "
+        "on remote_live_metrics (graph_id, run_id, path text_pattern_ops)",
+    ),
+    SchemaMigration(
+        "remote_live_metrics_label_prefix_idx",
+        "create index if not exists idx_remote_live_metrics_label_prefix "
+        "on remote_live_metrics (graph_id, run_id, label text_pattern_ops)",
+    ),
+    SchemaMigration(
+        "remote_live_metrics_normalized_label_prefix_idx",
+        "create index if not exists idx_remote_live_metrics_normalized_label_prefix "
+        "on remote_live_metrics (graph_id, run_id, normalized_label text_pattern_ops)",
+    ),
+    SchemaMigration(
+        "remote_live_metrics_metric_node_path_prefix_idx",
+        "create index if not exists idx_remote_live_metrics_metric_node_path_prefix "
+        "on remote_live_metrics (graph_id, run_id, metric_node_path text_pattern_ops)",
     ),
 )
 

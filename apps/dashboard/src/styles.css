@@ -1396,6 +1396,7 @@ pre,
   display: grid;
   gap: 10px;
   align-content: start;
+  min-width: 0;
 }
 
 .metric-counter-card {
@@ -1421,16 +1422,20 @@ pre,
 }
 
 .metric-counter-head {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: flex-start;
+  min-width: 0;
 }
 
 .metric-counter-label {
   font-size: 0.82rem;
   font-weight: 600;
   color: var(--muted-strong);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .metric-counter-kind {
@@ -1446,14 +1451,28 @@ pre,
   color: var(--text);
 }
 
+.metric-sparkline {
+  min-width: 0;
+  height: 44px;
+  border-radius: 10px;
+  background: rgba(45, 52, 73, 0.24);
+  border: 1px solid rgba(142, 213, 255, 0.08);
+  overflow: hidden;
+}
+
 .metric-counter-meta,
 .metric-counter-foot {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  justify-content: space-between;
+  display: grid;
+  gap: 4px;
   font-size: 0.76rem;
   color: var(--muted);
+  min-width: 0;
+}
+
+.metric-counter-meta > * ,
+.metric-counter-foot > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .metric-counter-meta strong {
@@ -1484,10 +1503,11 @@ button.metric-summary-card:hover {
 .metric-summary-header,
 .metric-summary-meta,
 .metric-summary-foot {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: baseline;
+  min-width: 0;
 }
 
 .metric-summary-label,
@@ -1502,6 +1522,7 @@ button.metric-summary-card:hover {
   font-size: 0.8rem;
   color: var(--muted-strong);
   font-weight: 600;
+  line-height: 1.35;
 }
 
 .metric-summary-range,

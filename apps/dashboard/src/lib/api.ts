@@ -3,6 +3,8 @@ import type {
   CatalogEntry,
   EvaluatedCustomView,
   ExecutionSession,
+  ExecutionRecord,
+  RunMetricGroupsResponse,
   NodeDetail,
   PageResponse,
   RemoteOperationEvent,
@@ -12,34 +14,56 @@ import type {
   TimeseriesResponse,
 } from "../types";
 
+const inflightRequests = new Map<string, Promise<unknown>>();
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-    ...init,
-  });
-  const raw = await response.text();
-  if (!response.ok) {
-    throw new Error(raw || `Request failed with ${response.status}`);
+  const method = init?.method?.toUpperCase() ?? "GET";
+  const cacheKey = method === "GET" ? `${method}:${path}` : null;
+  if (cacheKey) {
+    const cached = inflightRequests.get(cacheKey);
+    if (cached) {
+      return cached as Promise<T>;
+    }
   }
-  const trimmed = raw.trim();
-  if (
-    trimmed.startsWith("<!DOCTYPE") ||
-    trimmed.startsWith("<!doctype") ||
-    trimmed.startsWith("<html")
-  ) {
-    throw new Error(
-      `Expected JSON from ${path} but received HTML (wrong port, missing /api route, or SPA fallback). Rebuild apps/dashboard and run \`uv run mentalmodel ui\` so API and dist match.`,
-    );
+  const requestPromise = (async () => {
+    const response = await fetch(path, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers ?? {}),
+      },
+      ...init,
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(raw || `Request failed with ${response.status}`);
+    }
+    const trimmed = raw.trim();
+    if (
+      trimmed.startsWith("<!DOCTYPE") ||
+      trimmed.startsWith("<!doctype") ||
+      trimmed.startsWith("<html")
+    ) {
+      throw new Error(
+        `Expected JSON from ${path} but received HTML (wrong port, missing /api route, or SPA fallback). Rebuild apps/dashboard and run \`uv run mentalmodel ui\` so API and dist match.`,
+      );
+    }
+    try {
+      return JSON.parse(trimmed) as T;
+    } catch (parseError) {
+      throw new Error(
+        `Invalid JSON from ${path}: ${trimmed.slice(0, 120)}${trimmed.length > 120 ? "…" : ""}`,
+      );
+    }
+  })();
+  if (cacheKey) {
+    inflightRequests.set(cacheKey, requestPromise);
   }
   try {
-    return JSON.parse(trimmed) as T;
-  } catch (parseError) {
-    throw new Error(
-      `Invalid JSON from ${path}: ${trimmed.slice(0, 120)}${trimmed.length > 120 ? "…" : ""}`,
-    );
+    return await requestPromise;
+  } finally {
+    if (cacheKey) {
+      inflightRequests.delete(cacheKey);
+    }
   }
 }
 
@@ -177,6 +201,39 @@ export async function fetchRunCustomView(
   );
 }
 
+export async function fetchRunMetricGroups(
+  specId: string,
+  runId: string,
+  params?: {
+    stepStart?: number | null;
+    stepEnd?: number | null;
+    maxPoints?: number;
+    nodeId?: string | null;
+    frameId?: string | null;
+  },
+): Promise<RunMetricGroupsResponse> {
+  const query = new URLSearchParams();
+  if (params?.stepStart != null) {
+    query.set("step_start", String(params.stepStart));
+  }
+  if (params?.stepEnd != null) {
+    query.set("step_end", String(params.stepEnd));
+  }
+  if (params?.maxPoints != null) {
+    query.set("max_points", String(params.maxPoints));
+  }
+  if (params?.nodeId) {
+    query.set("node_id", params.nodeId);
+  }
+  if (params?.frameId) {
+    query.set("frame_id", params.frameId);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return request(
+    `/api/catalog/${encodeURIComponent(specId)}/runs/${encodeURIComponent(runId)}/metrics${suffix}`,
+  );
+}
+
 export async function fetchRunReplay(
   graphId: string,
   runId: string,
@@ -196,6 +253,7 @@ export async function fetchRunRecords(
     frameId?: string | null;
     cursor?: string | null;
     limit?: number;
+    includePayload?: boolean;
   },
 ): Promise<PageResponse<ReplayReport["events"][number]>> {
   const query = new URLSearchParams();
@@ -211,8 +269,13 @@ export async function fetchRunRecords(
   if (params?.limit != null) {
     query.set("limit", String(params.limit));
   }
+  if (params?.includePayload != null) {
+    query.set("include_payload", params.includePayload ? "true" : "false");
+  }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  return request(`/api/runs/${graphId}/${runId}/records${suffix}`);
+  return request<PageResponse<ExecutionRecord>>(
+    `/api/runs/${graphId}/${runId}/records${suffix}`,
+  );
 }
 
 export async function fetchRunSpans(

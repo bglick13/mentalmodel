@@ -161,7 +161,7 @@ export type ExecutionRecord = {
   event_type: string;
   sequence: number;
   timestamp_ms: number;
-  payload: Record<string, unknown>;
+  payload?: Record<string, unknown>;
 };
 
 export type PageResponse<T> = {
@@ -285,6 +285,59 @@ export type NumericMetric = {
   frame_id: string | null;
   loop_node_id: string | null;
   iteration_index: number | null;
+};
+
+export type MetricSeriesPoint = {
+  bucket_start: number | null;
+  bucket_end: number | null;
+  iteration_index: number | null;
+  value: number;
+  min: number;
+  max: number;
+  avg: number;
+  count: number;
+};
+
+export type MetricSeriesSummary = {
+  latest: number;
+  first: number;
+  delta: number | null;
+  window_delta: number;
+  min: number;
+  max: number;
+  avg: number;
+  point_count: number;
+  latest_iteration: number | null;
+  semantic_kind: "counter" | "gauge" | "trend";
+};
+
+export type MetricSeries = {
+  series_id: string;
+  label: string;
+  path: string;
+  node_id: string;
+  frame_id: string | null;
+  loop_node_id: string | null;
+  unit: "count" | "ms" | "s" | "pct" | "ratio" | "bytes" | "generic";
+  semantic_kind: "counter" | "gauge" | "trend";
+  render_hint: "line" | "area" | "bar" | "stat";
+  points: MetricSeriesPoint[];
+  summary: MetricSeriesSummary;
+};
+
+export type MetricGroupQueryResult = {
+  group_id: string;
+  title: string;
+  description: string;
+  series: MetricSeries[];
+  has_iteration_series: boolean;
+};
+
+export type RunMetricGroupsResponse = {
+  graph_id: string;
+  run_id: string;
+  spec_id: string;
+  groups: MetricGroupQueryResult[];
 };
 
 export type InvariantOverview = {

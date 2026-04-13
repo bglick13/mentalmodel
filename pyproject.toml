@@ -13,6 +13,7 @@ dependencies = [
   "opentelemetry-exporter-otlp-proto-http>=1.38.0,<2",
   "opentelemetry-sdk>=1.38.0,<2",
   "psycopg[binary]>=3.2.10,<4",
+  "psycopg-pool>=3.2.6,<4",
   "rich>=14.2.0,<15",
   "uvicorn>=0.38.0,<0.39",
 ]

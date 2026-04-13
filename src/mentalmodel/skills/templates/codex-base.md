@@ -45,6 +45,9 @@ authoring model.
 - If a loop performs meaningful sub-steps such as sampling, scoring, or
   materialization, model those as distinct child nodes so spans, records, and
   loop history expose them directly.
+- Do not retain raw high-cardinality loop outputs in history unless operators
+  truly need the full payload. Add a lightweight summary node for dashboard
+  tables and retain that in loop history instead.
 - Prefer loop work items that already carry the context a step needs over
   relying on closure-like outer references for operationally significant state.
 - Treat container children as structure, not data flow.

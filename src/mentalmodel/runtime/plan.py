@@ -429,6 +429,7 @@ def build_execution_plan(
             kind=node.kind,
             label=node.label,
             runtime_context=node.metadata.get("runtime_context"),
+            metadata=dict(node.metadata),
             dependencies=tuple(sorted(dependencies[node.node_id])),
             input_bindings=tuple(sorted(input_bindings[node.node_id].items())),
             resource_keys=resource_bindings.get(node.node_id, tuple()),

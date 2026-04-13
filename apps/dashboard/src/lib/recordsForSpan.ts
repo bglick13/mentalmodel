@@ -30,7 +30,7 @@ export function executionRecordToDetailJson(record: ExecutionRecord): Record<str
     event_type: record.event_type,
     sequence: record.sequence,
     timestamp_ms: record.timestamp_ms,
-    payload: record.payload,
+    payload: record.payload ?? null,
   };
 }
 

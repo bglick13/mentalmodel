@@ -89,6 +89,19 @@ class ProviderMetricMapEffect(EffectHandler[dict[str, object], dict[str, object]
         }
 
 
+class LargePayloadEffect(EffectHandler[dict[str, object], dict[str, object]]):
+    async def invoke(
+        self,
+        inputs: dict[str, object],
+        ctx: ExecutionContext,
+    ) -> dict[str, object]:
+        del inputs, ctx
+        return {
+            "items": [{"text": "x" * 128, "index": idx} for idx in range(4)],
+            "count": 4,
+        }
+
+
 class AlwaysFailInvariant(InvariantChecker[dict[str, object], JsonValue]):
     async def check(
         self,
@@ -429,6 +442,43 @@ class ExecutorTest(unittest.TestCase):
             },
         )
 
+    def test_node_metadata_can_downscope_record_payloads_and_skip_framed_outputs(self) -> None:
+        program = Workflow(
+            name="payload_controls",
+            children=[
+                Effect(
+                    "large_payload",
+                    handler=LargePayloadEffect(),
+                    metadata={
+                        "record_payload_mode": "summary",
+                        "capture_framed_output": "false",
+                    },
+                )
+            ],
+        )
+
+        result = asyncio.run(AsyncExecutor().run(program))
+
+        resolved_inputs = next(
+            record
+            for record in result.records
+            if record.node_id == "large_payload"
+            and record.event_type == "node.inputs_resolved"
+        )
+        succeeded = next(
+            record
+            for record in result.records
+            if record.node_id == "large_payload"
+            and record.event_type == "node.succeeded"
+        )
+
+        self.assertEqual(resolved_inputs.payload["inputs"], {"keys": [], "type": "dict"})
+        self.assertEqual(
+            succeeded.payload["output"],
+            {"keys": ["count", "items"], "type": "dict"},
+        )
+        self.assertEqual(result.framed_outputs, ())
+
     def test_effect_failure_is_recorded_and_raised(self) -> None:
         program: Workflow[
             Actor[dict[str, object], str, object] | Effect[dict[str, object], str]
@@ -532,6 +582,7 @@ class ExecutorTest(unittest.TestCase):
             kind="effect",
             label=metadata.label,
             runtime_context=metadata.runtime_context,
+            metadata=metadata.metadata,
             dependencies=metadata.dependencies,
             input_bindings=metadata.input_bindings,
         )

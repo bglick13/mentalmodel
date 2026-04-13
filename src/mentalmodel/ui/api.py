@@ -145,6 +145,7 @@ def create_dashboard_app(
         try:
             request_payload = RemoteProjectLinkRequest.from_dict(payload)
             project = configured_remote_project_store.link_project(request_payload)
+            service.invalidate_remote_project_catalog()
             _record_remote_event(
                 configured_remote_event_store,
                 kind=RemoteOperationKind.PROJECT_LINK,
@@ -211,6 +212,7 @@ def create_dashboard_app(
             if request_payload.project_id != project_id:
                 raise ValueError("Catalog publish path project_id does not match payload.")
             project = configured_remote_project_store.publish_catalog(request_payload)
+            service.invalidate_remote_project_catalog()
             _record_remote_event(
                 configured_remote_event_store,
                 kind=RemoteOperationKind.CATALOG_PUBLISH,
@@ -249,6 +251,10 @@ def create_dashboard_app(
                     project_id=upload.manifest.project_id
                 )
             run_dir = ingest_store.ingest(upload)
+            service.invalidate_remote_run(
+                graph_id=upload.manifest.graph_id,
+                run_id=upload.manifest.run_id,
+            )
             uploaded_at_ms = int(time.time() * 1000)
             if (
                 configured_remote_project_store is not None
@@ -336,6 +342,10 @@ def create_dashboard_app(
                     project_id=request_payload.project_id
                 )
             session = configured_remote_live_store.start_session(request_payload)
+            service.invalidate_remote_run(
+                graph_id=request_payload.graph_id,
+                run_id=request_payload.run_id,
+            )
             _record_remote_event(
                 configured_remote_event_store,
                 kind=RemoteOperationKind.LIVE_START,
@@ -376,6 +386,10 @@ def create_dashboard_app(
             if request_payload.run_id != run_id:
                 raise ValueError("Live session path run_id does not match payload.")
             session = configured_remote_live_store.apply_update(request_payload)
+            service.invalidate_remote_run(
+                graph_id=request_payload.graph_id,
+                run_id=request_payload.run_id,
+            )
             _record_remote_event(
                 configured_remote_event_store,
                 kind=RemoteOperationKind.LIVE_UPDATE,
@@ -553,6 +567,31 @@ def create_dashboard_app(
         except Exception as exc:  # pragma: no cover - thin API wrapper
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/api/catalog/{spec_id}/runs/{run_id}/metrics", response_model=None)
+    def run_metric_groups(
+        spec_id: str,
+        run_id: str,
+        step_start: Annotated[int | None, Query()] = None,
+        step_end: Annotated[int | None, Query()] = None,
+        max_points: Annotated[int, Query(ge=10, le=1000)] = 160,
+        node_id: Annotated[str | None, Query()] = None,
+        frame_id: Annotated[str | None, Query()] = None,
+    ) -> object:
+        try:
+            return service.get_run_metric_groups(
+                spec_id=spec_id,
+                run_id=run_id,
+                step_start=step_start,
+                step_end=step_end,
+                max_points=max_points,
+                node_id=node_id,
+                frame_id=frame_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - thin API wrapper
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/api/runs/{graph_id}/{run_id}/graph", response_model=None)
     def run_graph(graph_id: str, run_id: str) -> object:
         try:
@@ -568,6 +607,7 @@ def create_dashboard_app(
         frame_id: Annotated[str | None, Query()] = None,
         cursor: Annotated[str | None, Query()] = None,
         limit: Annotated[int, Query(ge=1, le=1000)] = 250,
+        include_payload: Annotated[bool, Query()] = False,
     ) -> object:
         try:
             page = service.get_run_records_page(
@@ -577,6 +617,7 @@ def create_dashboard_app(
                 frame_id=frame_id,
                 cursor=cursor,
                 limit=limit,
+                include_payload=include_payload,
             )
             return _page_to_json(page)
         except Exception as exc:  # pragma: no cover - thin API wrapper

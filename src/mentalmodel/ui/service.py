@@ -22,6 +22,12 @@ from mentalmodel.invocation import (
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.dashboard_metrics import (
+    IndexedMetricRow,
+    evaluate_metric_groups,
+    metric_rows_from_live_records,
+    metric_rows_from_outputs_payload,
+)
 from mentalmodel.observability.export import execution_record_to_json
 from mentalmodel.pagination import PageSlice, paginate_descending_sequence
 from mentalmodel.remote.backend import (
@@ -31,7 +37,11 @@ from mentalmodel.remote.backend import (
     RemoteProjectStore,
     RemoteRunStore,
 )
-from mentalmodel.remote.contracts import ProjectCatalog, RemoteLiveSessionRecord
+from mentalmodel.remote.contracts import (
+    ProjectCatalog,
+    RemoteLiveSessionRecord,
+    RemoteProjectRecord,
+)
 from mentalmodel.remote.workspace import (
     ProjectRunTarget,
     build_project_run_target,
@@ -39,7 +49,6 @@ from mentalmodel.remote.workspace import (
 )
 from mentalmodel.runtime.replay import build_replay_report
 from mentalmodel.runtime.runs import (
-    RunFrameScope,
     RunSummary,
     list_run_summaries,
     load_run_graph,
@@ -60,6 +69,7 @@ from mentalmodel.ui.catalog import (
     DashboardCatalogError,
     catalog_entry_from_spec_path,
     default_dashboard_catalog,
+    resolve_catalog_entry,
     validate_dashboard_catalog,
 )
 from mentalmodel.ui.custom_views import (
@@ -78,6 +88,15 @@ from mentalmodel.ui.run_handles import (
     persisted_run_handle,
 )
 from mentalmodel.ui.workspace import flatten_project_catalogs
+
+REMOTE_PROJECT_CACHE_TTL_MS = 2_000
+RUN_QUERY_CACHE_TTL_MS = 1_000
+TIMESERIES_CACHE_TTL_MS = 2_000
+METRIC_GROUPS_CACHE_TTL_MS = 2_000
+REMOTE_LIVE_SESSION_CACHE_TTL_MS = 1_000
+RUN_OVERVIEW_CACHE_TTL_MS = 1_000
+CATALOG_GRAPH_CACHE_TTL_MS = 30_000
+RUN_DETAIL_CACHE_TTL_MS = 1_000
 
 
 def _merge_catalog_entries(
@@ -294,17 +313,42 @@ class DashboardService:
         self._dynamic_catalog: dict[str, DashboardCatalogEntry] = {}
         self._sessions: dict[str, DashboardExecutionSession] = {}
         self._lock = threading.Lock()
+        self._remote_projects_cache: tuple[int, tuple[RemoteProjectRecord, ...]] | None = None
+        self._remote_catalog_cache: tuple[int, tuple[DashboardCatalogEntry, ...]] | None = None
+        self._project_list_cache: tuple[int, tuple[dict[str, JsonValue], ...]] | None = None
+        self._catalog_cache: tuple[int, tuple[DashboardCatalogEntry, ...]] | None = None
+        self._run_list_cache: dict[object, tuple[int, tuple[dict[str, JsonValue], ...]]] = {}
+        self._metric_groups_cache: dict[object, tuple[int, dict[str, JsonValue]]] = {}
+        self._timeseries_cache: dict[object, tuple[int, dict[str, JsonValue]]] = {}
+        self._catalog_graph_cache: dict[str, tuple[int, dict[str, JsonValue]]] = {}
+        self._run_overview_cache: dict[tuple[str, str], tuple[int, dict[str, JsonValue]]] = {}
+        self._run_records_page_cache: dict[object, tuple[int, PageSlice[dict[str, JsonValue]]]] = {}
+        self._run_spans_page_cache: dict[object, tuple[int, PageSlice[dict[str, JsonValue]]]] = {}
+        self._node_detail_cache: dict[object, tuple[int, dict[str, JsonValue]]] = {}
+        self._remote_live_session_cache: dict[
+            tuple[str, str, bool], tuple[int, RemoteLiveSessionRecord]
+        ] = {}
 
     def list_catalog(self) -> tuple[DashboardCatalogEntry, ...]:
-        return validate_dashboard_catalog(
+        now_ms = int(time.time() * 1000)
+        cached = self._catalog_cache
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
+        merged = validate_dashboard_catalog(
             _merge_catalog_entries(
                 self._static_catalog,
                 self._remote_catalog_entries(),
                 tuple(self._dynamic_catalog.values()),
             )
         )
+        self._catalog_cache = (now_ms + REMOTE_PROJECT_CACHE_TTL_MS, merged)
+        return merged
 
     def list_projects(self) -> tuple[dict[str, JsonValue], ...]:
+        now_ms = int(time.time() * 1000)
+        cached = self._project_list_cache
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         projects_by_id: dict[str, dict[str, JsonValue]] = {}
         for project_catalog in self._project_catalogs:
             projects_by_id[project_catalog.project.project_id] = {
@@ -331,7 +375,7 @@ class DashboardService:
                 "remote_health": None,
             }
         if self.remote_project_store is not None:
-            for project in self.remote_project_store.list_projects():
+            for project in self._list_remote_projects():
                 remote_health = (
                     None
                     if self.remote_event_store is None
@@ -367,7 +411,9 @@ class DashboardService:
                     "default_verify_spec": project.default_verify_spec,
                     "remote_health": remote_health,
                 }
-        return tuple(projects_by_id.values())
+        result = tuple(projects_by_id.values())
+        self._project_list_cache = (now_ms + REMOTE_PROJECT_CACHE_TTL_MS, result)
+        return result
 
     def list_remote_events(
         self,
@@ -392,8 +438,12 @@ class DashboardService:
     def _remote_catalog_entries(self) -> tuple[DashboardCatalogEntry, ...]:
         if self.remote_project_store is None:
             return ()
+        now_ms = int(time.time() * 1000)
+        cached = self._remote_catalog_cache
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         entries: list[DashboardCatalogEntry] = []
-        for project in self.remote_project_store.list_projects():
+        for project in self._list_remote_projects():
             if project.project_id in self._project_catalog_by_id:
                 continue
             snapshot = project.catalog_snapshot
@@ -409,7 +459,9 @@ class DashboardService:
                         catalog_source="remote-snapshot",
                     )
                 )
-        return tuple(entries)
+        result = tuple(entries)
+        self._remote_catalog_cache = (now_ms + REMOTE_PROJECT_CACHE_TTL_MS, result)
+        return result
 
     def _resolve_entry(self, spec_id: str) -> DashboardCatalogEntry:
         for entry in self.list_catalog():
@@ -422,7 +474,96 @@ class DashboardService:
 
         entry = self._catalog_entry_from_path(spec_path)
         self._dynamic_catalog[entry.spec_id] = entry
+        self.invalidate_remote_cache()
         return entry
+
+    def invalidate_remote_cache(self) -> None:
+        self._remote_projects_cache = None
+        self._remote_catalog_cache = None
+        self._project_list_cache = None
+        self._catalog_cache = None
+        self._run_list_cache.clear()
+        self._metric_groups_cache.clear()
+        self._timeseries_cache.clear()
+        self._catalog_graph_cache.clear()
+        self._run_overview_cache.clear()
+        self._run_records_page_cache.clear()
+        self._run_spans_page_cache.clear()
+        self._node_detail_cache.clear()
+        self._remote_live_session_cache.clear()
+
+    def invalidate_remote_project_catalog(self) -> None:
+        self._remote_projects_cache = None
+        self._remote_catalog_cache = None
+        self._project_list_cache = None
+        self._catalog_cache = None
+        self._run_list_cache.clear()
+
+    def invalidate_remote_run(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> None:
+        self._run_list_cache = {
+            key: value
+            for key, value in self._run_list_cache.items()
+            if not (isinstance(key, tuple) and key and key[0] == graph_id)
+        }
+        self._metric_groups_cache = {
+            key: value
+            for key, value in self._metric_groups_cache.items()
+            if not (isinstance(key, tuple) and len(key) > 1 and key[1] == run_id)
+        }
+        self._timeseries_cache = {
+            key: value
+            for key, value in self._timeseries_cache.items()
+            if not (
+                isinstance(key, tuple)
+                and key
+                and key[0] == graph_id
+                and (len(key) < 6 or key[5] in (None, run_id))
+            )
+        }
+        self._run_overview_cache = {
+            key: value
+            for key, value in self._run_overview_cache.items()
+            if key != (graph_id, run_id)
+        }
+        self._run_records_page_cache = {
+            key: value
+            for key, value in self._run_records_page_cache.items()
+            if not (isinstance(key, tuple) and key[:2] == (graph_id, run_id))
+        }
+        self._run_spans_page_cache = {
+            key: value
+            for key, value in self._run_spans_page_cache.items()
+            if not (isinstance(key, tuple) and key[:2] == (graph_id, run_id))
+        }
+        self._node_detail_cache = {
+            key: value
+            for key, value in self._node_detail_cache.items()
+            if not (isinstance(key, tuple) and key[:2] == (graph_id, run_id))
+        }
+        self._remote_live_session_cache = {
+            key: value
+            for key, value in self._remote_live_session_cache.items()
+            if not (isinstance(key, tuple) and key[:2] == (graph_id, run_id))
+        }
+
+    def _list_remote_projects(self) -> tuple[RemoteProjectRecord, ...]:
+        if self.remote_project_store is None:
+            return ()
+        now_ms = int(time.time() * 1000)
+        cached = self._remote_projects_cache
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
+        projects = tuple(self.remote_project_store.list_projects())
+        self._remote_projects_cache = (
+            now_ms + REMOTE_PROJECT_CACHE_TTL_MS,
+            projects,
+        )
+        return projects
 
     def start_execution_from_path(self, spec_path: Path) -> DashboardExecutionSession:
         """Register the spec (if needed) and start verification in a background thread."""
@@ -431,29 +572,48 @@ class DashboardService:
         return self._start_execution_with_entry(entry)
 
     def load_catalog_graph(self, spec_id: str) -> dict[str, JsonValue]:
+        now_ms = int(time.time() * 1000)
+        cached = self._catalog_graph_cache.get(spec_id)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         entry = self._resolve_entry(spec_id)
         if not entry.launch_enabled:
-            return {
+            result = {
                 "catalog_entry": _as_json_object(entry.as_dict()),
                 **self._remote_catalog_graph_payload(entry),
             }
+            self._catalog_graph_cache[spec_id] = (
+                now_ms + CATALOG_GRAPH_CACHE_TTL_MS,
+                result,
+            )
+            return result
         external_project = self._external_project_for_entry(entry)
         if external_project is not None:
             payload = self._load_external_catalog_graph(entry, external_project.project.root_dir)
-            return {
+            result = {
                 "catalog_entry": _as_json_object(entry.as_dict()),
                 "graph": _as_json_object(payload["graph"]),
                 "analysis": _as_json_object(payload["analysis"]),
             }
+            self._catalog_graph_cache[spec_id] = (
+                now_ms + CATALOG_GRAPH_CACHE_TTL_MS,
+                result,
+            )
+            return result
         invocation = read_verify_invocation_spec(entry.spec_path)
         _, program = load_workflow_subject(invocation.program)
         graph = lower_program(program)
         analysis = run_analysis(graph)
-        return {
+        result = {
             "catalog_entry": _as_json_object(entry.as_dict()),
             "graph": _graph_to_payload(graph),
             "analysis": _analysis_to_payload(analysis),
         }
+        self._catalog_graph_cache[spec_id] = (
+            now_ms + CATALOG_GRAPH_CACHE_TTL_MS,
+            result,
+        )
+        return result
 
     def _start_execution_with_entry(
         self,
@@ -513,6 +673,11 @@ class DashboardService:
         graph_id: str | None = None,
         invocation_name: str | None = None,
     ) -> tuple[dict[str, JsonValue], ...]:
+        cache_key = (graph_id, invocation_name)
+        now_ms = int(time.time() * 1000)
+        cached = self._run_list_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         summaries = (
             self.remote_run_store.list_run_summaries(
                 graph_id=graph_id,
@@ -564,7 +729,10 @@ class DashboardService:
             if run_id not in seen:
                 merged.append(handle)
         merged.sort(key=lambda handle: (handle.created_at_ms, handle.run_id), reverse=True)
-        return tuple(handle.as_dict() for handle in merged)
+        result = tuple(handle.as_dict() for handle in merged)
+        self._run_list_cache[cache_key] = (now_ms + RUN_QUERY_CACHE_TTL_MS, result)
+        self._prune_query_caches()
+        return result
 
     def get_run_graph(self, *, graph_id: str, run_id: str) -> dict[str, JsonValue]:
         session = self._session_for_run(graph_id=graph_id, run_id=run_id)
@@ -573,7 +741,11 @@ class DashboardService:
             and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
         ):
             return self._graph_payload_for_entry(session.spec)
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+        remote_live = self._remote_live_session_for_run(
+            graph_id=graph_id,
+            run_id=run_id,
+            include_payloads=False,
+        )
         if (
             remote_live is not None
             and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
@@ -588,6 +760,11 @@ class DashboardService:
         return _graph_to_payload(graph)
 
     def get_run_overview(self, *, graph_id: str, run_id: str) -> dict[str, JsonValue]:
+        now_ms = int(time.time() * 1000)
+        cache_key = (graph_id, run_id)
+        cached = self._run_overview_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         session = self._session_for_run(graph_id=graph_id, run_id=run_id)
         if (
             session is not None
@@ -596,7 +773,7 @@ class DashboardService:
             handle = self._active_run_handle(session)
             if handle is None:
                 raise RunInspectionError(f"Run {run_id!r} is not available.")
-            return {
+            active_result: dict[str, JsonValue] = {
                 "summary": handle.as_dict(),
                 "verification": None,
                 "verification_success": None,
@@ -606,22 +783,34 @@ class DashboardService:
                 "invariants": [],
                 "remote_delivery": None,
             }
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
+            self._run_overview_cache[cache_key] = (
+                now_ms + RUN_OVERVIEW_CACHE_TTL_MS,
+                active_result,
+            )
+            self._prune_query_caches()
+            return active_result
+        remote_live = self._remote_live_session_for_run(
+            graph_id=graph_id,
+            run_id=run_id,
+            include_payloads=False,
+        )
         if (
             remote_live is not None
             and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
         ):
-            return {
+            assert self.remote_live_session_store is not None
+            live_result: dict[str, JsonValue] = {
                 "summary": self._remote_live_run_handle(remote_live).as_dict(),
                 "verification": None,
                 "verification_success": None,
                 "runtime_error": remote_live.error,
                 "graph": _graph_payload_from_live_session(remote_live),
-                "metrics": _as_json_list(
-                    _derive_numeric_metrics_from_live_records(remote_live.records)
-                ),
+                "metrics": [],
                 "invariants": _as_json_list(
-                    _invariants_from_live_records(remote_live.records)
+                    self.remote_live_session_store.list_invariants(
+                        graph_id=graph_id,
+                        run_id=run_id,
+                    )
                 ),
                 "remote_delivery": (
                     None
@@ -635,6 +824,12 @@ class DashboardService:
                     )
                 ),
             }
+            self._run_overview_cache[cache_key] = (
+                now_ms + RUN_OVERVIEW_CACHE_TTL_MS,
+                live_result,
+            )
+            self._prune_query_caches()
+            return live_result
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         summary = resolve_run_summary(
             runs_dir=history_runs_dir,
@@ -647,39 +842,23 @@ class DashboardService:
             run_id=run_id,
             filename="verification.json",
         )
-        replay = build_replay_report(
-            runs_dir=history_runs_dir,
-            graph_id=graph_id,
-            run_id=run_id,
-        )
         graph = self.get_run_graph(graph_id=graph_id, run_id=run_id)
-        metrics = self._derive_numeric_output_metrics(graph_id=graph_id, run_id=run_id)
         verification_success = (
             verification.get("success")
             if isinstance(verification, dict)
             and isinstance(verification.get("success"), bool)
             else None
         )
-        return {
+        persisted_result: dict[str, JsonValue] = {
             "summary": persisted_run_handle(summary).as_dict(),
             "verification": verification,
             "verification_success": verification_success,
-            "runtime_error": replay.runtime_error,
+            "runtime_error": _runtime_error_from_verification(verification),
             "graph": graph,
-            "metrics": _as_json_list(metrics),
-            "invariants": _as_json_list([
-                {
-                    "node_id": node.node_id,
-                    "frame_id": node.frame_id,
-                    "loop_node_id": node.loop_node_id,
-                    "iteration_index": node.iteration_index,
-                    "status": node.invariant_status,
-                    "passed": node.invariant_passed,
-                    "severity": node.invariant_severity,
-                }
-                for node in replay.node_summaries
-                if node.invariant_status is not None
-            ]),
+            "metrics": [],
+            "invariants": _as_json_list(
+                self._load_persisted_invariants(graph_id=graph_id, run_id=run_id)
+            ),
             "remote_delivery": (
                 None
                 if self.remote_event_store is None
@@ -692,6 +871,12 @@ class DashboardService:
                 )
             ),
         }
+        self._run_overview_cache[cache_key] = (
+            now_ms + RUN_OVERVIEW_CACHE_TTL_MS,
+            persisted_result,
+        )
+        self._prune_query_caches()
+        return persisted_result
 
     def get_run_custom_view(
         self,
@@ -735,6 +920,137 @@ class DashboardService:
             view=view,
         )
         return _as_json_object(evaluated.as_dict())
+
+    def get_run_metric_groups(
+        self,
+        *,
+        spec_id: str,
+        run_id: str,
+        step_start: int | None,
+        step_end: int | None,
+        max_points: int,
+        node_id: str | None = None,
+        frame_id: str | None = None,
+    ) -> dict[str, JsonValue]:
+        cache_key = (
+            spec_id,
+            run_id,
+            step_start,
+            step_end,
+            max_points,
+            node_id,
+            frame_id,
+        )
+        now_ms = int(time.time() * 1000)
+        cached = self._metric_groups_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
+        entry = resolve_catalog_entry(spec_id, self.list_catalog())
+        session = self._session_for_run(graph_id=entry.graph_id, run_id=run_id)
+        if (
+            session is not None
+            and not self._has_persisted_history(graph_id=entry.graph_id, run_id=run_id)
+        ):
+            groups = evaluate_metric_groups(
+                groups=entry.metric_groups,
+                metric_rows=metric_rows_from_live_records(
+                    cast(Sequence[dict[str, object]], session.records)
+                ),
+                step_start=step_start,
+                step_end=step_end,
+                node_id=node_id,
+                frame_id=frame_id,
+                max_points=max_points,
+            )
+            live_session_result: dict[str, JsonValue] = {
+                "graph_id": entry.graph_id,
+                "run_id": run_id,
+                "spec_id": entry.spec_id,
+                "groups": _as_json_list(groups),
+            }
+            self._metric_groups_cache[cache_key] = (
+                now_ms + METRIC_GROUPS_CACHE_TTL_MS,
+                live_session_result,
+            )
+            self._prune_query_caches()
+            return live_session_result
+        remote_live = self._remote_live_session_for_run(
+            graph_id=entry.graph_id,
+            run_id=run_id,
+            include_payloads=False,
+        )
+        if (
+            remote_live is not None
+            and not self._has_persisted_history(graph_id=entry.graph_id, run_id=run_id)
+        ):
+            assert self.remote_live_session_store is not None
+            groups = evaluate_metric_groups(
+                groups=entry.metric_groups,
+                metric_rows=self.remote_live_session_store.list_metrics(
+                    graph_id=entry.graph_id,
+                    run_id=run_id,
+                    step_start=step_start,
+                    step_end=step_end,
+                    node_id=node_id,
+                    frame_id=frame_id,
+                    path_prefixes=tuple(
+                        prefix
+                        for group in entry.metric_groups
+                        for prefix in group.metric_path_prefixes
+                    ),
+                ),
+                step_start=step_start,
+                step_end=step_end,
+                node_id=node_id,
+                frame_id=frame_id,
+                max_points=max_points,
+            )
+            remote_live_result: dict[str, JsonValue] = {
+                "graph_id": entry.graph_id,
+                "run_id": run_id,
+                "spec_id": entry.spec_id,
+                "groups": _as_json_list(groups),
+            }
+            self._metric_groups_cache[cache_key] = (
+                now_ms + METRIC_GROUPS_CACHE_TTL_MS,
+                remote_live_result,
+            )
+            self._prune_query_caches()
+            return remote_live_result
+        metric_rows = self._load_persisted_metric_rows(
+            graph_id=entry.graph_id,
+            run_id=run_id,
+            step_start=step_start,
+            step_end=step_end,
+            node_id=node_id,
+            frame_id=frame_id,
+            path_prefixes=tuple(
+                prefix
+                for group in entry.metric_groups
+                for prefix in group.metric_path_prefixes
+            ),
+        )
+        groups = evaluate_metric_groups(
+            groups=entry.metric_groups,
+            metric_rows=metric_rows,
+            step_start=step_start,
+            step_end=step_end,
+            node_id=node_id,
+            frame_id=frame_id,
+            max_points=max_points,
+        )
+        persisted_result: dict[str, JsonValue] = {
+            "graph_id": entry.graph_id,
+            "run_id": run_id,
+            "spec_id": entry.spec_id,
+            "groups": _as_json_list(groups),
+        }
+        self._metric_groups_cache[cache_key] = (
+            now_ms + METRIC_GROUPS_CACHE_TTL_MS,
+            persisted_result,
+        )
+        self._prune_query_caches()
+        return persisted_result
 
     def get_run_records(
         self,
@@ -780,7 +1096,13 @@ class DashboardService:
         limit: int,
         node_id: str | None = None,
         frame_id: str | None = None,
+        include_payload: bool = True,
     ) -> PageSlice[dict[str, JsonValue]]:
+        cache_key = (graph_id, run_id, cursor, limit, node_id, frame_id, include_payload)
+        now_ms = int(time.time() * 1000)
+        cached = self._run_records_page_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         session = self._session_for_run(graph_id=graph_id, run_id=run_id)
         if (
             session is not None
@@ -792,36 +1114,61 @@ class DashboardService:
                 if (node_id is None or record.get("node_id") == node_id)
                 and (frame_id is None or record.get("frame_id") == frame_id)
             )
-            return paginate_descending_sequence(
-                filtered,
+            items = (
+                filtered
+                if include_payload
+                else tuple(_record_without_payload(record) for record in filtered)
+            )
+            result = paginate_descending_sequence(
+                items,
                 sequence_for=_record_sequence,
                 cursor=cursor,
                 limit=limit,
             )
+            self._run_records_page_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                result,
+            )
+            self._prune_query_caches()
+            return result
         remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
         if remote_live is not None and self.remote_live_session_store is not None:
-            return self.remote_live_session_store.get_records_page(
+            result = self.remote_live_session_store.get_records_page(
                 graph_id=graph_id,
                 run_id=run_id,
                 cursor=cursor,
                 limit=limit,
                 node_id=node_id,
                 frame_id=frame_id,
+                include_payload=include_payload,
             )
+            self._run_records_page_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                result,
+            )
+            self._prune_query_caches()
+            return result
         if (
             self.remote_run_store is not None
             and self.remote_run_store.contains_run(graph_id=graph_id, run_id=run_id)
         ):
-            return self.remote_run_store.get_records_page(
+            result = self.remote_run_store.get_records_page(
                 graph_id=graph_id,
                 run_id=run_id,
                 cursor=cursor,
                 limit=limit,
                 node_id=node_id,
                 frame_id=frame_id,
+                include_payload=include_payload,
             )
+            self._run_records_page_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                result,
+            )
+            self._prune_query_caches()
+            return result
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
-        return load_run_records_page(
+        page = load_run_records_page(
             runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
@@ -829,7 +1176,14 @@ class DashboardService:
             frame_id=frame_id,
             cursor=cursor,
             limit=limit,
+            include_payload=include_payload,
         )
+        self._run_records_page_cache[cache_key] = (
+            now_ms + RUN_DETAIL_CACHE_TTL_MS,
+            page,
+        )
+        self._prune_query_caches()
+        return page
 
     def get_run_spans(
         self,
@@ -878,6 +1232,11 @@ class DashboardService:
         node_id: str | None = None,
         frame_id: str | None = None,
     ) -> PageSlice[dict[str, JsonValue]]:
+        cache_key = (graph_id, run_id, cursor, limit, node_id, frame_id)
+        now_ms = int(time.time() * 1000)
+        cached = self._run_spans_page_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         session = self._session_for_run(graph_id=graph_id, run_id=run_id)
         if (
             session is not None
@@ -889,15 +1248,21 @@ class DashboardService:
                 if (node_id is None or _span_node_id(span) == node_id)
                 and (frame_id is None or _span_frame_id(span) == frame_id)
             )
-            return paginate_descending_sequence(
+            result = paginate_descending_sequence(
                 filtered,
                 sequence_for=_span_sequence,
                 cursor=cursor,
                 limit=limit,
             )
+            self._run_spans_page_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                result,
+            )
+            self._prune_query_caches()
+            return result
         remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
         if remote_live is not None and self.remote_live_session_store is not None:
-            return self.remote_live_session_store.get_spans_page(
+            result = self.remote_live_session_store.get_spans_page(
                 graph_id=graph_id,
                 run_id=run_id,
                 cursor=cursor,
@@ -905,11 +1270,17 @@ class DashboardService:
                 node_id=node_id,
                 frame_id=frame_id,
             )
+            self._run_spans_page_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                result,
+            )
+            self._prune_query_caches()
+            return result
         if (
             self.remote_run_store is not None
             and self.remote_run_store.contains_run(graph_id=graph_id, run_id=run_id)
         ):
-            return self.remote_run_store.get_spans_page(
+            result = self.remote_run_store.get_spans_page(
                 graph_id=graph_id,
                 run_id=run_id,
                 cursor=cursor,
@@ -917,8 +1288,14 @@ class DashboardService:
                 node_id=node_id,
                 frame_id=frame_id,
             )
+            self._run_spans_page_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                result,
+            )
+            self._prune_query_caches()
+            return result
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
-        return load_run_spans_page(
+        result = load_run_spans_page(
             runs_dir=history_runs_dir,
             graph_id=graph_id,
             run_id=run_id,
@@ -927,6 +1304,12 @@ class DashboardService:
             cursor=cursor,
             limit=limit,
         )
+        self._run_spans_page_cache[cache_key] = (
+            now_ms + RUN_DETAIL_CACHE_TTL_MS,
+            result,
+        )
+        self._prune_query_caches()
+        return result
 
     def get_run_replay(
         self,
@@ -971,6 +1354,11 @@ class DashboardService:
         node_id: str,
         frame_id: str | None = None,
     ) -> dict[str, JsonValue]:
+        cache_key = (graph_id, run_id, node_id, frame_id)
+        now_ms = int(time.time() * 1000)
+        cached = self._node_detail_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         session = self._session_for_run(graph_id=graph_id, run_id=run_id)
         if (
             session is not None
@@ -982,7 +1370,7 @@ class DashboardService:
                 if record.get("node_id") == node_id
                 and (frame_id is None or record.get("frame_id") == frame_id)
             )
-            return {
+            active_result: dict[str, JsonValue] = {
                 "node_id": node_id,
                 "frame_id": frame_id,
                 **_active_node_io_payload(
@@ -1005,6 +1393,12 @@ class DashboardService:
                     )
                 ),
             }
+            self._node_detail_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                active_result,
+            )
+            self._prune_query_caches()
+            return active_result
         remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
         if (
             remote_live is not None
@@ -1016,7 +1410,7 @@ class DashboardService:
                 if record.get("node_id") == node_id
                 and (frame_id is None or record.get("frame_id") == frame_id)
             )
-            return {
+            remote_result: dict[str, JsonValue] = {
                 "node_id": node_id,
                 "frame_id": frame_id,
                 **_active_node_io_payload(
@@ -1039,6 +1433,12 @@ class DashboardService:
                     _available_frames_from_records(records=filtered_records)
                 ),
             }
+            self._node_detail_cache[cache_key] = (
+                now_ms + RUN_DETAIL_CACHE_TTL_MS,
+                remote_result,
+            )
+            self._prune_query_caches()
+            return remote_result
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         detail: dict[str, JsonValue] = {
             "node_id": node_id,
@@ -1085,6 +1485,11 @@ class DashboardService:
                 node_id=node_id,
             )
         )
+        self._node_detail_cache[cache_key] = (
+            now_ms + RUN_DETAIL_CACHE_TTL_MS,
+            detail,
+        )
+        self._prune_query_caches()
         return detail
 
     def _matching_sessions(
@@ -1134,14 +1539,27 @@ class DashboardService:
         *,
         graph_id: str,
         run_id: str,
+        include_payloads: bool = True,
     ) -> RemoteLiveSessionRecord | None:
         if self.remote_live_session_store is None:
             return None
+        now_ms = int(time.time() * 1000)
+        cache_key = (graph_id, run_id, include_payloads)
+        cached = self._remote_live_session_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
         try:
-            return self.remote_live_session_store.get_session(
+            session = self.remote_live_session_store.get_session(
                 graph_id=graph_id,
                 run_id=run_id,
+                include_payloads=include_payloads,
             )
+            self._remote_live_session_cache[cache_key] = (
+                now_ms + REMOTE_LIVE_SESSION_CACHE_TTL_MS,
+                session,
+            )
+            self._prune_query_caches()
+            return session
         except RunInspectionError:
             return None
 
@@ -1650,63 +2068,89 @@ class DashboardService:
             raise DashboardCatalogError("External project helper must return a JSON object.")
         return cast(dict[str, object], decoded)
 
-    def _derive_numeric_output_metrics(
+    def _load_persisted_metric_rows(
         self,
         *,
         graph_id: str,
         run_id: str,
-    ) -> list[dict[str, JsonValue]]:
+        step_start: int | None,
+        step_end: int | None,
+        node_id: str | None,
+        frame_id: str | None,
+        path_prefixes: Sequence[str],
+    ) -> tuple[IndexedMetricRow, ...]:
+        if (
+            self.remote_run_store is not None
+            and self.remote_run_store.contains_run(graph_id=graph_id, run_id=run_id)
+        ):
+            return self.remote_run_store.list_metrics(
+                graph_id=graph_id,
+                run_id=run_id,
+                step_start=step_start,
+                step_end=step_end,
+                node_id=node_id,
+                frame_id=frame_id,
+                path_prefixes=path_prefixes,
+            )
         outputs_payload = load_run_payload(
             runs_dir=self._history_runs_dir(graph_id=graph_id, run_id=run_id),
             graph_id=graph_id,
             run_id=run_id,
             filename="outputs.json",
         )
-        metrics: list[dict[str, JsonValue]] = []
-        outputs = outputs_payload.get("outputs")
-        if isinstance(outputs, dict):
-            for node_id, output in outputs.items():
-                if not isinstance(node_id, str):
-                    continue
-                metrics.extend(
-                    _metrics_from_output(
-                        node_id=node_id,
-                        output=output,
-                        frame_scope=RunFrameScope(frame_id="root"),
+        rows = metric_rows_from_outputs_payload(outputs_payload)
+        return tuple(
+            row
+            for row in rows
+            if (node_id is None or row.node_id == node_id)
+            and (frame_id is None or row.frame_id == frame_id)
+            and (
+                step_start is None
+                or row.iteration_index is None
+                or row.iteration_index >= step_start
+            )
+            and (
+                step_end is None
+                or row.iteration_index is None
+                or row.iteration_index <= step_end
+            )
+            and (
+                not path_prefixes
+                or any(
+                    row.path.startswith(prefix)
+                    or row.metric_node_path.startswith(prefix)
+                    or row.label.startswith(prefix)
+                    or row.normalized_label.startswith(prefix)
+                    for prefix in path_prefixes
+                )
+            )
+        )
+
+    def _load_persisted_invariants(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+    ) -> list[dict[str, JsonValue]]:
+        if self.remote_run_store is not None and self.remote_run_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
+        ):
+            try:
+                return _invariants_from_live_records(
+                    self.remote_run_store.list_invariants(
+                        graph_id=graph_id,
+                        run_id=run_id,
                     )
                 )
-        framed_outputs = outputs_payload.get("framed_outputs")
-        if isinstance(framed_outputs, list):
-            for item in framed_outputs:
-                if not isinstance(item, dict):
-                    continue
-                framed_node_id: object = item.get("node_id")
-                framed_output: object = item.get("value")
-                frame_id: object = item.get("frame_id")
-                loop_node_id: object = item.get("loop_node_id")
-                iteration_index: object = item.get("iteration_index")
-                if not isinstance(framed_node_id, str) or not isinstance(frame_id, str):
-                    continue
-                if frame_id == "root":
-                    continue
-                metrics.extend(
-                    _metrics_from_output(
-                        node_id=framed_node_id,
-                        output=_as_json_value(framed_output),
-                        frame_scope=RunFrameScope(
-                            frame_id=frame_id,
-                            loop_node_id=(
-                                loop_node_id if isinstance(loop_node_id, str) else None
-                            ),
-                            iteration_index=(
-                                iteration_index
-                                if isinstance(iteration_index, int)
-                                else None
-                            ),
-                        ),
-                    )
-                )
-        return metrics
+            except RunInspectionError:
+                pass
+        records = load_run_records(
+            runs_dir=self._history_runs_dir(graph_id=graph_id, run_id=run_id),
+            graph_id=graph_id,
+            run_id=run_id,
+        )
+        return _invariants_from_live_records(records)
 
     def _apply_worker_event(
         self,
@@ -1798,6 +2242,19 @@ class DashboardService:
             )
         if since_ms >= until_ms or rollup_ms <= 0:
             raise ValueError("since_ms must be < until_ms and rollup_ms must be positive.")
+        cache_key = (
+            graph_id,
+            invocation_name,
+            since_ms,
+            until_ms,
+            rollup_ms,
+            run_id,
+            node_id,
+        )
+        now_ms = int(time.time() * 1000)
+        cached = self._timeseries_cache.get(cache_key)
+        if cached is not None and cached[0] > now_ms:
+            return cached[1]
 
         span = until_ms - since_ms
         max_buckets = 500
@@ -1918,7 +2375,7 @@ class DashboardService:
                 }
             )
 
-        return {
+        result: dict[str, JsonValue] = {
             "rollup_ms": rollup_ms,
             "since_ms": since_ms,
             "until_ms": until_ms,
@@ -1927,6 +2384,12 @@ class DashboardService:
             "buckets": _as_json_list(buckets),
             "runs_scanned": len(summaries),
         }
+        self._timeseries_cache[cache_key] = (
+            now_ms + TIMESERIES_CACHE_TTL_MS,
+            result,
+        )
+        self._prune_query_caches()
+        return result
 
     def _require_session(self, execution_id: str) -> DashboardExecutionSession:
         with self._lock:
@@ -1934,6 +2397,57 @@ class DashboardService:
         if session is None:
             raise KeyError(execution_id)
         return session
+
+    def _prune_query_caches(self) -> None:
+        now_ms = int(time.time() * 1000)
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._run_list_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._metric_groups_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._timeseries_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._catalog_graph_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._run_overview_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._run_records_page_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._run_spans_page_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._node_detail_cache),
+            now_ms,
+        )
+        self._prune_cache_mapping(
+            cast(dict[object, tuple[int, object]], self._remote_live_session_cache),
+            now_ms,
+        )
+
+    def _prune_cache_mapping(
+        self,
+        cache: dict[object, tuple[int, object]],
+        now_ms: int,
+    ) -> None:
+        expired_keys = [key for key, value in cache.items() if value[0] <= now_ms]
+        for key in expired_keys:
+            del cache[key]
+        if len(cache) > 256:
+            for key in sorted(cache, key=lambda item: cache[item][0])[: len(cache) - 256]:
+                del cache[key]
 
     def _history_runs_dir(self, *, graph_id: str, run_id: str) -> Path | None:
         if self.remote_run_store is None:
@@ -2033,81 +2547,16 @@ def _safe_load_payload(
         return None
 
 
-def _flatten_numeric_values(
-    value: JsonValue,
-    *,
-    prefix: str = "",
-) -> list[tuple[str, int | float]]:
-    if isinstance(value, bool) or value is None or isinstance(value, str):
-        return []
-    if isinstance(value, (int, float)):
-        return [(prefix, value)]
-    if isinstance(value, list):
-        return []
-    flattened: list[tuple[str, int | float]] = []
-    for key, inner in value.items():
-        child_prefix = key if not prefix else f"{prefix}.{key}"
-        flattened.extend(_flatten_numeric_values(inner, prefix=child_prefix))
-    return flattened
-
-
-def _metrics_from_output(
-    *,
-    node_id: str,
-    output: JsonValue,
-    frame_scope: RunFrameScope,
-) -> list[dict[str, JsonValue]]:
-    metrics: list[dict[str, JsonValue]] = []
-    for metric_path, metric_value in _flatten_numeric_values(output):
-        label = f"{node_id}.{metric_path}"
-        if frame_scope.frame_id is not None and frame_scope.frame_id != "root":
-            label = f"{frame_scope.frame_id}.{label}"
-        metrics.append(
-            {
-                "node_id": node_id,
-                "path": metric_path,
-                "value": metric_value,
-                "label": label,
-                "frame_id": frame_scope.frame_id,
-                "loop_node_id": frame_scope.loop_node_id,
-                "iteration_index": frame_scope.iteration_index,
-            }
-        )
-    return metrics
-
-
-def _derive_numeric_metrics_from_live_records(
-    records: Sequence[dict[str, object]],
-) -> list[dict[str, JsonValue]]:
-    metrics: list[dict[str, JsonValue]] = []
-    for record in records:
-        if record.get("event_type") != "node.succeeded":
-            continue
-        payload = record.get("payload")
-        node_id = record.get("node_id")
-        frame_id = record.get("frame_id")
-        if not isinstance(payload, dict) or not isinstance(node_id, str):
-            continue
-        output = payload.get("output")
-        if output is None:
-            continue
-        loop_node_id = record.get("loop_node_id")
-        iteration_index = record.get("iteration_index")
-        metrics.extend(
-            _metrics_from_output(
-                node_id=node_id,
-                output=_as_json_value(output),
-                frame_scope=RunFrameScope(
-                    frame_id=frame_id if isinstance(frame_id, str) else "root",
-                    loop_node_id=loop_node_id if isinstance(loop_node_id, str) else None,
-                    iteration_index=(
-                        iteration_index if isinstance(iteration_index, int) else None
-                    ),
-                ),
-            )
-        )
-    return metrics
-
+def _runtime_error_from_verification(
+    verification: dict[str, JsonValue] | None,
+) -> str | None:
+    if not isinstance(verification, dict):
+        return None
+    runtime = verification.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    error = runtime.get("error")
+    return error if isinstance(error, str) and error else None
 
 def _record_sequence(record: dict[str, JsonValue]) -> int:
     value = record.get("sequence")
@@ -2239,7 +2688,7 @@ def _live_run_replay_payload(
 
 
 def _invariants_from_live_records(
-    records: Sequence[dict[str, object]],
+    records: Sequence[dict[str, JsonValue]],
 ) -> list[dict[str, JsonValue]]:
     invariants: list[dict[str, JsonValue]] = []
     for record in records:
@@ -2365,6 +2814,10 @@ def _as_json_object(value: object) -> dict[str, JsonValue]:
 
 def _as_json_list(values: Sequence[object]) -> list[JsonValue]:
     return [_as_json_value(value) for value in values]
+
+
+def _record_without_payload(row: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {key: value for key, value in row.items() if key != "payload"}
 
 
 def _as_json_value(value: object) -> JsonValue:
