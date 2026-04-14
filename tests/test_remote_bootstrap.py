@@ -23,25 +23,47 @@ class RemoteBootstrapTest(unittest.TestCase):
             written_paths = {path.name for path in written}
             self.assertIn("workspace.toml", written_paths)
             self.assertIn("docker-compose.remote-minimal.yml", written_paths)
+            self.assertIn("otel-collector.remote.yml", written_paths)
             self.assertIn("run-dashboard.sh", written_paths)
             self.assertIn("start-stack.sh", written_paths)
             self.assertIn("stop-stack.sh", written_paths)
             self.assertIn("sync-local-runs.sh", written_paths)
+            self.assertIn("verify-live.sh", written_paths)
             self.assertIn("REMOTE-DEMO.md", written_paths)
-            self.assertTrue((output_dir / "otel" / "docker-compose.otel-lgtm.yml").exists())
             workspace = load_workspace_config(output_dir / "workspace.toml")
             self.assertEqual(len(workspace.projects), 1)
             self.assertEqual(workspace.projects[0].project_id, "mentalmodel-examples")
             env_text = (output_dir / "mentalmodel.remote.env").read_text(encoding="utf-8")
+            compose_text = (output_dir / "docker-compose.remote-minimal.yml").read_text(
+                encoding="utf-8"
+            )
+            collector_text = (output_dir / "otel-collector.remote.yml").read_text(
+                encoding="utf-8"
+            )
             self.assertIn("MENTALMODEL_REMOTE_DATABASE_URL=", env_text)
             self.assertIn("MENTALMODEL_REMOTE_OBJECT_STORE_BUCKET=", env_text)
+            self.assertIn("MENTALMODEL_REMOTE_LIVE_OTLP_ENDPOINT=", env_text)
+            self.assertIn("MENTALMODEL_REMOTE_KAFKA_BROKERS=", env_text)
+            self.assertIn("MENTALMODEL_REMOTE_CLICKHOUSE_ENDPOINT=", env_text)
+            self.assertIn("redpanda:", compose_text)
+            self.assertIn("clickhouse:", compose_text)
+            self.assertIn("otel-collector:", compose_text)
+            self.assertIn('topic: mentalmodel.telemetry.logs', collector_text)
+            self.assertIn('topic: mentalmodel.telemetry.traces', collector_text)
+            self.assertIn('topic: mentalmodel.telemetry.metrics', collector_text)
+            self.assertIn("storage: file_storage", collector_text)
             dashboard_script = (output_dir / "run-dashboard.sh").read_text(encoding="utf-8")
             start_script = (output_dir / "start-stack.sh").read_text(encoding="utf-8")
             sync_script = (output_dir / "sync-local-runs.sh").read_text(encoding="utf-8")
+            live_verify_script = (output_dir / "verify-live.sh").read_text(
+                encoding="utf-8"
+            )
             self.assertIn("source \"$SCRIPT_DIR/mentalmodel.remote.env\"", dashboard_script)
             self.assertIn("docker compose", start_script)
             self.assertIn("uv run --directory", dashboard_script)
             self.assertIn("uv run --directory", sync_script)
+            self.assertIn("--live-otlp-endpoint", live_verify_script)
+            self.assertIn("--live-outbox-dir", live_verify_script)
 
     def test_write_remote_demo_does_not_resolve_external_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

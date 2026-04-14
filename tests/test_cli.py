@@ -1178,6 +1178,8 @@ class CliTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue((output_dir / "workspace.toml").exists())
             self.assertTrue((output_dir / "run-dashboard.sh").exists())
+            self.assertTrue((output_dir / "otel-collector.remote.yml").exists())
+            self.assertTrue((output_dir / "verify-live.sh").exists())
 
     def test_remote_doctor_command_outputs_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

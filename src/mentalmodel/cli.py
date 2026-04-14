@@ -1397,7 +1397,7 @@ def run_remote_write_demo(
     pangramanizer_root: Path | None = None,
     json_output: bool = False,
 ) -> int:
-    """Write a local remote-demo directory with workspace config and helper assets."""
+    """Write a collector-first local remote-demo directory with helper assets."""
 
     written = write_remote_demo(
         output_dir=output_dir,
@@ -1470,7 +1470,7 @@ def run_remote_up(
     frontend_dist: Path | None = None,
     frontend_dev_url: str | None = None,
 ) -> int:
-    """Start the generated remote backend services and launch the dashboard."""
+    """Start the generated collector-first backend services and launch the dashboard."""
 
     resolved_output = output_dir.expanduser().resolve()
     workspace_config = resolved_output / "workspace.toml"
@@ -1522,7 +1522,7 @@ def run_remote_down(
     *,
     output_dir: Path,
 ) -> int:
-    """Stop the generated remote backend services."""
+    """Stop the generated collector-first backend services."""
 
     resolved_output = output_dir.expanduser().resolve()
     compose_path = resolved_output / "docker-compose.remote-minimal.yml"
@@ -2753,7 +2753,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     remote_write_demo = remote_subparsers.add_parser(
         "write-demo",
-        help="Write a localhost remote-runs demo directory.",
+        help="Write a collector-first localhost remote stack directory.",
     )
     remote_write_demo.add_argument("--profile", choices=["minimal"], default="minimal")
     remote_write_demo.add_argument("--output-dir", type=Path, required=True)
@@ -2774,7 +2774,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     remote_up = remote_subparsers.add_parser(
         "up",
-        help="Start the generated remote backend services and launch the dashboard.",
+        help="Start the generated collector-first backend services and launch the dashboard.",
     )
     remote_up.add_argument("--output-dir", type=Path, required=True)
     remote_up.add_argument("--host", default="127.0.0.1")
@@ -2785,7 +2785,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     remote_down = remote_subparsers.add_parser(
         "down",
-        help="Stop the generated remote backend services.",
+        help="Stop the generated collector-first backend services.",
     )
     remote_down.add_argument("--output-dir", type=Path, required=True)
 

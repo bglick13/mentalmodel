@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from mentalmodel.doctor import DoctorCheck, DoctorReport, DoctorStatus
-from mentalmodel.observability import write_otel_demo
 from mentalmodel.remote.contracts import ProjectRegistration, WorkspaceConfig
 from mentalmodel.remote.workspace import load_workspace_config, write_workspace_config
 from mentalmodel.ui.workspace import workspace_project_catalogs
@@ -60,6 +59,9 @@ def write_remote_demo(
     compose_path = resolved_output / "docker-compose.remote-minimal.yml"
     compose_path.write_text(_remote_compose(), encoding="utf-8")
 
+    collector_config_path = resolved_output / "otel-collector.remote.yml"
+    collector_config_path.write_text(_collector_config(), encoding="utf-8")
+
     start_script = resolved_output / "start-stack.sh"
     start_script.write_text(
         _start_stack_script(),
@@ -84,7 +86,13 @@ def write_remote_demo(
     )
     sync_script.chmod(0o755)
 
-    otel_paths = write_otel_demo(output_dir=resolved_output / "otel", stack="lgtm")
+    live_verify_script = resolved_output / "verify-live.sh"
+    live_verify_script.write_text(
+        _verify_live_script(repo_root=_repo_root(mentalmodel_root)),
+        encoding="utf-8",
+    )
+    live_verify_script.chmod(0o755)
+
     readme_path = resolved_output / "REMOTE-DEMO.md"
     readme_path.write_text(
         _remote_demo_readme(
@@ -98,12 +106,13 @@ def write_remote_demo(
         workspace_path,
         env_path,
         compose_path,
+        collector_config_path,
         dashboard_script,
         start_script,
         stop_script,
         sync_script,
+        live_verify_script,
         readme_path,
-        *otel_paths,
     )
 
 
@@ -296,12 +305,13 @@ def _check_demo_assets(output_dir: Path) -> DoctorCheck:
     expected = (
         output_dir / "workspace.toml",
         output_dir / "docker-compose.remote-minimal.yml",
+        output_dir / "otel-collector.remote.yml",
         output_dir / "run-dashboard.sh",
         output_dir / "start-stack.sh",
         output_dir / "stop-stack.sh",
         output_dir / "sync-local-runs.sh",
+        output_dir / "verify-live.sh",
         output_dir / "REMOTE-DEMO.md",
-        output_dir / "otel" / "docker-compose.otel-lgtm.yml",
     )
     missing = [str(path) for path in expected if not path.exists()]
     if missing:
@@ -335,6 +345,10 @@ def _remote_env(*, workspace_path: Path, repo_root: Path) -> str:
             "MENTALMODEL_REMOTE_OBJECT_STORE_ACCESS_KEY=minio",
             "MENTALMODEL_REMOTE_OBJECT_STORE_SECRET_KEY=miniosecret",
             "MENTALMODEL_REMOTE_OBJECT_STORE_SECURE=false",
+            "MENTALMODEL_REMOTE_LIVE_OTLP_ENDPOINT=http://127.0.0.1:4318",
+            f"MENTALMODEL_REMOTE_LIVE_OUTBOX_DIR={output_dir / 'live-outbox'}",
+            "MENTALMODEL_REMOTE_KAFKA_BROKERS=127.0.0.1:19092",
+            "MENTALMODEL_REMOTE_CLICKHOUSE_ENDPOINT=http://127.0.0.1:8123",
             "",
         )
     )
@@ -380,6 +394,59 @@ def _remote_compose() -> str:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.1.4
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - "1G"
+      - --reserve-memory
+      - "0M"
+      - --check=false
+      - --node-id
+      - "0"
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://127.0.0.1:19092
+      - --pandaproxy-addr
+      - internal://0.0.0.0:8082
+      - --advertise-pandaproxy-addr
+      - internal://redpanda:8082
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy: true'"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: mentalmodel
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ports:
+      - "8123:8123"
+      - "9002:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'select 1'"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+
   minio:
     image: minio/minio:RELEASE.2025-02-28T09-55-16Z
     restart: unless-stopped
@@ -393,9 +460,105 @@ def _remote_compose() -> str:
     volumes:
       - minio-data:/data
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.125.0
+    restart: unless-stopped
+    command:
+      - "--config=/etc/otelcol-contrib/config.yaml"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "4318:4318"
+      - "13133:13133"
+    volumes:
+      - ./otel-collector.remote.yml:/etc/otelcol-contrib/config.yaml:ro
+      - otelcol-data:/var/lib/otelcol
+
 volumes:
   postgres-data:
+  redpanda-data:
+  clickhouse-data:
   minio-data:
+  otelcol-data:
+"""
+
+
+def _collector_config() -> str:
+    return """extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  file_storage:
+    directory: /var/lib/otelcol/file_storage
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    send_batch_size: 256
+    send_batch_max_size: 512
+    timeout: 1s
+
+exporters:
+  debug:
+    verbosity: basic
+  kafka/logs:
+    brokers: ["redpanda:9092"]
+    topic: mentalmodel.telemetry.logs
+    encoding: otlp_proto
+    sending_queue:
+      enabled: true
+      queue_size: 2048
+      storage: file_storage
+    retry_on_failure:
+      enabled: true
+  kafka/traces:
+    brokers: ["redpanda:9092"]
+    topic: mentalmodel.telemetry.traces
+    encoding: otlp_proto
+    sending_queue:
+      enabled: true
+      queue_size: 2048
+      storage: file_storage
+    retry_on_failure:
+      enabled: true
+  kafka/metrics:
+    brokers: ["redpanda:9092"]
+    topic: mentalmodel.telemetry.metrics
+    encoding: otlp_proto
+    sending_queue:
+      enabled: true
+      queue_size: 2048
+      storage: file_storage
+    retry_on_failure:
+      enabled: true
+
+service:
+  extensions: [health_check, file_storage]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [kafka/logs, debug]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [kafka/traces, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [kafka/metrics, debug]
 """
 
 
@@ -438,6 +601,30 @@ def _sync_script(*, server_url: str, repo_root: Path) -> str:
     )
 
 
+def _verify_live_script(*, repo_root: Path) -> str:
+    return "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'if [[ -f "$SCRIPT_DIR/mentalmodel.remote.env" ]]; then',
+            "  set -a",
+            '  source "$SCRIPT_DIR/mentalmodel.remote.env"',
+            "  set +a",
+            "fi",
+            'REPO_ROOT="${MENTALMODEL_REMOTE_REPO_ROOT:-'
+            + json.dumps(str(repo_root))
+            + '}"',
+            'LIVE_ENDPOINT="${MENTALMODEL_REMOTE_LIVE_OTLP_ENDPOINT:-http://127.0.0.1:4318}"',
+            'OUTBOX_DIR="${MENTALMODEL_REMOTE_LIVE_OUTBOX_DIR:-$SCRIPT_DIR/live-outbox}"',
+            'uv run --directory "$REPO_ROOT" mentalmodel verify '
+            '--live-otlp-endpoint "$LIVE_ENDPOINT" '
+            '--live-outbox-dir "$OUTBOX_DIR" "$@"',
+            "",
+        )
+    )
+
+
 def _remote_demo_readme(
     *,
     workspace: WorkspaceConfig,
@@ -456,19 +643,22 @@ def _remote_demo_readme(
     )
     return f"""# mentalmodel Remote Demo
 
-This directory bootstraps the current local development stack for the remote
-service model.
+This directory bootstraps the current local development stack for the
+collector-first remote ingestion path.
 
 ## What is here
 
-- `docker-compose.remote-minimal.yml`: local Postgres + MinIO backend services
+- `docker-compose.remote-minimal.yml`: local Postgres, MinIO, Redpanda,
+  ClickHouse, and OpenTelemetry Collector
+- `otel-collector.remote.yml`: collector config for OTLP receive, batching,
+  retry, and Kafka routing
 - `workspace.toml`: project registry for the shared local dashboard stack
 - `mentalmodel.remote.env`: wired backend credentials and dashboard config
 - `run-dashboard.sh`: launches `mentalmodel ui` against the generated local workspace
 - `start-stack.sh`: starts the backend services and then launches the dashboard
 - `stop-stack.sh`: stops the backend services
 - `sync-local-runs.sh`: uploads local `.runs` bundles into the shared stack
-- `otel/`: optional LGTM trace demo generated from `mentalmodel otel write-demo`
+- `verify-live.sh`: runs `mentalmodel verify` against the local OTLP collector
 
 Registered projects:
 
@@ -495,14 +685,19 @@ and then starts the shared dashboard/API with:
 uv run mentalmodel ui --runs-dir {output_dir / "data"} --workspace-config {workspace_path}
 ```
 
-2. Optional traces UI:
+2. Run a live-managed verify against the collector:
 
 ```bash
-cd {output_dir / "otel"}
-docker compose -f docker-compose.otel-lgtm.yml up -d
+cd {output_dir}
+./verify-live.sh --entrypoint mentalmodel.examples.async_rl.demo:build_program
 ```
 
-3. Materialize and sync runs from any registered project:
+This Phase 3 stack validates the producer -> collector -> Kafka-compatible bus
+path and provisions ClickHouse for the next indexing phase. The hosted
+dashboard still reads completed runs from the existing remote bundle path; it
+does not yet query OTLP-ingested live rows directly.
+
+3. Materialize and sync completed runs from any registered project:
 
 ```bash
 uv run mentalmodel verify \
