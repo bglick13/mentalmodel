@@ -349,7 +349,10 @@ REMOTE_LIVE_MIGRATIONS: Final[tuple[SchemaMigration, ...]] = (
     ),
     SchemaMigration(
         "remote_live_records_event_type_column",
-        "alter table remote_live_records add column if not exists event_type text not null default ''",
+        (
+            "alter table remote_live_records add column if not exists "
+            "event_type text not null default ''"
+        ),
     ),
     SchemaMigration(
         "remote_live_spans_frame_column",

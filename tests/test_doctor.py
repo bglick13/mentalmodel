@@ -5,17 +5,23 @@ import unittest
 from pathlib import Path
 
 from mentalmodel import Effect, Workflow
+from mentalmodel.core.interfaces import EffectHandler, NamedPrimitive
 from mentalmodel.doctor import DoctorStatus, build_doctor_report
+from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.skills import install_skills
 
 
-class _NoopEffect:
-    async def invoke(self, inputs, ctx):
+class _NoopEffect(EffectHandler[dict[str, object], dict[str, bool]]):
+    async def invoke(
+        self,
+        inputs: dict[str, object],
+        ctx: ExecutionContext,
+    ) -> dict[str, bool]:
         del inputs, ctx
         return {"ok": True}
 
 
-def build_coarse_program() -> Workflow:
+def build_coarse_program() -> Workflow[NamedPrimitive]:
     return Workflow(
         "coarse_program",
         children=[

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -83,20 +84,19 @@ class RecordingCliLiveExecutionSink:
         *,
         run_id: str,
         invocation_name: str | None,
-        project_id: str | None = None,
-        environment_name: str | None = None,
-        catalog_entry_id: str | None = None,
-        catalog_source: object | None = None,
+        resource_context: object,
         runtime_default_profile_name: str | None = None,
         runtime_profile_names: tuple[str, ...] = (),
+        tracing_config: object | None = None,
     ) -> None:
-        del config, invocation_name, project_id, environment_name, catalog_entry_id, catalog_source
+        del config, invocation_name, resource_context, tracing_config
         self.run_id = run_id
         self.runtime_default_profile_name = runtime_default_profile_name
         self.runtime_profile_names = runtime_profile_names
         self.started = False
         self.record_count = 0
         self.span_count = 0
+        self.metric_count = 0
         self.completions: list[tuple[bool, str | None]] = []
         type(self).instances.append(self)
 
@@ -112,44 +112,56 @@ class RecordingCliLiveExecutionSink:
         del span
         self.span_count += 1
 
+    def emit_metrics(self, observations: Sequence[object]) -> None:
+        self.metric_count += len(observations)
+
     def complete(self, *, success: bool, error: str | None = None) -> None:
         self.completions.append((success, error))
 
+    def runtime_tracing_config(self) -> None:
+        return None
+
     def delivery_result(self) -> LiveExecutionPublishResult:
         return LiveExecutionPublishResult(
-            transport="service-api",
+            transport="otlp-http",
+            delivery_mode="recording",
             success=True,
             graph_id="async_rl_demo",
             run_id=self.run_id,
             project_id="mentalmodel-examples",
-            server_url="http://127.0.0.1:8765",
-            start_attempt_count=1,
-            update_attempt_count=1,
-            delivered_record_count=self.record_count,
-            delivered_span_count=self.span_count,
-            buffered_record_count=0,
-            buffered_span_count=0,
+            otlp_endpoint="http://127.0.0.1:4318",
+            required=False,
+            accepted_log_count=self.record_count,
+            accepted_span_count=self.span_count,
+            accepted_metric_count=self.metric_count,
+            exported_log_count=self.record_count,
+            exported_span_count=self.span_count,
+            exported_metric_count=self.metric_count,
         )
 
 
 class FailingCliLiveExecutionSink(RecordingCliLiveExecutionSink):
     def delivery_result(self) -> LiveExecutionPublishResult:
         return LiveExecutionPublishResult(
-            transport="service-api",
+            transport="otlp-http",
+            delivery_mode="recording",
             success=False,
             graph_id="async_rl_demo",
             run_id=self.run_id,
             project_id="mentalmodel-examples",
-            server_url="http://127.0.0.1:8765",
-            start_attempt_count=2,
-            update_attempt_count=3,
-            delivered_record_count=self.record_count,
-            delivered_span_count=self.span_count,
-            buffered_record_count=0,
-            buffered_span_count=0,
-            retryable=True,
-            error_category="network",
-            error="remote live stream unavailable",
+            otlp_endpoint="http://127.0.0.1:4318",
+            required=True,
+            accepted_log_count=self.record_count,
+            accepted_span_count=self.span_count,
+            accepted_metric_count=self.metric_count,
+            exported_log_count=0,
+            exported_span_count=0,
+            exported_metric_count=0,
+            outbox_depth=5,
+            outbox_bytes=1024,
+            retry_count=3,
+            degraded=True,
+            last_error="remote live stream unavailable",
         )
 
 
@@ -953,28 +965,24 @@ class CliTest(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
                 with patch(
-                    "mentalmodel.cli.RemoteServiceLiveExecutionSink",
-                    RecordingCliLiveExecutionSink,
-                ):
-                    with patch(
-                        "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
-                        return_value=CompletedRunPublishResult(
-                            transport="service-api",
-                            success=True,
-                            graph_id="async_rl_demo",
-                            run_id="run-uploaded",
-                            project_id="mentalmodel-examples",
-                            server_url="http://127.0.0.1:8765",
-                            remote_run_dir="/remote/async_rl_demo/run-uploaded",
-                            uploaded_at_ms=1000,
-                        ),
-                    ) as publish_run:
-                        with contextlib.chdir(root):
-                            with contextlib.redirect_stdout(stdout):
-                                exit_code = run_verify(
-                                    "mentalmodel.examples.async_rl.demo:build_program",
-                                    json_output=True,
-                                )
+                    "mentalmodel.cli.RemoteServiceCompletedRunSink.publish",
+                    return_value=CompletedRunPublishResult(
+                        transport="service-api",
+                        success=True,
+                        graph_id="async_rl_demo",
+                        run_id="run-uploaded",
+                        project_id="mentalmodel-examples",
+                        server_url="http://127.0.0.1:8765",
+                        remote_run_dir="/remote/async_rl_demo/run-uploaded",
+                        uploaded_at_ms=1000,
+                    ),
+                ) as publish_run:
+                    with contextlib.chdir(root):
+                        with contextlib.redirect_stdout(stdout):
+                            exit_code = run_verify(
+                                "mentalmodel.examples.async_rl.demo:build_program",
+                                json_output=True,
+                            )
             self.assertEqual(exit_code, 0)
             payload = json.loads(stdout.getvalue())
             runtime = cast(dict[str, object], payload["runtime"])
@@ -983,7 +991,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual(upload["project_id"], "mentalmodel-examples")
             publish_run.assert_called_once()
 
-    def test_verify_auto_streams_live_execution_for_linked_project(self) -> None:
+    def test_verify_streams_live_execution_when_explicitly_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "mentalmodel.toml").write_text(
@@ -1012,7 +1020,7 @@ class CliTest(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
                 with patch(
-                    "mentalmodel.cli.RemoteServiceLiveExecutionSink",
+                    "mentalmodel.cli.AsyncLiveExporter",
                     RecordingCliLiveExecutionSink,
                 ):
                     with patch(
@@ -1033,6 +1041,7 @@ class CliTest(unittest.TestCase):
                                 exit_code = run_verify(
                                     "mentalmodel.examples.async_rl.demo:build_program",
                                     json_output=True,
+                                    live_otlp_endpoint="http://127.0.0.1:4318",
                                 )
             self.assertEqual(exit_code, 0)
             self.assertEqual(len(RecordingCliLiveExecutionSink.instances), 1)
@@ -1040,6 +1049,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue(sink.started)
             self.assertGreater(sink.record_count, 0)
             self.assertGreater(sink.span_count, 0)
+            self.assertGreater(sink.metric_count, 0)
             self.assertEqual(sink.completions, [(True, None)])
 
     def test_verify_reports_remote_upload_failure_without_losing_local_bundle(self) -> None:
@@ -1116,7 +1126,7 @@ class CliTest(unittest.TestCase):
             stdout = io.StringIO()
             with patch.dict("os.environ", {"MENTALMODEL_API_KEY": "token"}):
                 with patch(
-                    "mentalmodel.cli.RemoteServiceLiveExecutionSink",
+                    "mentalmodel.cli.AsyncLiveExporter",
                     FailingCliLiveExecutionSink,
                 ):
                     with patch(
@@ -1137,6 +1147,8 @@ class CliTest(unittest.TestCase):
                                 exit_code = run_verify(
                                     "mentalmodel.examples.async_rl.demo:build_program",
                                     json_output=True,
+                                    live_otlp_endpoint="http://127.0.0.1:4318",
+                                    require_live_delivery=True,
                                 )
             self.assertEqual(exit_code, 1)
             payload = json.loads(stdout.getvalue())
@@ -1145,8 +1157,8 @@ class CliTest(unittest.TestCase):
             self.assertTrue(Path(cast(str, runtime["run_artifacts_dir"])).exists())
             live_delivery = cast(dict[str, object], runtime["live_execution_delivery"])
             self.assertFalse(live_delivery["success"])
-            self.assertEqual(live_delivery["error_category"], "network")
-            self.assertIn("remote live stream unavailable", cast(str, live_delivery["error"]))
+            self.assertTrue(live_delivery["required"])
+            self.assertIn("remote live stream unavailable", cast(str, live_delivery["last_error"]))
 
     def test_remote_write_demo_command_writes_assets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

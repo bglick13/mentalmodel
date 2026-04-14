@@ -35,3 +35,11 @@ class ObjectiveEvaluationError(MentalModelError):
 
 class OptionalDependencyError(MentalModelError):
     """Raised when an optional integration requires dependencies that are absent."""
+
+
+class LiveIngestionError(MentalModelError):
+    """Raised when live telemetry ingestion configuration or export fails."""
+
+
+class LiveDeliveryCapacityError(LiveIngestionError):
+    """Raised when durable live telemetry cannot accept more data."""

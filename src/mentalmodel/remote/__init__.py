@@ -106,7 +106,6 @@ __all__ = [
     "FileRemoteRunStore",
     "build_run_bundle_upload",
     "build_run_bundle_upload_from_run_dir",
-    "RemoteServiceLiveExecutionSink",
     "RemoteServiceCompletedRunSink",
     "failed_completed_run_publish",
     "sync_runs_for_project",
@@ -183,10 +182,6 @@ _LAZY_EXPORTS = {
     "RemoteServiceCompletedRunSink": (
         "mentalmodel.remote.sync",
         "RemoteServiceCompletedRunSink",
-    ),
-    "RemoteServiceLiveExecutionSink": (
-        "mentalmodel.remote.sync",
-        "RemoteServiceLiveExecutionSink",
     ),
     "failed_completed_run_publish": (
         "mentalmodel.remote.sync",

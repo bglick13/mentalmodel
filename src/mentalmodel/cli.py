@@ -53,6 +53,8 @@ from mentalmodel.invocation import (
 )
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.observability import load_tracing_config, write_otel_demo
+from mentalmodel.observability.live import AsyncLiveExporter, LiveIngestionConfig
+from mentalmodel.observability.telemetry import TelemetryResourceContext
 from mentalmodel.remote.backend import (
     RemoteBackendConfig,
     RemoteCompletedRunSink,
@@ -75,7 +77,6 @@ from mentalmodel.remote.projects import (
 from mentalmodel.remote.sinks import CompletedRunPublishResult
 from mentalmodel.remote.sync import (
     RemoteServiceCompletedRunSink,
-    RemoteServiceLiveExecutionSink,
     sync_runs_for_project,
     sync_runs_to_server,
 )
@@ -437,6 +438,14 @@ def run_verify(
     remote_object_store_secret_key: str | None = None,
     remote_object_store_secure: bool | None = None,
     remote_cache_dir: Path | None = None,
+    live_otlp_endpoint: str | None = None,
+    live_outbox_dir: Path | None = None,
+    live_max_outbox_bytes: int = 64 * 1024 * 1024,
+    live_max_batch_events: int = 256,
+    live_max_batch_bytes: int = 512 * 1024,
+    live_flush_interval_ms: int = 1_000,
+    live_shutdown_flush_timeout_ms: int = 5_000,
+    require_live_delivery: bool = False,
     remote_run_store: RemoteRunStore | None = None,
 ) -> int:
     """Run analysis, runtime verification, and property checks."""
@@ -505,8 +514,24 @@ def run_verify(
         configured_remote_run_store=configured_remote_run_store,
         run_target=run_target,
     )
+    live_ingestion = _resolve_live_ingestion_config(
+        live_otlp_endpoint=live_otlp_endpoint,
+        live_outbox_dir=live_outbox_dir,
+        live_max_outbox_bytes=live_max_outbox_bytes,
+        live_max_batch_events=live_max_batch_events,
+        live_max_batch_bytes=live_max_batch_bytes,
+        live_flush_interval_ms=live_flush_interval_ms,
+        live_shutdown_flush_timeout_ms=live_shutdown_flush_timeout_ms,
+        require_live_delivery=require_live_delivery,
+        runs_dir=run_target.runs_dir,
+        spec_path=spec_path,
+    )
     live_run_id = generate_run_id()
     if _is_external_project_registration(project):
+        if live_ingestion is not None:
+            raise MentalModelError(
+                "Live OTLP export is not supported through the external project verify path."
+            )
         payload = _run_external_verify(
             invocation=invocation,
             project=cast(ProjectRegistration, project),
@@ -519,7 +544,7 @@ def run_verify(
         if invocation.environment is not None:
             _, environment = load_runtime_environment_subject(invocation.environment)
         live_execution_sink = _resolve_live_execution_sink(
-            linked_project_config=linked_project_config,
+            live_ingestion=live_ingestion,
             run_target=run_target,
             invocation_name=invocation.invocation_name,
             run_id=live_run_id,
@@ -620,35 +645,57 @@ def run_verify(
     if live_execution_delivery is not None:
         live_table = Table(title="Live Execution Delivery")
         live_table.add_column("Transport")
+        live_table.add_column("Mode")
         live_table.add_column("Run")
-        live_table.add_column("Start Attempts", justify="right")
-        live_table.add_column("Update Attempts", justify="right")
-        live_table.add_column("Delivered")
-        live_table.add_column("Buffered")
+        live_table.add_column("Accepted")
+        live_table.add_column("Exported")
+        live_table.add_column("Outbox")
+        live_table.add_column("Retry", justify="right")
+        live_table.add_column("Ack Lag", justify="right")
+        live_table.add_column("State")
         live_table.add_column("Error")
         live_table.add_row(
             cast(str, live_execution_delivery["transport"]),
+            cast(str, live_execution_delivery["delivery_mode"]),
             "/".join(
                 (
                     cast(str, live_execution_delivery["graph_id"]),
                     cast(str, live_execution_delivery["run_id"]),
                 )
             ),
-            str(cast(int, live_execution_delivery["start_attempt_count"])),
-            str(cast(int, live_execution_delivery["update_attempt_count"])),
             "/".join(
                 (
-                    str(cast(int, live_execution_delivery["delivered_record_count"])),
-                    str(cast(int, live_execution_delivery["delivered_span_count"])),
+                    str(cast(int, live_execution_delivery["accepted_log_count"])),
+                    str(cast(int, live_execution_delivery["accepted_span_count"])),
+                    str(cast(int, live_execution_delivery["accepted_metric_count"])),
                 )
             ),
             "/".join(
                 (
-                    str(cast(int, live_execution_delivery["buffered_record_count"])),
-                    str(cast(int, live_execution_delivery["buffered_span_count"])),
+                    str(cast(int, live_execution_delivery["exported_log_count"])),
+                    str(cast(int, live_execution_delivery["exported_span_count"])),
+                    str(cast(int, live_execution_delivery["exported_metric_count"])),
                 )
             ),
-            cast(str | None, live_execution_delivery.get("error")) or "",
+            "/".join(
+                (
+                    str(cast(int, live_execution_delivery["outbox_depth"])),
+                    str(cast(int, live_execution_delivery["outbox_bytes"])),
+                )
+            ),
+            str(cast(int, live_execution_delivery["retry_count"])),
+            str(cast(int | None, live_execution_delivery.get("ack_lag_ms")) or ""),
+            ",".join(
+                state
+                for state, enabled in (
+                    ("degraded", live_execution_delivery.get("degraded") is True),
+                    ("failed-open", live_execution_delivery.get("failed_open") is True),
+                    ("closed", live_execution_delivery.get("accepting_events") is not True),
+                )
+                if enabled
+            )
+            or "ok",
+            cast(str | None, live_execution_delivery.get("last_error")) or "",
         )
         console.print(live_table)
 
@@ -768,29 +815,74 @@ def _resolve_completed_run_sink(
 
 def _resolve_live_execution_sink(
     *,
-    linked_project_config: MentalModelProjectConfig | None,
+    live_ingestion: LiveIngestionConfig | None,
     run_target: ProjectRunTarget,
     invocation_name: str | None,
     run_id: str,
     environment: RuntimeEnvironment | None,
-) -> RemoteServiceLiveExecutionSink | None:
-    if linked_project_config is None:
+) -> AsyncLiveExporter | None:
+    if live_ingestion is None:
         return None
     runtime_profile_names: tuple[str, ...] = ()
     runtime_default_profile_name: str | None = None
     if environment is not None:
         runtime_profile_names = environment.profile_names()
         runtime_default_profile_name = environment.default_profile_name
-    return RemoteServiceLiveExecutionSink(
-        linked_project_config,
+    tracing_config = load_tracing_config()
+    return AsyncLiveExporter(
+        config=live_ingestion,
         run_id=run_id,
         invocation_name=invocation_name,
-        project_id=run_target.project_id,
-        environment_name=run_target.environment_name,
-        catalog_entry_id=run_target.catalog_entry_id,
-        catalog_source=run_target.catalog_source,
+        resource_context=TelemetryResourceContext(
+            project_id=run_target.project_id,
+            project_label=run_target.project_label,
+            environment_name=run_target.environment_name,
+            catalog_entry_id=run_target.catalog_entry_id,
+            catalog_source=(
+                None if run_target.catalog_source is None else run_target.catalog_source.value
+            ),
+            service_name=tracing_config.service_name,
+            service_namespace=tracing_config.service_namespace,
+            service_version=tracing_config.service_version,
+        ),
         runtime_default_profile_name=runtime_default_profile_name,
         runtime_profile_names=runtime_profile_names,
+        tracing_config=tracing_config,
+    )
+
+
+def _resolve_live_ingestion_config(
+    *,
+    live_otlp_endpoint: str | None,
+    live_outbox_dir: Path | None,
+    live_max_outbox_bytes: int,
+    live_max_batch_events: int,
+    live_max_batch_bytes: int,
+    live_flush_interval_ms: int,
+    live_shutdown_flush_timeout_ms: int,
+    require_live_delivery: bool,
+    runs_dir: Path | None,
+    spec_path: Path | None,
+) -> LiveIngestionConfig | None:
+    if live_otlp_endpoint is None:
+        return None
+    outbox_dir = live_outbox_dir
+    if outbox_dir is None:
+        if runs_dir is not None:
+            outbox_dir = runs_dir.expanduser().resolve().parent / ".live-outbox"
+        elif spec_path is not None:
+            outbox_dir = spec_path.expanduser().resolve().parent / ".live-outbox"
+        else:
+            outbox_dir = Path.cwd() / ".live-outbox"
+    return LiveIngestionConfig(
+        otlp_endpoint=live_otlp_endpoint,
+        outbox_dir=outbox_dir,
+        max_outbox_bytes=live_max_outbox_bytes,
+        max_batch_events=live_max_batch_events,
+        max_batch_bytes=live_max_batch_bytes,
+        flush_interval_ms=live_flush_interval_ms,
+        shutdown_flush_timeout_ms=live_shutdown_flush_timeout_ms,
+        require_live_delivery=require_live_delivery,
     )
 
 
@@ -814,7 +906,10 @@ def _verify_payload_success(payload: dict[str, object]) -> bool:
     runtime_payload = cast(dict[str, object], payload["runtime"])
     live_execution_delivery = runtime_payload.get("live_execution_delivery")
     if isinstance(live_execution_delivery, dict):
-        if live_execution_delivery.get("success") is not True:
+        if (
+            live_execution_delivery.get("required") is True
+            and live_execution_delivery.get("success") is not True
+        ):
             return False
     completed_run_upload = runtime_payload.get("completed_run_upload")
     if not isinstance(completed_run_upload, dict):
@@ -2495,6 +2590,50 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     verify.add_argument("--remote-cache-dir", type=Path)
+    verify.add_argument(
+        "--live-otlp-endpoint",
+        help="Optional OTLP collector endpoint for durable async live telemetry export.",
+    )
+    verify.add_argument(
+        "--live-outbox-dir",
+        type=Path,
+        help="Optional directory for the durable live telemetry outbox.",
+    )
+    verify.add_argument(
+        "--live-max-outbox-bytes",
+        type=int,
+        default=64 * 1024 * 1024,
+        help="Hard cap for local live telemetry backlog before policy applies.",
+    )
+    verify.add_argument(
+        "--live-max-batch-events",
+        type=int,
+        default=256,
+        help="Maximum number of live telemetry envelopes per OTLP batch.",
+    )
+    verify.add_argument(
+        "--live-max-batch-bytes",
+        type=int,
+        default=512 * 1024,
+        help="Maximum serialized bytes per OTLP batch.",
+    )
+    verify.add_argument(
+        "--live-flush-interval-ms",
+        type=int,
+        default=1_000,
+        help="Maximum delay before the live exporter drains the outbox.",
+    )
+    verify.add_argument(
+        "--live-shutdown-flush-timeout-ms",
+        type=int,
+        default=5_000,
+        help="How long verify waits for the live exporter to drain on shutdown.",
+    )
+    verify.add_argument(
+        "--require-live-delivery",
+        action="store_true",
+        help="Fail the run if the live outbox hits its hard capacity cap.",
+    )
     verify.add_argument("--json", action="store_true", help="Emit JSON output.")
     replay = subparsers.add_parser("replay", help="Replay a recorded execution.")
     replay.add_argument("--runs-dir", type=Path)
@@ -2807,6 +2946,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 remote_object_store_secret_key=args.remote_object_store_secret_key,
                 remote_object_store_secure=args.remote_object_store_secure,
                 remote_cache_dir=args.remote_cache_dir,
+                live_otlp_endpoint=args.live_otlp_endpoint,
+                live_outbox_dir=args.live_outbox_dir,
+                live_max_outbox_bytes=args.live_max_outbox_bytes,
+                live_max_batch_events=args.live_max_batch_events,
+                live_max_batch_bytes=args.live_max_batch_bytes,
+                live_flush_interval_ms=args.live_flush_interval_ms,
+                live_shutdown_flush_timeout_ms=args.live_shutdown_flush_timeout_ms,
+                require_live_delivery=args.require_live_delivery,
             )
         if args.command == "replay":
             return run_replay(

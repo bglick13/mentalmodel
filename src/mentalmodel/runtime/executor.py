@@ -29,11 +29,11 @@ from mentalmodel.observability.tracing import (
     create_tracing_adapter,
 )
 from mentalmodel.runtime.context import ExecutionContext
+from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
 from mentalmodel.runtime.execution import (
     capture_framed_output,
     runtime_value_payload,
 )
-from mentalmodel.runtime.events import NODE_FAILED, NODE_STARTED, NODE_SUCCEEDED
 from mentalmodel.runtime.frame import FramedNodeValue, FramedStateValue
 from mentalmodel.runtime.plan import (
     CompiledProgram,

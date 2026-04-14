@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 
 from mentalmodel.analysis import AnalysisReport
 from mentalmodel.examples.async_rl.demo import build_program
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.metrics import MetricObservation
 from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.remote import RunManifest
 from mentalmodel.remote.sinks import LiveExecutionPublishResult
@@ -35,6 +37,7 @@ class RecordingLiveExecutionSink:
         self.started: list[tuple[IRGraph, AnalysisReport]] = []
         self.records: list[ExecutionRecord] = []
         self.spans: list[RecordedSpan] = []
+        self.metric_count = 0
         self.completions: list[tuple[bool, str | None]] = []
 
     def start(self, *, graph: IRGraph, analysis: AnalysisReport) -> None:
@@ -46,21 +49,31 @@ class RecordingLiveExecutionSink:
     def emit_span(self, span: RecordedSpan) -> None:
         self.spans.append(span)
 
+    def emit_metrics(self, observations: Sequence[MetricObservation]) -> None:
+        self.metric_count += len(observations)
+
     def complete(self, *, success: bool, error: str | None = None) -> None:
         self.completions.append((success, error))
+
+    def runtime_tracing_config(self) -> None:
+        return None
 
     def delivery_result(self) -> LiveExecutionPublishResult | None:
         if not self.started:
             return None
         return LiveExecutionPublishResult(
-            transport="recording",
+            transport="recording-live",
+            delivery_mode="recording",
             success=True,
             graph_id=self.started[0][0].graph_id,
             run_id=self.records[0].run_id if self.records else "run-missing",
-            start_attempt_count=1,
-            update_attempt_count=1,
-            delivered_record_count=len(self.records),
-            delivered_span_count=len(self.spans),
+            required=False,
+            accepted_log_count=len(self.records),
+            accepted_span_count=len(self.spans),
+            accepted_metric_count=self.metric_count,
+            exported_log_count=len(self.records),
+            exported_span_count=len(self.spans),
+            exported_metric_count=self.metric_count,
         )
 
 
@@ -95,6 +108,7 @@ class RemoteSinksTest(unittest.TestCase):
         self.assertEqual(live_sink.started[0][0].graph_id, report.as_dict()["graph_id"])
         self.assertGreater(len(live_sink.records), 0)
         self.assertGreater(len(live_sink.spans), 0)
+        self.assertGreater(live_sink.metric_count, 0)
         self.assertEqual(live_sink.completions, [(True, None)])
         self.assertTrue(all(record.run_id == report.runtime.run_id for record in live_sink.records))
         self.assertTrue(all(span.sequence > 0 for span in live_sink.spans))

@@ -358,13 +358,13 @@ def _walk_primitive(
 
 
 def _is_coarse_effect_heavy_topology(summary: dict[str, object]) -> bool:
-    executable_count = int(summary["executable_count"])
-    effect_count = int(summary["effect_count"])
-    step_loop_count = int(summary["step_loop_count"])
-    use_count = int(summary["use_count"])
-    block_count = int(summary["block_count"])
-    actor_count = int(summary["actor_count"])
-    parallel_count = int(summary["parallel_count"])
+    executable_count = _require_summary_count(summary, "executable_count")
+    effect_count = _require_summary_count(summary, "effect_count")
+    step_loop_count = _require_summary_count(summary, "step_loop_count")
+    use_count = _require_summary_count(summary, "use_count")
+    block_count = _require_summary_count(summary, "block_count")
+    actor_count = _require_summary_count(summary, "actor_count")
+    parallel_count = _require_summary_count(summary, "parallel_count")
     return (
         executable_count <= 4
         and effect_count >= max(1, executable_count - 1)
@@ -374,6 +374,13 @@ def _is_coarse_effect_heavy_topology(summary: dict[str, object]) -> bool:
         and actor_count == 0
         and parallel_count == 0
     )
+
+
+def _require_summary_count(summary: dict[str, object], key: str) -> int:
+    value = summary.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Doctor topology summary field {key!r} must be an integer.")
+    return value
 
 
 def _load_entrypoint(raw: str) -> tuple[ModuleType, Workflow[NamedPrimitive]]:

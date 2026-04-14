@@ -11,23 +11,29 @@ from mentalmodel.core.workflow import Workflow
 from mentalmodel.environment import EMPTY_RUNTIME_ENVIRONMENT, RuntimeEnvironment
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.config import TracingConfig
+from mentalmodel.observability.live import AsyncLiveExporter, LiveIngestionConfig
+from mentalmodel.observability.metrics import MetricEmitter, MetricObservation
+from mentalmodel.observability.telemetry import TelemetryResourceContext
 from mentalmodel.observability.tracing import RecordedSpan, SpanListener
-from mentalmodel.remote import (
-    CatalogSource,
+from mentalmodel.remote.backend import RemoteCompletedRunSink, RemoteRunStore
+from mentalmodel.remote.contracts import CatalogSource
+from mentalmodel.remote.project_config import (
+    MentalModelProjectConfig,
+    discover_project_config_path,
+    load_project_config,
+)
+from mentalmodel.remote.sinks import (
     CompletedRunPublishResult,
     CompletedRunSink,
     ExecutionRecordSink,
     LiveExecutionPublishResult,
     LiveExecutionSink,
-    MentalModelProjectConfig,
-    RemoteCompletedRunSink,
-    RemoteRunStore,
-    RemoteServiceCompletedRunSink,
-    RemoteServiceLiveExecutionSink,
-    discover_project_config_path,
-    failed_completed_run_publish,
-    load_project_config,
     record_listener_for_sink,
+)
+from mentalmodel.remote.sync import (
+    RemoteServiceCompletedRunSink,
+    failed_completed_run_publish,
 )
 from mentalmodel.runtime.context import generate_run_id
 from mentalmodel.runtime.events import INVARIANT_CHECKED
@@ -74,6 +80,7 @@ class ManagedExecutionOptions:
     remote_run_store: RemoteRunStore | None = None
     completed_run_sink: CompletedRunSink | None = None
     live_execution_sink: LiveExecutionSink | None = None
+    live_ingestion: LiveIngestionConfig | None = None
     enable_completed_run_upload: bool = True
     enable_live_execution: bool = True
 
@@ -332,21 +339,26 @@ def resolve_managed_execution(
     if (
         live_execution_sink is None
         and options.enable_live_execution
-        and linked_project_config is not None
+        and options.live_ingestion is not None
     ):
         runtime_profile_names: tuple[str, ...] = ()
         runtime_default_profile_name: str | None = None
         if environment is not None:
             runtime_profile_names = environment.profile_names()
             runtime_default_profile_name = environment.default_profile_name
-        live_execution_sink = RemoteServiceLiveExecutionSink(
-            linked_project_config,
+        live_execution_sink = AsyncLiveExporter(
+            config=options.live_ingestion,
             run_id=run_id,
             invocation_name=invocation_name,
-            project_id=target.project_id,
-            environment_name=target.environment_name,
-            catalog_entry_id=target.catalog_entry_id,
-            catalog_source=target.catalog_source,
+            resource_context=TelemetryResourceContext(
+                project_id=target.project_id,
+                project_label=target.project_label,
+                environment_name=target.environment_name,
+                catalog_entry_id=target.catalog_entry_id,
+                catalog_source=(
+                    None if target.catalog_source is None else target.catalog_source.value
+                ),
+            ),
             runtime_default_profile_name=runtime_default_profile_name,
             runtime_profile_names=runtime_profile_names,
         )
@@ -387,6 +399,16 @@ def _capture_managed_runtime(
         if live_execution_sink is None
         else (_live_span_listener(live_execution_sink),)
     )
+    live_metric_emitter: MetricEmitter | None = (
+        None
+        if live_execution_sink is None
+        else _LiveMetricEmitterAdapter(live_execution_sink)
+    )
+    live_tracing_config = (
+        None
+        if live_execution_sink is None
+        else _runtime_tracing_config_for_sink(live_execution_sink)
+    )
     recorder = ExecutionRecorder(
         listeners=tuple(record_listeners) + record_sink_listeners + live_listeners
     )
@@ -395,6 +417,8 @@ def _capture_managed_runtime(
         environment=environment,
         invocation_name=invocation_name,
         span_listeners=tuple(span_listeners) + live_span_listeners,
+        metrics=live_metric_emitter,
+        tracing_config=live_tracing_config,
         run_id=run_id,
     )
     try:
@@ -474,6 +498,30 @@ class _LiveRecordSinkAdapter:
 
     def emit(self, record: ExecutionRecord) -> None:
         self.sink.emit_record(record)
+
+
+@dataclass(slots=True, frozen=True)
+class _LiveMetricEmitterAdapter:
+    sink: LiveExecutionSink
+
+    def emit(self, observations: Sequence[MetricObservation]) -> None:
+        emit_metrics = getattr(self.sink, "emit_metrics", None)
+        if callable(emit_metrics):
+            emit_metrics(observations)
+
+    def flush(self) -> None:
+        return None
+
+
+def _runtime_tracing_config_for_sink(
+    sink: LiveExecutionSink,
+) -> TracingConfig | None:
+    runtime_tracing_config = getattr(sink, "runtime_tracing_config", None)
+    if callable(runtime_tracing_config):
+        resolved = runtime_tracing_config()
+        if resolved is None or isinstance(resolved, TracingConfig):
+            return resolved
+    return None
 
 
 def _live_span_listener(sink: LiveExecutionSink) -> SpanListener:

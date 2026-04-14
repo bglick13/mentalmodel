@@ -1,18 +1,18 @@
 """Testing and verification exports."""
 
-from mentalmodel.testing.harness import (
-    RuntimeInvariantFailure,
-    RuntimeVerificationResult,
-    VerificationReport,
-    execute_program,
-    run_verification,
-)
 from mentalmodel.runtime.managed import (
     ManagedExecutionOptions,
     ManagedExecutionResult,
     ManagedInvariantFailure,
     ManagedRunTarget,
     run_managed,
+)
+from mentalmodel.testing.harness import (
+    RuntimeInvariantFailure,
+    RuntimeVerificationResult,
+    VerificationReport,
+    execute_program,
+    run_verification,
 )
 from mentalmodel.testing.invariants import (
     PropertyCheck,

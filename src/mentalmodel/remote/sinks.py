@@ -8,6 +8,8 @@ from typing import Protocol
 from mentalmodel.analysis import AnalysisReport
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.config import TracingConfig
+from mentalmodel.observability.metrics import MetricObservation
 from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.remote.contracts import RunManifest
 
@@ -75,58 +77,98 @@ class LiveExecutionPublishResult:
     """Outcome of remote live execution delivery for one run."""
 
     transport: str
+    delivery_mode: str
     success: bool
     graph_id: str
     run_id: str
     project_id: str | None = None
-    server_url: str | None = None
-    start_attempt_count: int = 0
-    update_attempt_count: int = 0
-    delivered_record_count: int = 0
-    delivered_span_count: int = 0
-    buffered_record_count: int = 0
-    buffered_span_count: int = 0
-    retryable: bool | None = None
-    error_category: str | None = None
-    error: str | None = None
+    otlp_endpoint: str | None = None
+    required: bool = False
+    accepted_log_count: int = 0
+    accepted_span_count: int = 0
+    accepted_metric_count: int = 0
+    exported_log_count: int = 0
+    exported_span_count: int = 0
+    exported_metric_count: int = 0
+    outbox_depth: int = 0
+    outbox_bytes: int = 0
+    ack_lag_ms: int | None = None
+    retry_count: int = 0
+    last_batch_size: int = 0
+    last_batch_latency_ms: int | None = None
+    degraded: bool = False
+    failed_open: bool = False
+    accepting_events: bool = True
+    completed: bool = False
+    last_error: str | None = None
 
     def __post_init__(self) -> None:
         if not self.transport:
             raise ValueError("LiveExecutionPublishResult.transport cannot be empty.")
+        if not self.delivery_mode:
+            raise ValueError("LiveExecutionPublishResult.delivery_mode cannot be empty.")
         if not self.graph_id:
             raise ValueError("LiveExecutionPublishResult.graph_id cannot be empty.")
         if not self.run_id:
             raise ValueError("LiveExecutionPublishResult.run_id cannot be empty.")
-        if self.start_attempt_count < 0 or self.update_attempt_count < 0:
-            raise ValueError("LiveExecutionPublishResult attempt counts cannot be negative.")
-        if self.delivered_record_count < 0 or self.delivered_span_count < 0:
-            raise ValueError("LiveExecutionPublishResult delivered counts cannot be negative.")
-        if self.buffered_record_count < 0 or self.buffered_span_count < 0:
-            raise ValueError("LiveExecutionPublishResult buffered counts cannot be negative.")
-        if self.success and self.error is not None:
-            raise ValueError("LiveExecutionPublishResult.error must be None when success is true.")
-        if not self.success and not self.error:
+        if self.otlp_endpoint == "":
+            raise ValueError("LiveExecutionPublishResult.otlp_endpoint cannot be empty.")
+        if self.accepted_log_count < 0 or self.accepted_span_count < 0:
+            raise ValueError("LiveExecutionPublishResult accepted counts cannot be negative.")
+        if self.accepted_metric_count < 0:
+            raise ValueError("LiveExecutionPublishResult accepted counts cannot be negative.")
+        if self.exported_log_count < 0 or self.exported_span_count < 0:
+            raise ValueError("LiveExecutionPublishResult exported counts cannot be negative.")
+        if self.exported_metric_count < 0:
+            raise ValueError("LiveExecutionPublishResult exported counts cannot be negative.")
+        if self.outbox_depth < 0 or self.outbox_bytes < 0:
+            raise ValueError("LiveExecutionPublishResult outbox state cannot be negative.")
+        if self.ack_lag_ms is not None and self.ack_lag_ms < 0:
+            raise ValueError("LiveExecutionPublishResult.ack_lag_ms cannot be negative.")
+        if self.retry_count < 0:
+            raise ValueError("LiveExecutionPublishResult.retry_count cannot be negative.")
+        if self.last_batch_size < 0:
+            raise ValueError("LiveExecutionPublishResult.last_batch_size cannot be negative.")
+        if self.last_batch_latency_ms is not None and self.last_batch_latency_ms < 0:
             raise ValueError(
-                "LiveExecutionPublishResult.error is required when success is false."
+                "LiveExecutionPublishResult.last_batch_latency_ms cannot be negative."
+            )
+        if self.success and self.last_error is not None:
+            raise ValueError(
+                "LiveExecutionPublishResult.last_error must be None when success is true."
+            )
+        if not self.success and not self.last_error:
+            raise ValueError(
+                "LiveExecutionPublishResult.last_error is required when success is false."
             )
 
     def as_dict(self) -> dict[str, str | int | bool | None]:
         return {
             "transport": self.transport,
+            "delivery_mode": self.delivery_mode,
             "success": self.success,
             "graph_id": self.graph_id,
             "run_id": self.run_id,
             "project_id": self.project_id,
-            "server_url": self.server_url,
-            "start_attempt_count": self.start_attempt_count,
-            "update_attempt_count": self.update_attempt_count,
-            "delivered_record_count": self.delivered_record_count,
-            "delivered_span_count": self.delivered_span_count,
-            "buffered_record_count": self.buffered_record_count,
-            "buffered_span_count": self.buffered_span_count,
-            "retryable": self.retryable,
-            "error_category": self.error_category,
-            "error": self.error,
+            "otlp_endpoint": self.otlp_endpoint,
+            "required": self.required,
+            "accepted_log_count": self.accepted_log_count,
+            "accepted_span_count": self.accepted_span_count,
+            "accepted_metric_count": self.accepted_metric_count,
+            "exported_log_count": self.exported_log_count,
+            "exported_span_count": self.exported_span_count,
+            "exported_metric_count": self.exported_metric_count,
+            "outbox_depth": self.outbox_depth,
+            "outbox_bytes": self.outbox_bytes,
+            "ack_lag_ms": self.ack_lag_ms,
+            "retry_count": self.retry_count,
+            "last_batch_size": self.last_batch_size,
+            "last_batch_latency_ms": self.last_batch_latency_ms,
+            "degraded": self.degraded,
+            "failed_open": self.failed_open,
+            "accepting_events": self.accepting_events,
+            "completed": self.completed,
+            "last_error": self.last_error,
         }
 
 
@@ -161,8 +203,14 @@ class LiveExecutionSink(Protocol):
     def emit_span(self, span: RecordedSpan) -> None:
         """Emit one recorded span."""
 
+    def emit_metrics(self, observations: Sequence[MetricObservation]) -> None:
+        """Emit one batch of metric observations."""
+
     def complete(self, *, success: bool, error: str | None = None) -> None:
         """Flush and mark the live session terminal."""
+
+    def runtime_tracing_config(self) -> TracingConfig | None:
+        """Return one runtime tracing override when live export owns delivery."""
 
     def delivery_result(self) -> LiveExecutionPublishResult | None:
         """Return the current delivery outcome for this live stream."""
@@ -221,8 +269,14 @@ class NoOpLiveExecutionSink:
     def emit_span(self, span: RecordedSpan) -> None:
         del span
 
+    def emit_metrics(self, observations: Sequence[MetricObservation]) -> None:
+        del observations
+
     def complete(self, *, success: bool, error: str | None = None) -> None:
         del success, error
+
+    def runtime_tracing_config(self) -> TracingConfig | None:
+        return None
 
     def delivery_result(self) -> LiveExecutionPublishResult | None:
         return None

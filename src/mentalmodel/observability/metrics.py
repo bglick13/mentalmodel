@@ -16,6 +16,7 @@ from opentelemetry.sdk.metrics.export import (
 )
 from opentelemetry.sdk.resources import Resource
 
+from mentalmodel.errors import LiveDeliveryCapacityError
 from mentalmodel.observability.config import TracingConfig, TracingMode, load_tracing_config
 from mentalmodel.observability.semantic_conventions import TelemetryAttributeValue
 
@@ -675,6 +676,8 @@ def emit_metric_batch(
         return
     try:
         emitter.emit(observations)
+    except LiveDeliveryCapacityError:
+        raise
     except Exception:
         return
 

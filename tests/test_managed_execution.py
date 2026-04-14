@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 
 from mentalmodel.analysis import AnalysisReport
 from mentalmodel.core import Actor, ActorHandler, ActorResult, Workflow
 from mentalmodel.core.interfaces import NamedPrimitive
 from mentalmodel.environment import EMPTY_RUNTIME_ENVIRONMENT
+from mentalmodel.observability.live import AsyncLiveExporter, LiveIngestionConfig
+from mentalmodel.observability.metrics import MetricObservation
+from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.remote import (
     CatalogSource,
     CompletedRunPublishResult,
     LiveExecutionPublishResult,
 )
-from mentalmodel.remote.sync import (
-    RemoteServiceCompletedRunSink,
-    RemoteServiceLiveExecutionSink,
-)
+from mentalmodel.remote.contracts import RunManifest
+from mentalmodel.remote.sync import RemoteServiceCompletedRunSink
 from mentalmodel.runtime import (
     ManagedExecutionOptions,
     ManagedRunTarget,
@@ -45,7 +47,7 @@ class _RecordingCompletedRunSink:
     def publish(
         self,
         *,
-        manifest,
+        manifest: RunManifest,
         run_dir: Path,
     ) -> CompletedRunPublishResult:
         self.calls.append((manifest.project_id, run_dir))
@@ -65,34 +67,45 @@ class _RecordingLiveExecutionSink:
         self.started = 0
         self.records = 0
         self.spans = 0
+        self.metrics = 0
         self.completed: list[tuple[bool, str | None]] = []
 
-    def start(self, *, graph, analysis: AnalysisReport) -> None:
+    def start(self, *, graph: object, analysis: AnalysisReport) -> None:
         del graph, analysis
         self.started += 1
 
-    def emit_record(self, record) -> None:
+    def emit_record(self, record: object) -> None:
         del record
         self.records += 1
 
-    def emit_span(self, span) -> None:
+    def emit_span(self, span: RecordedSpan) -> None:
         del span
         self.spans += 1
+
+    def emit_metrics(self, observations: Sequence[MetricObservation]) -> None:
+        self.metrics += len(observations)
 
     def complete(self, *, success: bool, error: str | None = None) -> None:
         self.completed.append((success, error))
 
+    def runtime_tracing_config(self) -> None:
+        return None
+
     def delivery_result(self) -> LiveExecutionPublishResult:
         return LiveExecutionPublishResult(
-            transport="recording",
+            transport="recording-live",
+            delivery_mode="recording",
             success=True,
             graph_id="managed_graph",
             run_id="run-managed",
             project_id="managed-project",
-            start_attempt_count=1,
-            update_attempt_count=1,
-            delivered_record_count=self.records,
-            delivered_span_count=self.spans,
+            required=False,
+            accepted_log_count=self.records,
+            accepted_span_count=self.spans,
+            accepted_metric_count=self.metrics,
+            exported_log_count=self.records,
+            exported_span_count=self.spans,
+            exported_metric_count=self.metrics,
         )
 
 
@@ -134,6 +147,7 @@ class ManagedExecutionTest(unittest.TestCase):
             self.assertEqual(live_sink.started, 1)
             self.assertEqual(live_sink.completed, [(True, None)])
             self.assertGreater(live_sink.spans, 0)
+            self.assertGreater(live_sink.metrics, 0)
             assert result.run_artifacts is not None
             self.assertTrue(result.run_artifacts.run_dir.exists())
             self.assertEqual(result.run_artifacts.manifest.project_id, "managed-project")
@@ -180,7 +194,61 @@ class ManagedExecutionTest(unittest.TestCase):
         self.assertEqual(resolution.target.environment_name, "staging")
         self.assertEqual(resolution.target.runs_dir, default_runs_dir.resolve())
         self.assertIsInstance(resolution.completed_run_sink, RemoteServiceCompletedRunSink)
-        self.assertIsInstance(resolution.live_execution_sink, RemoteServiceLiveExecutionSink)
+        self.assertIsNone(resolution.live_execution_sink)
+
+    def test_resolve_managed_execution_uses_explicit_live_ingestion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolution = resolve_managed_execution(
+                options=ManagedExecutionOptions(
+                    live_ingestion=LiveIngestionConfig(
+                        otlp_endpoint="http://127.0.0.1:4318",
+                        outbox_dir=Path(tmpdir) / "outbox",
+                    )
+                ),
+                run_id="run-123",
+                invocation_name="managed_invocation",
+                environment=EMPTY_RUNTIME_ENVIRONMENT,
+            )
+            assert resolution.live_execution_sink is not None
+            resolution.live_execution_sink.complete(success=True)
+
+        self.assertIsInstance(resolution.live_execution_sink, AsyncLiveExporter)
+
+    def test_run_managed_fails_open_when_live_delivery_is_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = run_managed(
+                _build_program(),
+                options=ManagedExecutionOptions(
+                    target=ManagedRunTarget(runs_dir=Path(tmpdir)),
+                    live_ingestion=LiveIngestionConfig(
+                        otlp_endpoint="http://127.0.0.1:4318",
+                        outbox_dir=Path(tmpdir) / "outbox",
+                        max_outbox_bytes=1,
+                        require_live_delivery=False,
+                    ),
+                ),
+            )
+
+        self.assertTrue(result.success)
+        assert result.live_execution_delivery is not None
+        self.assertFalse(result.live_execution_delivery.success)
+        self.assertTrue(result.live_execution_delivery.failed_open)
+
+    def test_run_managed_raises_when_required_live_delivery_cannot_buffer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(Exception, "hard cap"):
+                run_managed(
+                    _build_program(),
+                    options=ManagedExecutionOptions(
+                        target=ManagedRunTarget(runs_dir=Path(tmpdir)),
+                        live_ingestion=LiveIngestionConfig(
+                            otlp_endpoint="http://127.0.0.1:4318",
+                            outbox_dir=Path(tmpdir) / "outbox",
+                            max_outbox_bytes=1,
+                            require_live_delivery=True,
+                        ),
+                    ),
+                )
 
 
 if __name__ == "__main__":

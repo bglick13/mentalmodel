@@ -12,7 +12,9 @@ from mentalmodel.core.workflow import Workflow
 from mentalmodel.environment import EMPTY_RUNTIME_ENVIRONMENT, RuntimeEnvironment
 from mentalmodel.ir.lowering import lower_program
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.observability.config import TracingConfig
 from mentalmodel.observability.export import write_json
+from mentalmodel.observability.metrics import MetricObservation
 from mentalmodel.observability.tracing import RecordedSpan, SpanListener
 from mentalmodel.remote import (
     CompletedRunPublishResult,
@@ -328,12 +330,24 @@ def _capture_runtime(
     recorder = ExecutionRecorder(
         listeners=tuple(record_listeners) + record_sink_listeners + live_listeners
     )
+    live_metric_emitter = (
+        None
+        if live_execution_sink is None
+        else _LiveMetricEmitterAdapter(live_execution_sink)
+    )
+    live_tracing_config = (
+        None
+        if live_execution_sink is None
+        else _runtime_tracing_config_for_sink(live_execution_sink)
+    )
     resolved_environment = environment or EMPTY_RUNTIME_ENVIRONMENT
     executor = AsyncExecutor(
         recorder=recorder,
         environment=resolved_environment,
         invocation_name=invocation_name,
         span_listeners=span_listeners,
+        metrics=live_metric_emitter,
+        tracing_config=live_tracing_config,
         run_id=run_id,
     )
     try:
@@ -445,3 +459,27 @@ class _LiveRecordSinkAdapter:
 
     def emit(self, record: ExecutionRecord) -> None:
         self.sink.emit_record(record)
+
+
+@dataclass(slots=True, frozen=True)
+class _LiveMetricEmitterAdapter:
+    sink: LiveExecutionSink
+
+    def emit(self, observations: Sequence[MetricObservation]) -> None:
+        emit_metrics = getattr(self.sink, "emit_metrics", None)
+        if callable(emit_metrics):
+            emit_metrics(observations)
+
+    def flush(self) -> None:
+        return None
+
+
+def _runtime_tracing_config_for_sink(
+    sink: LiveExecutionSink,
+) -> TracingConfig | None:
+    runtime_tracing_config = getattr(sink, "runtime_tracing_config", None)
+    if callable(runtime_tracing_config):
+        resolved = runtime_tracing_config()
+        if resolved is None or isinstance(resolved, TracingConfig):
+            return resolved
+    return None
