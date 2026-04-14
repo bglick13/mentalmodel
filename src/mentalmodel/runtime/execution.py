@@ -7,12 +7,12 @@ from typing import Generic, Protocol, TypeVar, cast
 from mentalmodel.core.bindings import InputBindingSource
 from mentalmodel.core.interfaces import JsonValue, RuntimeValue
 from mentalmodel.environment import ResourceKey
-from mentalmodel.observability.export import serialize_runtime_value
 from mentalmodel.observability.metrics import (
     OutputMetricSpec,
     derive_output_metrics,
     emit_metric_batch,
 )
+from mentalmodel.observability.serialization import serialize_runtime_value
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.events import NODE_INPUTS_RESOLVED
 
@@ -167,7 +167,7 @@ def record_resolved_inputs(
         payload={
             "input_keys": [alias for alias, _ in metadata.input_bindings],
             "inputs": runtime_value_payload(
-                value=cast(RuntimeValue, inputs),
+                value=inputs,
                 metadata=metadata,
             ),
         },

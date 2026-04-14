@@ -33,6 +33,7 @@ from mentalmodel.observability.metrics import (
     MetricObservation,
     project_metric_map,
 )
+from mentalmodel.observability.semantic_conventions import TelemetryAttributeValue
 from mentalmodel.observability.tracing import RecordedSpan, TracingAdapter
 from mentalmodel.plugins.runtime_context import RuntimeContext
 from mentalmodel.runtime import compile_program
@@ -143,7 +144,7 @@ class FakeTracingAdapter:
         self,
         name: str,
         *,
-        attributes: dict[str, str] | None = None,
+        attributes: dict[str, TelemetryAttributeValue] | None = None,
     ) -> Iterator[object]:
         attrs = dict(attributes or {})
         self.span_names.append(name)
@@ -158,11 +159,11 @@ class FakeTracingAdapter:
                     start_time_ns=0,
                     end_time_ns=1,
                     attributes=attrs,
-                    frame_id=attrs.get("mentalmodel.frame.id", "root"),
-                    loop_node_id=attrs.get("mentalmodel.loop.node_id"),
+                    frame_id=cast(str, attrs.get("mentalmodel.frame_id", "root")),
+                    loop_node_id=cast(str | None, attrs.get("mentalmodel.loop_node_id")),
                     iteration_index=(
-                        int(attrs["mentalmodel.loop.iteration_index"])
-                        if "mentalmodel.loop.iteration_index" in attrs
+                        int(cast(int | str, attrs["mentalmodel.iteration_index"]))
+                        if "mentalmodel.iteration_index" in attrs
                         else None
                     ),
                 )

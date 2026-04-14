@@ -17,10 +17,10 @@ from mentalmodel.ir.serialization import ir_graph_from_json, ir_graph_to_json
 from mentalmodel.observability.export import (
     execution_record_to_json,
     recorded_span_to_json,
-    serialize_runtime_value,
     write_json,
     write_jsonl,
 )
+from mentalmodel.observability.serialization import serialize_runtime_value
 from mentalmodel.observability.tracing import RecordedSpan
 from mentalmodel.pagination import (
     PageSlice,

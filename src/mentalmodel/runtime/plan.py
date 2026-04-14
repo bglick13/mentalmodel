@@ -21,7 +21,6 @@ from mentalmodel.environment import ResourceKey
 from mentalmodel.errors import LoweringError
 from mentalmodel.ir.graph import IRGraph, IRNode
 from mentalmodel.ir.lowering import lower_program_with_bindings
-from mentalmodel.observability.export import serialize_runtime_value
 from mentalmodel.observability.metrics import (
     OutputMetricSpec,
     cast_metric_specs,
@@ -31,6 +30,7 @@ from mentalmodel.observability.metrics import (
     node_duration_observation,
     node_execution_observation,
 )
+from mentalmodel.observability.serialization import serialize_runtime_value
 from mentalmodel.plugins.registry import PluginRegistry, default_registry
 from mentalmodel.runtime.context import ExecutionContext
 from mentalmodel.runtime.errors import InvariantViolationError

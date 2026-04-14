@@ -17,8 +17,9 @@ from opentelemetry.sdk.metrics.export import (
 from opentelemetry.sdk.resources import Resource
 
 from mentalmodel.observability.config import TracingConfig, TracingMode, load_tracing_config
+from mentalmodel.observability.semantic_conventions import TelemetryAttributeValue
 
-MetricAttributeValue = str | bool | int | float
+MetricAttributeValue = TelemetryAttributeValue
 OutputT = TypeVar("OutputT")
 OutputT_contra = TypeVar("OutputT_contra", contravariant=True)
 
@@ -42,6 +43,9 @@ class MetricContext:
     node_id: str | None
     node_kind: str | None
     runtime_context: str | None
+    frame_id: str
+    loop_node_id: str | None
+    iteration_index: int | None
     service_name: str
     runtime_profile: str | None = None
     invocation_name: str | None = None
@@ -49,12 +53,20 @@ class MetricContext:
     def default_attributes(self) -> dict[str, MetricAttributeValue]:
         attributes: dict[str, MetricAttributeValue] = {
             "graph_id": self.graph_id,
+            "run_id": self.run_id,
             "service_name": self.service_name,
+            "frame_id": self.frame_id,
         }
+        if self.node_id is not None:
+            attributes["node_id"] = self.node_id
         if self.node_kind is not None:
             attributes["node_kind"] = self.node_kind
         if self.runtime_context is not None:
             attributes["runtime_context"] = self.runtime_context
+        if self.loop_node_id is not None:
+            attributes["loop_node_id"] = self.loop_node_id
+        if self.iteration_index is not None:
+            attributes["iteration_index"] = self.iteration_index
         if self.runtime_profile is not None:
             attributes["runtime_profile"] = self.runtime_profile
         if self.invocation_name is not None:
@@ -468,13 +480,28 @@ RUN_STARTED = MetricDefinition(
     name="mentalmodel.run.started",
     kind=MetricKind.COUNTER,
     description="Number of started mentalmodel runs.",
-    attribute_keys=("graph_id", "service_name", "runtime_profile", "invocation_name"),
+    attribute_keys=(
+        "graph_id",
+        "run_id",
+        "service_name",
+        "frame_id",
+        "runtime_profile",
+        "invocation_name",
+    ),
 )
 RUN_COMPLETED = MetricDefinition(
     name="mentalmodel.run.completed",
     kind=MetricKind.COUNTER,
     description="Number of completed mentalmodel runs.",
-    attribute_keys=("graph_id", "service_name", "runtime_profile", "invocation_name", "success"),
+    attribute_keys=(
+        "graph_id",
+        "run_id",
+        "service_name",
+        "frame_id",
+        "runtime_profile",
+        "invocation_name",
+        "success",
+    ),
 )
 NODE_EXECUTIONS = MetricDefinition(
     name="mentalmodel.node.executions",
@@ -482,8 +509,13 @@ NODE_EXECUTIONS = MetricDefinition(
     description="Number of executed mentalmodel nodes.",
     attribute_keys=(
         "graph_id",
+        "run_id",
         "service_name",
+        "node_id",
         "node_kind",
+        "frame_id",
+        "loop_node_id",
+        "iteration_index",
         "runtime_context",
         "runtime_profile",
         "invocation_name",
@@ -496,8 +528,13 @@ NODE_DURATION_MS = MetricDefinition(
     unit="ms",
     attribute_keys=(
         "graph_id",
+        "run_id",
         "service_name",
+        "node_id",
         "node_kind",
+        "frame_id",
+        "loop_node_id",
+        "iteration_index",
         "runtime_context",
         "runtime_profile",
         "invocation_name",
@@ -510,7 +547,11 @@ INVARIANT_FAILURES = MetricDefinition(
     description="Number of failed runtime invariants.",
     attribute_keys=(
         "graph_id",
+        "run_id",
         "service_name",
+        "frame_id",
+        "loop_node_id",
+        "iteration_index",
         "runtime_context",
         "runtime_profile",
         "invocation_name",

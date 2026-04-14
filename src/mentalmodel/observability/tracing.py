@@ -13,9 +13,16 @@ from opentelemetry.sdk.trace.export import (
     ConsoleSpanExporter,
     SpanExporter,
 )
-from opentelemetry.trace import Span, Tracer
+from opentelemetry.trace import (
+    Span,
+    Tracer,
+    format_span_id,
+    format_trace_id,
+    get_current_span,
+)
 
 from mentalmodel.observability.config import TracingConfig, TracingMode, load_tracing_config
+from mentalmodel.observability.semantic_conventions import TelemetryAttributeValue
 
 
 @dataclass(slots=True, frozen=True)
@@ -27,10 +34,13 @@ class RecordedSpan:
     name: str
     start_time_ns: int
     end_time_ns: int
-    attributes: dict[str, str]
+    attributes: dict[str, TelemetryAttributeValue]
     frame_id: str
     loop_node_id: str | None
     iteration_index: int | None
+    trace_id: str | None = None
+    otel_span_id: str | None = None
+    parent_span_id: str | None = None
     error_type: str | None = None
     error_message: str | None = None
 
@@ -58,12 +68,13 @@ class TracingAdapter:
         self,
         name: str,
         *,
-        attributes: Mapping[str, str] | None = None,
+        attributes: Mapping[str, TelemetryAttributeValue] | None = None,
     ) -> Iterator[Span]:
         start_time_ns = time.time_ns()
         error_type: str | None = None
         error_message: str | None = None
         attrs = dict(attributes or {})
+        parent_context = get_current_span().get_span_context()
         with self.tracer.start_as_current_span(
             name=name,
             attributes=attrs,
@@ -77,6 +88,7 @@ class TracingAdapter:
             finally:
                 if self.config.capture_local_spans:
                     self._sequence += 1
+                    span_context = span.get_span_context()
                     recorded = RecordedSpan(
                         span_id=_span_id(
                             name=name,
@@ -92,6 +104,21 @@ class TracingAdapter:
                         frame_id=_span_frame_id(attrs),
                         loop_node_id=_span_loop_node_id(attrs),
                         iteration_index=_span_iteration_index(attrs),
+                        trace_id=(
+                            format_trace_id(span_context.trace_id)
+                            if span_context.is_valid
+                            else None
+                        ),
+                        otel_span_id=(
+                            format_span_id(span_context.span_id)
+                            if span_context.is_valid
+                            else None
+                        ),
+                        parent_span_id=(
+                            format_span_id(parent_context.span_id)
+                            if parent_context.is_valid
+                            else None
+                        ),
                         error_type=error_type,
                         error_message=error_message,
                     )
@@ -181,22 +208,32 @@ def create_tracing_adapter(
     return TracingFactory(resolved, listeners=listeners).create()
 
 
-def _span_frame_id(attributes: Mapping[str, str]) -> str:
-    return attributes.get("mentalmodel.frame.id", "root")
+def _span_frame_id(attributes: Mapping[str, TelemetryAttributeValue]) -> str:
+    value = attributes.get("mentalmodel.frame_id")
+    if isinstance(value, str):
+        return value
+    legacy_value = attributes.get("mentalmodel.frame.id")
+    return legacy_value if isinstance(legacy_value, str) else "root"
 
 
-def _span_loop_node_id(attributes: Mapping[str, str]) -> str | None:
-    value = attributes.get("mentalmodel.loop.node_id")
-    return value if value is not None else None
+def _span_loop_node_id(attributes: Mapping[str, TelemetryAttributeValue]) -> str | None:
+    value = attributes.get("mentalmodel.loop_node_id")
+    if value is None:
+        value = attributes.get("mentalmodel.loop.node_id")
+    return value if isinstance(value, str) else None
 
 
-def _span_iteration_index(attributes: Mapping[str, str]) -> int | None:
-    value = attributes.get("mentalmodel.loop.iteration_index")
+def _span_iteration_index(attributes: Mapping[str, TelemetryAttributeValue]) -> int | None:
+    value = attributes.get("mentalmodel.iteration_index")
+    if value is None:
+        value = attributes.get("mentalmodel.loop.iteration_index")
     if value is None:
         return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
     try:
         return int(value)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 

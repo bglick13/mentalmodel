@@ -3912,7 +3912,9 @@ def _optional_span_node_id(row: Mapping[str, object]) -> str | None:
     attributes = row.get("attributes")
     if not isinstance(attributes, dict):
         return None
-    value = attributes.get("mentalmodel.node.id")
+    value = attributes.get("mentalmodel.node_id")
+    if not isinstance(value, str):
+        value = attributes.get("mentalmodel.node.id")
     return value if isinstance(value, str) else None
 
 
@@ -3923,7 +3925,9 @@ def _optional_span_frame_id(row: Mapping[str, object]) -> str | None:
     attributes = row.get("attributes")
     if not isinstance(attributes, dict):
         return None
-    attr = attributes.get("mentalmodel.frame.id")
+    attr = attributes.get("mentalmodel.frame_id")
+    if not isinstance(attr, str) or not attr:
+        attr = attributes.get("mentalmodel.frame.id")
     return attr if isinstance(attr, str) and attr else None
 
 
@@ -3934,7 +3938,9 @@ def _optional_span_loop_node_id(row: Mapping[str, object]) -> str | None:
     attributes = row.get("attributes")
     if not isinstance(attributes, dict):
         return None
-    attr = attributes.get("mentalmodel.loop.node_id")
+    attr = attributes.get("mentalmodel.loop_node_id")
+    if not isinstance(attr, str) or not attr:
+        attr = attributes.get("mentalmodel.loop.node_id")
     return attr if isinstance(attr, str) and attr else None
 
 
@@ -3945,7 +3951,9 @@ def _optional_span_iteration_index(row: Mapping[str, object]) -> int | None:
     attributes = row.get("attributes")
     if not isinstance(attributes, dict):
         return None
-    attr = attributes.get("mentalmodel.loop.iteration_index")
+    attr = attributes.get("mentalmodel.iteration_index")
+    if attr is None:
+        attr = attributes.get("mentalmodel.loop.iteration_index")
     if isinstance(attr, int) and not isinstance(attr, bool):
         return attr
     if isinstance(attr, str) and attr:
@@ -3962,7 +3970,12 @@ def _optional_span_runtime_profile(row: Mapping[str, object]) -> str | None:
     attributes = row.get("attributes")
     if not isinstance(attributes, dict):
         return None
-    for key in ("mentalmodel.runtime.profile", "mentalmodel.runtime.context"):
+    for key in (
+        "mentalmodel.runtime_profile",
+        "mentalmodel.runtime.profile",
+        "mentalmodel.runtime_context",
+        "mentalmodel.runtime.context",
+    ):
         value = attributes.get(key)
         if isinstance(value, str) and value:
             return value
@@ -3972,7 +3985,9 @@ def _optional_span_runtime_profile(row: Mapping[str, object]) -> str | None:
 def _span_node_id(span: dict[str, JsonValue]) -> str | None:
     attributes = span.get("attributes")
     if isinstance(attributes, dict):
-        value = attributes.get("mentalmodel.node.id")
+        value = attributes.get("mentalmodel.node_id")
+        if not isinstance(value, str):
+            value = attributes.get("mentalmodel.node.id")
         if isinstance(value, str):
             return value
     value = span.get("node_id")

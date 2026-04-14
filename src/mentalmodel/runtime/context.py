@@ -14,6 +14,19 @@ from mentalmodel.environment import (
     RuntimeEnvironment,
 )
 from mentalmodel.ir.graph import IRGraph, IRNode
+from mentalmodel.observability.semantic_conventions import (
+    FRAME_ID,
+    INVOCATION_NAME,
+    ITERATION_INDEX,
+    LOOP_NODE_ID,
+    NODE_ID,
+    NODE_KIND,
+    RUN_ID,
+    RUNTIME_CONTEXT,
+    RUNTIME_PROFILE,
+    TelemetryAttributeValue,
+    with_legacy_trace_aliases,
+)
 from mentalmodel.runtime.frame import (
     ROOT_FRAME,
     ExecutionFrame,
@@ -162,28 +175,31 @@ class ExecutionContext:
             outputs=self.outputs,
         )
 
-    def span_attributes(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-        attrs = {
-            "mentalmodel.run_id": self.run_id,
+    def span_attributes(
+        self,
+        extra: Mapping[str, TelemetryAttributeValue] | None = None,
+    ) -> dict[str, TelemetryAttributeValue]:
+        attrs: dict[str, TelemetryAttributeValue] = {
+            RUN_ID: self.run_id,
+            FRAME_ID: self.frame.frame_id,
         }
         if self.node_id is not None:
-            attrs["mentalmodel.node.id"] = self.node_id
+            attrs[NODE_ID] = self.node_id
         if self.node_kind is not None:
-            attrs["mentalmodel.node.kind"] = self.node_kind
+            attrs[NODE_KIND] = self.node_kind
         if self.runtime_context is not None:
-            attrs["mentalmodel.runtime.context"] = self.runtime_context
+            attrs[RUNTIME_CONTEXT] = self.runtime_context
         if self.runtime_profile is not None:
-            attrs["mentalmodel.runtime.profile"] = self.runtime_profile
+            attrs[RUNTIME_PROFILE] = self.runtime_profile
         if self.invocation_name is not None:
-            attrs["mentalmodel.invocation.name"] = self.invocation_name
-        attrs["mentalmodel.frame.id"] = self.frame.frame_id
+            attrs[INVOCATION_NAME] = self.invocation_name
         if self.frame.loop_node_id is not None:
-            attrs["mentalmodel.loop.node_id"] = self.frame.loop_node_id
+            attrs[LOOP_NODE_ID] = self.frame.loop_node_id
         if self.frame.iteration_index is not None:
-            attrs["mentalmodel.loop.iteration_index"] = str(self.frame.iteration_index)
+            attrs[ITERATION_INDEX] = self.frame.iteration_index
         if extra:
             attrs.update(extra)
-        return attrs
+        return with_legacy_trace_aliases(attrs)
 
     def metric_context(self) -> MetricContext:
         from mentalmodel.observability.metrics import MetricContext
@@ -194,6 +210,9 @@ class ExecutionContext:
             node_id=self.node_id,
             node_kind=self.node_kind,
             runtime_context=self.runtime_context,
+            frame_id=self.frame.frame_id,
+            loop_node_id=self.frame.loop_node_id,
+            iteration_index=self.frame.iteration_index,
             runtime_profile=self.runtime_profile,
             service_name=self.tracing.config.service_name,
             invocation_name=self.invocation_name,

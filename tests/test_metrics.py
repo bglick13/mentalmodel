@@ -42,16 +42,32 @@ class ConstantMetricExtractor:
 
 
 class MetricsTest(unittest.TestCase):
+    def _context(
+        self,
+        *,
+        node_id: str,
+        node_kind: str,
+        runtime_context: str,
+    ) -> MetricContext:
+        return MetricContext(
+            graph_id="graph",
+            run_id="run-1",
+            node_id=node_id,
+            node_kind=node_kind,
+            runtime_context=runtime_context,
+            frame_id="root",
+            loop_node_id=None,
+            iteration_index=None,
+            service_name="mentalmodel-test",
+        )
+
     def test_safe_inference_accepts_flat_numeric_summary(self) -> None:
         observations = infer_output_metric_observations(
             output={"sample_count": 8, "updated_policy_version": 4},
-            context=MetricContext(
-                graph_id="graph",
-                run_id="run-1",
+            context=self._context(
                 node_id="learner_update",
                 node_kind="actor",
                 runtime_context="local",
-                service_name="mentalmodel-test",
             ),
             prefix="mentalmodel.demo.learner_update",
         )
@@ -67,25 +83,19 @@ class MetricsTest(unittest.TestCase):
     def test_safe_inference_rejects_dynamic_reward_map(self) -> None:
         observations = infer_output_metric_observations(
             output={"prompt-0:0": 0.8, "prompt-0:1": 0.7},
-            context=MetricContext(
-                graph_id="graph",
-                run_id="run-1",
+            context=self._context(
                 node_id="pangram_reward",
                 node_kind="effect",
                 runtime_context="sandbox",
-                service_name="mentalmodel-test",
             ),
         )
         self.assertEqual(observations, tuple())
 
     def test_derive_output_metrics_combines_extractors_and_inference(self) -> None:
-        context = MetricContext(
-            graph_id="graph",
-            run_id="run-1",
+        context = self._context(
             node_id="learner_update",
             node_kind="actor",
             runtime_context="local",
-            service_name="mentalmodel-test",
         )
         specs: tuple[OutputMetricSpec[object], ...] = cast_metric_specs(
             (
@@ -110,13 +120,10 @@ class MetricsTest(unittest.TestCase):
         )
 
     def test_project_metric_map_projects_stable_subset_from_nested_map(self) -> None:
-        context = MetricContext(
-            graph_id="graph",
-            run_id="run-1",
+        context = self._context(
             node_id="optimizer_update",
             node_kind="effect",
             runtime_context="trainer",
-            service_name="mentalmodel-test",
         )
         raw_output = {
             "optimizer_metrics": {
@@ -160,13 +167,10 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(raw_metrics["tokens_per_second"], 420.0)
 
     def test_project_flat_metric_map_uses_accessor_for_typed_output(self) -> None:
-        context = MetricContext(
-            graph_id="graph",
-            run_id="run-1",
+        context = self._context(
             node_id="answer_synthesizer",
             node_kind="effect",
             runtime_context="local",
-            service_name="mentalmodel-test",
         )
 
         def answer_metric_map(output: object) -> Mapping[str, object] | None:
@@ -201,13 +205,10 @@ class MetricsTest(unittest.TestCase):
         )
 
     def test_project_metric_map_skips_missing_and_non_numeric_fields(self) -> None:
-        context = MetricContext(
-            graph_id="graph",
-            run_id="run-1",
+        context = self._context(
             node_id="optimizer_update",
             node_kind="effect",
             runtime_context="trainer",
-            service_name="mentalmodel-test",
         )
         spec: OutputMetricSpec[dict[str, object]] = project_metric_map(
             MetricMapProjection(
