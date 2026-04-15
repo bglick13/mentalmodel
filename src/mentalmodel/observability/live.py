@@ -34,6 +34,7 @@ from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.errors import LiveDeliveryCapacityError, LiveIngestionError
 from mentalmodel.ir.graph import IRGraph
 from mentalmodel.ir.records import ExecutionRecord
+from mentalmodel.ir.serialization import ir_graph_to_json
 from mentalmodel.observability.config import TracingConfig, TracingMode, load_tracing_config
 from mentalmodel.observability.metrics import MetricKind, MetricObservation
 from mentalmodel.observability.semantic_conventions import (
@@ -471,7 +472,6 @@ class AsyncLiveExporter(LiveExecutionSink):
         return self._runtime_tracing_config
 
     def start(self, *, graph: IRGraph, analysis: AnalysisReport) -> None:
-        del analysis
         resource_context = TelemetryResourceContext(
             graph_id=graph.graph_id,
             project_id=self._base_resource_context.project_id,
@@ -496,6 +496,8 @@ class AsyncLiveExporter(LiveExecutionSink):
                     error=None,
                     runtime_default_profile_name=self._runtime_default_profile_name,
                     runtime_profile_names=self._runtime_profile_names,
+                    graph_payload=ir_graph_to_json(graph),
+                    analysis_payload=_analysis_payload(analysis),
                 ),
             )
         )
@@ -764,6 +766,8 @@ def _run_lifecycle_envelope(
     error: str | None,
     runtime_default_profile_name: str | None,
     runtime_profile_names: tuple[str, ...],
+    graph_payload: dict[str, JsonValue] | None = None,
+    analysis_payload: dict[str, JsonValue] | None = None,
 ) -> TelemetryEnvelope:
     attributes: dict[str, JsonValue] = {
         GRAPH_ID: graph_id,
@@ -789,6 +793,8 @@ def _run_lifecycle_envelope(
                 "success": success,
                 "error": error,
                 "runtime_profile_names": list(runtime_profile_names),
+                "graph": graph_payload,
+                "analysis": analysis_payload,
             },
             "attributes": attributes,
             "resource_attributes": {GRAPH_ID: graph_id},
@@ -839,6 +845,22 @@ def _post_otlp_batch(
             headers=headers,
         )
     return (len(logs), len(spans), len(metrics))
+
+
+def _analysis_payload(report: AnalysisReport) -> dict[str, JsonValue]:
+    return {
+        "error_count": report.error_count,
+        "warning_count": report.warning_count,
+        "findings": [
+            {
+                "code": finding.code,
+                "severity": finding.severity,
+                "message": finding.message,
+                "node_id": finding.node_id,
+            }
+            for finding in report.findings
+        ],
+    }
 
 
 def _post_protobuf(url: str, payload: bytes, *, headers: Mapping[str, str]) -> None:

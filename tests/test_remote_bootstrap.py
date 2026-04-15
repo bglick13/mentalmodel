@@ -25,6 +25,7 @@ class RemoteBootstrapTest(unittest.TestCase):
             self.assertIn("docker-compose.remote-minimal.yml", written_paths)
             self.assertIn("otel-collector.remote.yml", written_paths)
             self.assertIn("run-dashboard.sh", written_paths)
+            self.assertIn("run-telemetry-consumer.sh", written_paths)
             self.assertIn("start-stack.sh", written_paths)
             self.assertIn("stop-stack.sh", written_paths)
             self.assertIn("sync-local-runs.sh", written_paths)
@@ -48,6 +49,7 @@ class RemoteBootstrapTest(unittest.TestCase):
             self.assertIn("redpanda:", compose_text)
             self.assertIn("clickhouse:", compose_text)
             self.assertIn("otel-collector:", compose_text)
+            self.assertIn("telemetry-consumer:", compose_text)
             self.assertIn('topic: mentalmodel.telemetry.logs', collector_text)
             self.assertIn('topic: mentalmodel.telemetry.traces', collector_text)
             self.assertIn('topic: mentalmodel.telemetry.metrics', collector_text)
@@ -55,6 +57,9 @@ class RemoteBootstrapTest(unittest.TestCase):
             dashboard_script = (output_dir / "run-dashboard.sh").read_text(encoding="utf-8")
             start_script = (output_dir / "start-stack.sh").read_text(encoding="utf-8")
             sync_script = (output_dir / "sync-local-runs.sh").read_text(encoding="utf-8")
+            consume_script = (output_dir / "run-telemetry-consumer.sh").read_text(
+                encoding="utf-8"
+            )
             live_verify_script = (output_dir / "verify-live.sh").read_text(
                 encoding="utf-8"
             )
@@ -62,6 +67,7 @@ class RemoteBootstrapTest(unittest.TestCase):
             self.assertIn("docker compose", start_script)
             self.assertIn("uv run --directory", dashboard_script)
             self.assertIn("uv run --directory", sync_script)
+            self.assertIn("remote consume-telemetry", consume_script)
             self.assertIn("--live-otlp-endpoint", live_verify_script)
             self.assertIn("--live-outbox-dir", live_verify_script)
 

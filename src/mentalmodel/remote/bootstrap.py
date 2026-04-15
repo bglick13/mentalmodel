@@ -57,7 +57,10 @@ def write_remote_demo(
     dashboard_script.chmod(0o755)
 
     compose_path = resolved_output / "docker-compose.remote-minimal.yml"
-    compose_path.write_text(_remote_compose(), encoding="utf-8")
+    compose_path.write_text(
+        _remote_compose(repo_root=_repo_root(mentalmodel_root)),
+        encoding="utf-8",
+    )
 
     collector_config_path = resolved_output / "otel-collector.remote.yml"
     collector_config_path.write_text(_collector_config(), encoding="utf-8")
@@ -93,6 +96,13 @@ def write_remote_demo(
     )
     live_verify_script.chmod(0o755)
 
+    consume_script = resolved_output / "run-telemetry-consumer.sh"
+    consume_script.write_text(
+        _telemetry_consumer_script(repo_root=_repo_root(mentalmodel_root)),
+        encoding="utf-8",
+    )
+    consume_script.chmod(0o755)
+
     readme_path = resolved_output / "REMOTE-DEMO.md"
     readme_path.write_text(
         _remote_demo_readme(
@@ -112,6 +122,7 @@ def write_remote_demo(
         stop_script,
         sync_script,
         live_verify_script,
+        consume_script,
         readme_path,
     )
 
@@ -375,8 +386,8 @@ def _dashboard_script(*, workspace_path: Path, runs_dir: Path, repo_root: Path) 
     )
 
 
-def _remote_compose() -> str:
-    return """services:
+def _remote_compose(*, repo_root: Path) -> str:
+    return f"""services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -474,6 +485,31 @@ def _remote_compose() -> str:
     volumes:
       - ./otel-collector.remote.yml:/etc/otelcol-contrib/config.yaml:ro
       - otelcol-data:/var/lib/otelcol
+
+  telemetry-consumer:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    working_dir: /workspace/repo
+    env_file:
+      - ./mentalmodel.remote.env
+    environment:
+      MENTALMODEL_REMOTE_KAFKA_BROKERS: redpanda:9092
+      MENTALMODEL_REMOTE_CLICKHOUSE_ENDPOINT: http://clickhouse:8123
+    command:
+      - uv
+      - run
+      - --directory
+      - /workspace/repo
+      - mentalmodel
+      - remote
+      - consume-telemetry
+    volumes:
+      - {json.dumps(str(repo_root))}:/workspace/repo:ro
 
 volumes:
   postgres-data:
@@ -625,6 +661,26 @@ def _verify_live_script(*, repo_root: Path) -> str:
     )
 
 
+def _telemetry_consumer_script(*, repo_root: Path) -> str:
+    return "\n".join(
+        (
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'if [[ -f "$SCRIPT_DIR/mentalmodel.remote.env" ]]; then',
+            "  set -a",
+            '  source "$SCRIPT_DIR/mentalmodel.remote.env"',
+            "  set +a",
+            "fi",
+            'REPO_ROOT="${MENTALMODEL_REMOTE_REPO_ROOT:-'
+            + json.dumps(str(repo_root))
+            + '}"',
+            'uv run --directory "$REPO_ROOT" mentalmodel remote consume-telemetry "$@"',
+            "",
+        )
+    )
+
+
 def _remote_demo_readme(
     *,
     workspace: WorkspaceConfig,
@@ -659,6 +715,7 @@ collector-first remote ingestion path.
 - `stop-stack.sh`: stops the backend services
 - `sync-local-runs.sh`: uploads local `.runs` bundles into the shared stack
 - `verify-live.sh`: runs `mentalmodel verify` against the local OTLP collector
+- `run-telemetry-consumer.sh`: manually runs the ClickHouse indexer against the Kafka topics
 
 Registered projects:
 
@@ -692,10 +749,8 @@ cd {output_dir}
 ./verify-live.sh --entrypoint mentalmodel.examples.async_rl.demo:build_program
 ```
 
-This Phase 3 stack validates the producer -> collector -> Kafka-compatible bus
-path and provisions ClickHouse for the next indexing phase. The hosted
-dashboard still reads completed runs from the existing remote bundle path; it
-does not yet query OTLP-ingested live rows directly.
+The stack now includes the ClickHouse indexer consumer, so OTLP live telemetry
+lands in the same hosted query model used by uploaded completed runs.
 
 3. Materialize and sync completed runs from any registered project:
 

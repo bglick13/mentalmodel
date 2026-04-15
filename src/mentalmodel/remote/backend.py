@@ -57,6 +57,11 @@ from mentalmodel.remote.schema import (
 from mentalmodel.remote.sinks import CompletedRunPublishResult, CompletedRunSink
 from mentalmodel.remote.store import RunBundleUpload
 from mentalmodel.remote.sync import build_run_bundle_upload_from_run_dir
+from mentalmodel.remote.telemetry_indexer import TelemetryIndexer
+from mentalmodel.remote.telemetry_store import (
+    ClickHouseTelemetryStore,
+    TelemetryStore,
+)
 from mentalmodel.runtime.runs import (
     RunSummary,
     cast_json_value,
@@ -119,12 +124,21 @@ class RemoteBackendConfig:
     object_store_secret_key: str | None = None
     object_store_secure: bool = True
     cache_dir: Path | None = None
+    clickhouse_endpoint: str | None = None
+    clickhouse_database: str = "mentalmodel"
+    clickhouse_username: str | None = None
+    clickhouse_password: str | None = None
+    kafka_brokers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.database_url:
             raise RemoteContractError("RemoteBackendConfig.database_url cannot be empty.")
         if not self.object_store_bucket:
             raise RemoteContractError("RemoteBackendConfig.object_store_bucket cannot be empty.")
+        if self.clickhouse_endpoint == "":
+            raise RemoteContractError("RemoteBackendConfig.clickhouse_endpoint cannot be empty.")
+        if not self.clickhouse_database:
+            raise RemoteContractError("RemoteBackendConfig.clickhouse_database cannot be empty.")
 
     @classmethod
     def from_env(cls) -> RemoteBackendConfig | None:
@@ -141,6 +155,7 @@ class RemoteBackendConfig:
             return None
         secure_raw = values.get("MENTALMODEL_REMOTE_OBJECT_STORE_SECURE")
         cache_dir_raw = values.get("MENTALMODEL_REMOTE_CACHE_DIR")
+        kafka_brokers = values.get("MENTALMODEL_REMOTE_KAFKA_BROKERS")
         return cls(
             database_url=database_url,
             object_store_bucket=bucket,
@@ -150,6 +165,19 @@ class RemoteBackendConfig:
             object_store_secret_key=values.get("MENTALMODEL_REMOTE_OBJECT_STORE_SECRET_KEY"),
             object_store_secure=False if secure_raw == "false" else True,
             cache_dir=None if not cache_dir_raw else Path(cache_dir_raw).expanduser().resolve(),
+            clickhouse_endpoint=values.get("MENTALMODEL_REMOTE_CLICKHOUSE_ENDPOINT"),
+            clickhouse_database=values.get("MENTALMODEL_REMOTE_CLICKHOUSE_DATABASE", "mentalmodel"),
+            clickhouse_username=values.get("MENTALMODEL_REMOTE_CLICKHOUSE_USERNAME"),
+            clickhouse_password=values.get("MENTALMODEL_REMOTE_CLICKHOUSE_PASSWORD"),
+            kafka_brokers=(
+                ()
+                if not kafka_brokers
+                else tuple(
+                    broker.strip()
+                    for broker in kafka_brokers.split(",")
+                    if broker.strip()
+                )
+            ),
         )
 
 
@@ -3047,11 +3075,13 @@ class RemoteRunStore:
         manifest_index: ManifestIndex,
         artifact_store: ArtifactStore,
         persisted_run_index: PersistedRunIndex | None = None,
+        telemetry_store: TelemetryStore | None = None,
         cache_dir: Path | None = None,
     ) -> None:
         self._manifest_index = manifest_index
         self._artifact_store = artifact_store
         self._persisted_run_index = persisted_run_index
+        self._telemetry_store = telemetry_store
         self.cache_dir = (
             cache_dir.expanduser().resolve()
             if cache_dir is not None
@@ -3064,6 +3094,16 @@ class RemoteRunStore:
             manifest_index=PostgresManifestIndex(config.database_url),
             artifact_store=S3ArtifactStore(config),
             persisted_run_index=PostgresPersistedRunIndex(config.database_url),
+            telemetry_store=(
+                None
+                if config.clickhouse_endpoint is None
+                else ClickHouseTelemetryStore.from_connection(
+                    endpoint=config.clickhouse_endpoint,
+                    database=config.clickhouse_database,
+                    username=config.clickhouse_username,
+                    password=config.clickhouse_password,
+                )
+            ),
             cache_dir=config.cache_dir,
         )
 
@@ -3121,6 +3161,11 @@ class RemoteRunStore:
                     run_id=stored_manifest.run_id,
                     invocation_name=stored_manifest.invocation_name,
                 )
+        if self._telemetry_store is not None:
+            TelemetryIndexer(self._telemetry_store).index_completed_run(
+                manifest=stored_manifest,
+                artifact_map=cached_bodies,
+            )
         run_dir = self._write_materialized_bundle(
             manifest=stored_manifest,
             artifact_prefix=artifact_prefix,

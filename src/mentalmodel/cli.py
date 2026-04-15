@@ -80,6 +80,11 @@ from mentalmodel.remote.sync import (
     sync_runs_for_project,
     sync_runs_to_server,
 )
+from mentalmodel.remote.telemetry_indexer import (
+    TelemetryConsumerConfig,
+    TelemetryIndexer,
+)
+from mentalmodel.remote.telemetry_store import ClickHouseTelemetryStore
 from mentalmodel.remote.workspace import (
     ProjectRunTarget,
     build_project_run_target,
@@ -318,6 +323,10 @@ def run_ui(
     remote_object_store_secret_key: str | None = None,
     remote_object_store_secure: bool | None = None,
     remote_cache_dir: Path | None = None,
+    remote_clickhouse_endpoint: str | None = None,
+    remote_clickhouse_database: str | None = None,
+    remote_clickhouse_username: str | None = None,
+    remote_clickhouse_password: str | None = None,
 ) -> int:
     """Launch the dashboard API and static frontend host."""
 
@@ -350,6 +359,10 @@ def run_ui(
         object_store_secret_key=remote_object_store_secret_key,
         object_store_secure=remote_object_store_secure,
         cache_dir=remote_cache_dir,
+        clickhouse_endpoint=remote_clickhouse_endpoint,
+        clickhouse_database=remote_clickhouse_database,
+        clickhouse_username=remote_clickhouse_username,
+        clickhouse_password=remote_clickhouse_password,
     )
     app = create_dashboard_app(
         runs_dir=runs_dir,
@@ -375,6 +388,10 @@ def _resolve_remote_backend_config(
     object_store_secret_key: str | None,
     object_store_secure: bool | None,
     cache_dir: Path | None,
+    clickhouse_endpoint: str | None = None,
+    clickhouse_database: str | None = None,
+    clickhouse_username: str | None = None,
+    clickhouse_password: str | None = None,
     env_values: dict[str, str] | None = None,
 ) -> RemoteBackendConfig | None:
     if database_url is None and object_store_bucket is None:
@@ -413,6 +430,15 @@ def _resolve_remote_backend_config(
             else (True if env_config is None else env_config.object_store_secure)
         ),
         cache_dir=cache_dir or (None if env_config is None else env_config.cache_dir),
+        clickhouse_endpoint=clickhouse_endpoint
+        or (None if env_config is None else env_config.clickhouse_endpoint),
+        clickhouse_database=clickhouse_database
+        or ("mentalmodel" if env_config is None else env_config.clickhouse_database),
+        clickhouse_username=clickhouse_username
+        or (None if env_config is None else env_config.clickhouse_username),
+        clickhouse_password=clickhouse_password
+        or (None if env_config is None else env_config.clickhouse_password),
+        kafka_brokers=() if env_config is None else env_config.kafka_brokers,
     )
 
 
@@ -1515,6 +1541,10 @@ def run_remote_up(
             if env.get("MENTALMODEL_REMOTE_CACHE_DIR") is None
             else Path(env["MENTALMODEL_REMOTE_CACHE_DIR"])
         ),
+        remote_clickhouse_endpoint=env.get("MENTALMODEL_REMOTE_CLICKHOUSE_ENDPOINT"),
+        remote_clickhouse_database=env.get("MENTALMODEL_REMOTE_CLICKHOUSE_DATABASE"),
+        remote_clickhouse_username=env.get("MENTALMODEL_REMOTE_CLICKHOUSE_USERNAME"),
+        remote_clickhouse_password=env.get("MENTALMODEL_REMOTE_CLICKHOUSE_PASSWORD"),
     )
 
 
@@ -1544,6 +1574,73 @@ def run_remote_down(
         )
         raise MentalModelError(message)
     Console().print(f"[green]stopped[/green] {compose_path}")
+    return 0
+
+
+def run_remote_consume_telemetry(
+    *,
+    kafka_brokers: str | None = None,
+    clickhouse_endpoint: str | None = None,
+    clickhouse_database: str | None = None,
+    clickhouse_username: str | None = None,
+    clickhouse_password: str | None = None,
+    group_id: str = "mentalmodel-clickhouse-indexer",
+    stop_after_idle_ms: int | None = None,
+    max_messages: int | None = None,
+    json_output: bool = False,
+) -> int:
+    """Consume OTLP-derived telemetry from Kafka and materialize it into ClickHouse."""
+
+    backend_config = RemoteBackendConfig.from_env()
+    resolved_kafka_brokers = kafka_brokers or (
+        None
+        if backend_config is None or not backend_config.kafka_brokers
+        else ",".join(backend_config.kafka_brokers)
+    )
+    resolved_clickhouse_endpoint = clickhouse_endpoint or (
+        None if backend_config is None else backend_config.clickhouse_endpoint
+    )
+    if resolved_kafka_brokers in (None, ""):
+        raise MentalModelError(
+            "Kafka brokers are required. Set MENTALMODEL_REMOTE_KAFKA_BROKERS "
+            "or pass --kafka-brokers."
+        )
+    if resolved_clickhouse_endpoint in (None, ""):
+        raise MentalModelError(
+            "ClickHouse endpoint is required. Set MENTALMODEL_REMOTE_CLICKHOUSE_ENDPOINT "
+            "or pass --clickhouse-endpoint."
+        )
+    assert resolved_kafka_brokers is not None
+    assert resolved_clickhouse_endpoint is not None
+    store = ClickHouseTelemetryStore.from_connection(
+        endpoint=resolved_clickhouse_endpoint,
+        database=clickhouse_database
+        or ("mentalmodel" if backend_config is None else backend_config.clickhouse_database),
+        username=clickhouse_username
+        or (None if backend_config is None else backend_config.clickhouse_username),
+        password=clickhouse_password
+        or (None if backend_config is None else backend_config.clickhouse_password),
+    )
+    processed = TelemetryIndexer(store).consume_forever(
+        config=TelemetryConsumerConfig(
+            brokers=tuple(
+                broker.strip()
+                for broker in resolved_kafka_brokers.split(",")
+                if broker.strip()
+            ),
+            group_id=group_id,
+        ),
+        stop_after_idle_ms=stop_after_idle_ms,
+        max_messages=max_messages,
+    )
+    payload = {"processed_messages": processed}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        table = Table(title="mentalmodel remote consume-telemetry")
+        table.add_column("Processed", justify="right")
+        table.add_row(str(processed))
+        Console().print(table)
     return 0
 
 
@@ -2687,6 +2784,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     ui.add_argument("--remote-cache-dir", type=Path)
+    ui.add_argument("--remote-clickhouse-endpoint")
+    ui.add_argument("--remote-clickhouse-database")
+    ui.add_argument("--remote-clickhouse-username")
+    ui.add_argument("--remote-clickhouse-password")
     ui.add_argument("--open-browser", action="store_true")
 
     otel = subparsers.add_parser("otel", help="Inspect or materialize OTEL configuration.")
@@ -2788,6 +2889,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop the generated collector-first backend services.",
     )
     remote_down.add_argument("--output-dir", type=Path, required=True)
+
+    remote_consume = remote_subparsers.add_parser(
+        "consume-telemetry",
+        help="Consume collector-routed Kafka telemetry and index it into ClickHouse.",
+    )
+    remote_consume.add_argument("--kafka-brokers")
+    remote_consume.add_argument("--clickhouse-endpoint")
+    remote_consume.add_argument("--clickhouse-database")
+    remote_consume.add_argument("--clickhouse-username")
+    remote_consume.add_argument("--clickhouse-password")
+    remote_consume.add_argument(
+        "--group-id",
+        default="mentalmodel-clickhouse-indexer",
+    )
+    remote_consume.add_argument("--stop-after-idle-ms", type=int)
+    remote_consume.add_argument("--max-messages", type=int)
+    remote_consume.add_argument("--json", action="store_true", help="Emit JSON output.")
 
     runs = subparsers.add_parser("runs", help="Inspect persisted run artifacts.")
     runs_subparsers = runs.add_subparsers(dest="runs_command")
@@ -2984,6 +3102,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 remote_object_store_secret_key=args.remote_object_store_secret_key,
                 remote_object_store_secure=args.remote_object_store_secure,
                 remote_cache_dir=args.remote_cache_dir,
+                remote_clickhouse_endpoint=args.remote_clickhouse_endpoint,
+                remote_clickhouse_database=args.remote_clickhouse_database,
+                remote_clickhouse_username=args.remote_clickhouse_username,
+                remote_clickhouse_password=args.remote_clickhouse_password,
             )
         if args.command == "otel":
             if args.otel_command == "show-config":
@@ -3053,6 +3175,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             if args.remote_command == "down":
                 return run_remote_down(output_dir=args.output_dir)
+            if args.remote_command == "consume-telemetry":
+                return run_remote_consume_telemetry(
+                    kafka_brokers=args.kafka_brokers,
+                    clickhouse_endpoint=args.clickhouse_endpoint,
+                    clickhouse_database=args.clickhouse_database,
+                    clickhouse_username=args.clickhouse_username,
+                    clickhouse_password=args.clickhouse_password,
+                    group_id=args.group_id,
+                    stop_after_idle_ms=args.stop_after_idle_ms,
+                    max_messages=args.max_messages,
+                    json_output=args.json,
+                )
         if args.command == "install-skills":
             return run_install_skills_command(
                 args.agent,

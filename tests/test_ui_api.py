@@ -13,20 +13,20 @@ from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
+from mentalmodel.core.interfaces import JsonValue
 from mentalmodel.examples.async_rl.demo import build_program
 from mentalmodel.examples.verification_failure import (
     build_program as build_failure_program,
 )
+from mentalmodel.observability.dashboard_metrics import metric_rows_from_live_records
 from mentalmodel.observability.export import write_json, write_jsonl
 from mentalmodel.remote.backend import (
     InMemoryArtifactStore,
     InMemoryEventIndex,
-    InMemoryLiveSessionIndex,
     InMemoryManifestIndex,
     InMemoryPersistedRunIndex,
     InMemoryProjectIndex,
     RemoteEventStore,
-    RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
 )
@@ -34,9 +34,6 @@ from mentalmodel.remote.contracts import (
     ProjectCatalog,
     ProjectCatalogSnapshot,
     ProjectRegistration,
-    RemoteLiveSessionStartRequest,
-    RemoteLiveSessionStatus,
-    RemoteLiveSessionUpdateRequest,
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
 )
@@ -46,6 +43,12 @@ from mentalmodel.remote.events import (
     RemoteOperationStatus,
 )
 from mentalmodel.remote.sync import build_run_bundle_upload
+from mentalmodel.remote.telemetry_store import (
+    InMemoryTelemetryStore,
+    TelemetryRecordRow,
+    TelemetryRunRecord,
+    TelemetrySpanRow,
+)
 from mentalmodel.runtime.runs import RUN_SCHEMA_VERSION
 from mentalmodel.testing import run_verification
 from mentalmodel.ui.api import create_dashboard_app
@@ -119,6 +122,158 @@ class DashboardApiTest(unittest.TestCase):
         )
         write_json(run_dir / "state.json", {"state": {}, "framed_state": []})
         return graph_id, run_id
+
+    def _telemetry_record_row(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        record_id: str,
+        sequence: int,
+        timestamp_ms: int,
+        event_type: str,
+        node_id: str,
+        frame_id: str,
+        frame_path: tuple[str, ...] = ("root",),
+        payload: JsonValue,
+        loop_node_id: str | None = None,
+        iteration_index: int | None = None,
+        invocation_name: str | None = None,
+        runtime_profile_name: str | None = None,
+    ) -> TelemetryRecordRow:
+        return TelemetryRecordRow(
+            graph_id=graph_id,
+            run_id=run_id,
+            record_id=record_id,
+            sequence=sequence,
+            timestamp_ms=timestamp_ms,
+            event_type=event_type,
+            node_id=node_id,
+            frame_id=frame_id,
+            frame_path=list(frame_path),
+            payload=payload,
+            loop_node_id=loop_node_id,
+            iteration_index=iteration_index,
+            invocation_name=invocation_name,
+            runtime_profile_name=runtime_profile_name,
+        )
+
+    def _telemetry_span_row(
+        self,
+        *,
+        graph_id: str,
+        run_id: str,
+        span_key: str,
+        sequence: int,
+        name: str,
+        start_time_ns: int,
+        end_time_ns: int,
+        frame_id: str,
+        attributes: dict[str, JsonValue],
+        trace_id: str | None = None,
+        otel_span_id: str | None = None,
+        parent_span_id: str | None = None,
+        loop_node_id: str | None = None,
+        iteration_index: int | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> TelemetrySpanRow:
+        return TelemetrySpanRow(
+            graph_id=graph_id,
+            run_id=run_id,
+            span_key=span_key,
+            sequence=sequence,
+            name=name,
+            start_time_ns=start_time_ns,
+            end_time_ns=end_time_ns,
+            frame_id=frame_id,
+            attributes=attributes,
+            trace_id=trace_id,
+            otel_span_id=otel_span_id,
+            parent_span_id=parent_span_id,
+            loop_node_id=loop_node_id,
+            iteration_index=iteration_index,
+            error_type=error_type,
+            error_message=error_message,
+        )
+
+    def _seed_remote_telemetry_run(
+        self,
+        store: InMemoryTelemetryStore,
+        *,
+        graph_id: str,
+        run_id: str,
+        created_at_ms: int,
+        updated_at_ms: int | None = None,
+        status: str = "running",
+        success: bool | None = None,
+        invocation_name: str | None = None,
+        project_id: str | None = None,
+        project_label: str | None = None,
+        environment_name: str | None = None,
+        catalog_entry_id: str | None = None,
+        runtime_default_profile_name: str | None = None,
+        runtime_profile_names: tuple[str, ...] = (),
+        graph: dict[str, JsonValue] | None = None,
+        analysis: dict[str, JsonValue] | None = None,
+        error_message: str | None = None,
+        records: tuple[TelemetryRecordRow, ...] = (),
+        spans: tuple[TelemetrySpanRow, ...] = (),
+    ) -> None:
+        effective_updated_at_ms = (
+            updated_at_ms
+            if updated_at_ms is not None
+            else (
+                max((row.timestamp_ms for row in records), default=created_at_ms)
+            )
+        )
+        effective_graph: dict[str, JsonValue] = (
+            graph
+            if graph is not None
+            else {
+                "graph_id": graph_id,
+                "metadata": {},
+                "nodes": [],
+                "edges": [],
+            }
+        )
+        effective_analysis: dict[str, JsonValue] = (
+            analysis
+            if analysis is not None
+            else {"error_count": 0, "warning_count": 0, "findings": []}
+        )
+        store.replace_run(
+            TelemetryRunRecord(
+                graph_id=graph_id,
+                run_id=run_id,
+                created_at_ms=created_at_ms,
+                updated_at_ms=effective_updated_at_ms,
+                status=status,
+                success=success,
+                invocation_name=invocation_name,
+                project_id=project_id,
+                project_label=project_label,
+                environment_name=environment_name,
+                catalog_entry_id=catalog_entry_id,
+                runtime_default_profile_name=runtime_default_profile_name,
+                runtime_profile_names=runtime_profile_names,
+                graph=effective_graph,
+                analysis=effective_analysis,
+                error_message=error_message,
+            )
+        )
+        store.replace_records(graph_id=graph_id, run_id=run_id, rows=records)
+        store.replace_spans(graph_id=graph_id, run_id=run_id, rows=spans)
+        store.replace_metric_rows(
+            graph_id=graph_id,
+            run_id=run_id,
+            rows=metric_rows_from_live_records(
+                cast(
+                    tuple[dict[str, object], ...],
+                    tuple(row.as_dict(include_payload=True) for row in records),
+                )
+            ),
+        )
 
     def test_dashboard_api_accepts_custom_catalog_entries(self) -> None:
         fixture_entry = default_dashboard_catalog()[0]
@@ -378,18 +533,19 @@ class DashboardApiTest(unittest.TestCase):
 
     def test_remote_event_endpoint_and_run_overview_include_delivery_health(self) -> None:
         project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+        telemetry_store = InMemoryTelemetryStore()
         event_store = RemoteEventStore(event_index=InMemoryEventIndex())
         run_store = RemoteRunStore(
             artifact_store=InMemoryArtifactStore(),
             manifest_index=InMemoryManifestIndex(),
+            telemetry_store=telemetry_store,
         )
         client = TestClient(
             create_dashboard_app(
                 runs_dir=None,
                 frontend_dist=None,
                 remote_project_store=project_store,
-                remote_live_session_store=live_store,
+                remote_telemetry_store=telemetry_store,
                 remote_run_store=run_store,
                 remote_event_store=event_store,
                 remote_api_key="test-key",
@@ -436,95 +592,46 @@ class DashboardApiTest(unittest.TestCase):
         self.assertEqual(events.status_code, 200)
         payload = events.json()["events"]
         self.assertGreaterEqual(len(payload), 1)
-        self.assertIn(payload[0]["kind"], {"run.upload", "live.commit"})
-
-    def test_live_session_listing_is_shallow_by_default(self) -> None:
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
-        live_store.start_session(
-            RemoteLiveSessionStartRequest(
-                graph_id="graph",
-                run_id="run-1",
-                started_at_ms=1000,
-                graph={"graph_id": "graph", "nodes": [], "edges": [], "metadata": {}},
-                analysis={"error_count": 0, "warning_count": 0, "findings": []},
-            )
-        )
-        live_store.apply_update(
-            RemoteLiveSessionUpdateRequest(
-                graph_id="graph",
-                run_id="run-1",
-                updated_at_ms=1100,
-                records=(
-                    {
-                        "record_id": "run-1:1",
-                        "run_id": "run-1",
-                        "node_id": "node",
-                        "frame_id": "root",
-                        "frame_path": ["root"],
-                        "loop_node_id": None,
-                        "iteration_index": None,
-                        "event_type": "node.succeeded",
-                        "sequence": 1,
-                        "timestamp_ms": 1100,
-                        "payload": {"output": {"value": 1}},
-                    },
-                ),
-            )
-        )
-
-        listed = live_store.list_sessions(graph_id="graph")
-        self.assertEqual(len(listed), 1)
-        self.assertEqual(listed[0].records, ())
-        self.assertEqual(listed[0].spans, ())
-
-        full = live_store.get_session(graph_id="graph", run_id="run-1")
-        self.assertEqual(len(full.records), 1)
+        self.assertEqual(payload[0]["kind"], "run.upload")
 
     def test_remote_live_overview_uses_shallow_session_and_invariant_index(self) -> None:
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
-        live_store.start_session(
-            RemoteLiveSessionStartRequest(
-                graph_id="graph",
-                run_id="run-1",
-                started_at_ms=1000,
-                graph={"graph_id": "graph", "nodes": [], "edges": [], "metadata": {}},
-                analysis={"error_count": 0, "warning_count": 0, "findings": []},
-            )
-        )
-        live_store.apply_update(
-            RemoteLiveSessionUpdateRequest(
-                graph_id="graph",
-                run_id="run-1",
-                updated_at_ms=1100,
-                records=(
-                    {
-                        "record_id": "run-1:1",
-                        "run_id": "run-1",
-                        "node_id": "metrics",
-                        "frame_id": "training_loop[0]",
-                        "frame_path": ["root", "training_loop[0]"],
-                        "loop_node_id": "training_loop",
-                        "iteration_index": 0,
-                        "event_type": "node.succeeded",
-                        "sequence": 1,
-                        "timestamp_ms": 1100,
-                        "payload": {"output": {"train.prompt_count": 4}},
-                    },
-                    {
-                        "record_id": "run-1:2",
-                        "run_id": "run-1",
-                        "node_id": "check",
-                        "frame_id": "training_loop[0]",
-                        "frame_path": ["root", "training_loop[0]"],
-                        "loop_node_id": "training_loop",
-                        "iteration_index": 0,
-                        "event_type": "invariant.checked",
-                        "sequence": 2,
-                        "timestamp_ms": 1101,
-                        "payload": {"status": "failed", "severity": "warning"},
-                    },
+        telemetry_store = InMemoryTelemetryStore()
+        self._seed_remote_telemetry_run(
+            telemetry_store,
+            graph_id="graph",
+            run_id="run-1",
+            created_at_ms=1000,
+            invocation_name="live",
+            records=(
+                self._telemetry_record_row(
+                    graph_id="graph",
+                    run_id="run-1",
+                    record_id="run-1:1",
+                    sequence=1,
+                    timestamp_ms=1100,
+                    event_type="node.succeeded",
+                    node_id="metrics",
+                    frame_id="training_loop[0]",
+                    frame_path=("root", "training_loop[0]"),
+                    loop_node_id="training_loop",
+                    iteration_index=0,
+                    payload={"output": {"train.prompt_count": 4}},
                 ),
-            )
+                self._telemetry_record_row(
+                    graph_id="graph",
+                    run_id="run-1",
+                    record_id="run-1:2",
+                    sequence=2,
+                    timestamp_ms=1101,
+                    event_type="invariant.checked",
+                    node_id="check",
+                    frame_id="training_loop[0]",
+                    frame_path=("root", "training_loop[0]"),
+                    loop_node_id="training_loop",
+                    iteration_index=0,
+                    payload={"status": "failed", "severity": "warning"},
+                ),
+            ),
         )
         service = DashboardService(
             runs_dir=None,
@@ -548,19 +655,19 @@ class DashboardApiTest(unittest.TestCase):
                     launch_enabled=False,
                 ),
             ),
-            remote_live_session_store=live_store,
+            remote_telemetry_store=telemetry_store,
         )
         with (
             patch.object(
-                live_store,
-                "get_session",
-                wraps=live_store.get_session,
-            ) as get_session_spy,
-            patch.object(
-                live_store,
+                telemetry_store,
                 "list_invariants",
-                wraps=live_store.list_invariants,
+                wraps=telemetry_store.list_invariants,
             ) as invariants_spy,
+            patch.object(
+                telemetry_store,
+                "get_run",
+                wraps=telemetry_store.get_run,
+            ) as get_run_spy,
         ):
             overview = service.get_run_overview(graph_id="graph", run_id="run-1")
         overview_summary = cast(dict[str, object], overview["summary"])
@@ -568,18 +675,17 @@ class DashboardApiTest(unittest.TestCase):
         self.assertEqual(overview_summary["status"], "running")
         self.assertEqual(len(overview_invariants), 1)
         self.assertEqual(invariants_spy.call_count, 1)
-        self.assertEqual(get_session_spy.call_args.kwargs["include_payloads"], False)
+        self.assertEqual(get_run_spy.call_args.kwargs["graph_id"], "graph")
+        self.assertEqual(get_run_spy.call_args.kwargs["run_id"], "run-1")
 
     def test_run_overview_uses_short_lived_cache(self) -> None:
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
-        live_store.start_session(
-            RemoteLiveSessionStartRequest(
-                graph_id="graph",
-                run_id="run-1",
-                started_at_ms=1000,
-                graph={"graph_id": "graph", "nodes": [], "edges": [], "metadata": {}},
-                analysis={"error_count": 0, "warning_count": 0, "findings": []},
-            )
+        telemetry_store = InMemoryTelemetryStore()
+        self._seed_remote_telemetry_run(
+            telemetry_store,
+            graph_id="graph",
+            run_id="run-1",
+            created_at_ms=1000,
+            invocation_name="live",
         )
         service = DashboardService(
             runs_dir=None,
@@ -596,7 +702,7 @@ class DashboardApiTest(unittest.TestCase):
                     launch_enabled=False,
                 ),
             ),
-            remote_live_session_store=live_store,
+            remote_telemetry_store=telemetry_store,
         )
         service.remote_event_store = Mock()
         service.remote_event_store.summarize_run.return_value = RemoteDeliveryHealthSummary(
@@ -608,9 +714,9 @@ class DashboardApiTest(unittest.TestCase):
             recent_failure_count=0,
         )
         with patch.object(
-            live_store,
+            telemetry_store,
             "list_invariants",
-            wraps=live_store.list_invariants,
+            wraps=telemetry_store.list_invariants,
         ) as invariants_spy:
             first = service.get_run_overview(graph_id="graph", run_id="run-1")
             second = service.get_run_overview(graph_id="graph", run_id="run-1")
@@ -658,37 +764,29 @@ class DashboardApiTest(unittest.TestCase):
         self.assertEqual(lower_spy.call_count, 1)
 
     def test_remote_live_metric_groups_use_live_metric_index(self) -> None:
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
-        live_store.start_session(
-            RemoteLiveSessionStartRequest(
-                graph_id="graph",
-                run_id="run-1",
-                started_at_ms=1000,
-                graph={"graph_id": "graph", "nodes": [], "edges": [], "metadata": {}},
-                analysis={"error_count": 0, "warning_count": 0, "findings": []},
-            )
-        )
-        live_store.apply_update(
-            RemoteLiveSessionUpdateRequest(
-                graph_id="graph",
-                run_id="run-1",
-                updated_at_ms=1100,
-                records=(
-                    {
-                        "record_id": "run-1:1",
-                        "run_id": "run-1",
-                        "node_id": "metrics",
-                        "frame_id": "training_loop[0]",
-                        "frame_path": ["root", "training_loop[0]"],
-                        "loop_node_id": "training_loop",
-                        "iteration_index": 0,
-                        "event_type": "node.succeeded",
-                        "sequence": 1,
-                        "timestamp_ms": 1100,
-                        "payload": {"output": {"train.prompt_count": 4}},
-                    },
+        telemetry_store = InMemoryTelemetryStore()
+        self._seed_remote_telemetry_run(
+            telemetry_store,
+            graph_id="graph",
+            run_id="run-1",
+            created_at_ms=1000,
+            invocation_name="live",
+            records=(
+                self._telemetry_record_row(
+                    graph_id="graph",
+                    run_id="run-1",
+                    record_id="run-1:1",
+                    sequence=1,
+                    timestamp_ms=1100,
+                    event_type="node.succeeded",
+                    node_id="metrics",
+                    frame_id="training_loop[0]",
+                    frame_path=("root", "training_loop[0]"),
+                    loop_node_id="training_loop",
+                    iteration_index=0,
+                    payload={"output": {"train.prompt_count": 4}},
                 ),
-            )
+            ),
         )
         service = DashboardService(
             runs_dir=None,
@@ -712,19 +810,14 @@ class DashboardApiTest(unittest.TestCase):
                     launch_enabled=False,
                 ),
             ),
-            remote_live_session_store=live_store,
+            remote_telemetry_store=telemetry_store,
         )
         with (
             patch.object(
-                live_store,
+                telemetry_store,
                 "list_metrics",
-                wraps=live_store.list_metrics,
+                wraps=telemetry_store.list_metrics,
             ) as metrics_spy,
-            patch.object(
-                live_store,
-                "get_session",
-                wraps=live_store.get_session,
-            ) as get_session_spy,
         ):
             payload = service.get_run_metric_groups(
                 spec_id="live-spec",
@@ -736,46 +829,33 @@ class DashboardApiTest(unittest.TestCase):
         metric_groups = cast(list[object], payload["groups"])
         self.assertEqual(len(metric_groups), 1)
         self.assertEqual(metrics_spy.call_count, 1)
-        self.assertEqual(get_session_spy.call_args.kwargs["include_payloads"], False)
 
     def test_run_records_default_to_compact_rows(self) -> None:
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
-        live_store.start_session(
-            RemoteLiveSessionStartRequest(
-                graph_id="graph",
-                run_id="run-1",
-                started_at_ms=1000,
-                graph={"graph_id": "graph", "nodes": [], "edges": [], "metadata": {}},
-                analysis={"error_count": 0, "warning_count": 0, "findings": []},
-            )
-        )
-        live_store.apply_update(
-            RemoteLiveSessionUpdateRequest(
-                graph_id="graph",
-                run_id="run-1",
-                updated_at_ms=1100,
-                records=(
-                    {
-                        "record_id": "run-1:1",
-                        "run_id": "run-1",
-                        "node_id": "metrics",
-                        "frame_id": "root",
-                        "frame_path": ["root"],
-                        "loop_node_id": None,
-                        "iteration_index": None,
-                        "event_type": "node.succeeded",
-                        "sequence": 1,
-                        "timestamp_ms": 1100,
-                        "payload": {"output": {"value": 1}},
-                    },
+        telemetry_store = InMemoryTelemetryStore()
+        self._seed_remote_telemetry_run(
+            telemetry_store,
+            graph_id="graph",
+            run_id="run-1",
+            created_at_ms=1000,
+            records=(
+                self._telemetry_record_row(
+                    graph_id="graph",
+                    run_id="run-1",
+                    record_id="run-1:1",
+                    sequence=1,
+                    timestamp_ms=1100,
+                    event_type="node.succeeded",
+                    node_id="metrics",
+                    frame_id="root",
+                    payload={"output": {"value": 1}},
                 ),
-            )
+            ),
         )
         client = TestClient(
             create_dashboard_app(
                 runs_dir=None,
                 frontend_dist=None,
-                remote_live_session_store=live_store,
+                remote_telemetry_store=telemetry_store,
             )
         )
         compact = client.get("/api/runs/graph/run-1/records", params={"limit": 10})
@@ -1083,86 +1163,60 @@ class DashboardApiTest(unittest.TestCase):
                 ),
             ),
         )
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+        telemetry_store = InMemoryTelemetryStore()
+        self._seed_remote_telemetry_run(
+            telemetry_store,
+            graph_id="custom_live_graph",
+            run_id="run-live-custom-view",
+            created_at_ms=1000,
+            invocation_name="custom_live_invocation",
+            project_id="custom-project",
+            records=(
+                self._telemetry_record_row(
+                    graph_id="custom_live_graph",
+                    run_id="run-live-custom-view",
+                    record_id="live:sample_rows:succeeded",
+                    sequence=1,
+                    timestamp_ms=1100,
+                    event_type="node.succeeded",
+                    node_id="sample_rows",
+                    frame_id="root",
+                    payload={
+                        "output": {
+                            "rows": [
+                                {
+                                    "prompt_text": "Prompt A",
+                                    "reward": {"pangram": 0.9},
+                                },
+                                {
+                                    "prompt_text": "Prompt B",
+                                    "reward": {"pangram": 0.7},
+                                },
+                            ]
+                        }
+                    },
+                ),
+                self._telemetry_record_row(
+                    graph_id="custom_live_graph",
+                    run_id="run-live-custom-view",
+                    record_id="live:summary_node:succeeded",
+                    sequence=2,
+                    timestamp_ms=1101,
+                    event_type="node.succeeded",
+                    node_id="summary_node",
+                    frame_id="root",
+                    payload={"output": {"run_label": "live-synthetic"}},
+                ),
+            ),
+        )
         client = TestClient(
             create_dashboard_app(
                 runs_dir=None,
                 frontend_dist=None,
                 catalog_entries=(custom_entry,),
-                remote_live_session_store=live_store,
-                remote_api_key="test-key",
+                remote_telemetry_store=telemetry_store,
             )
         )
-
-        start_response = client.post(
-            "/api/remote/live/sessions/start",
-            headers={"Authorization": "Bearer test-key"},
-            json=RemoteLiveSessionStartRequest(
-                graph_id="custom_live_graph",
-                run_id="run-live-custom-view",
-                started_at_ms=1000,
-                project_id="custom-project",
-                invocation_name="custom_live_invocation",
-                graph={"graph_id": "custom_live_graph", "metadata": {}, "nodes": [], "edges": []},
-                analysis={"error_count": 0, "warning_count": 0, "findings": []},
-                runtime_default_profile_name=None,
-                runtime_profile_names=(),
-            ).as_dict(),
-        )
-        self.assertEqual(start_response.status_code, 200)
-
-        update_response = client.post(
-            "/api/remote/live/sessions/run-live-custom-view",
-            headers={"Authorization": "Bearer test-key"},
-            json=RemoteLiveSessionUpdateRequest(
-                graph_id="custom_live_graph",
-                run_id="run-live-custom-view",
-                updated_at_ms=1100,
-                records=(
-                    {
-                        "record_id": "live:sample_rows:succeeded",
-                        "run_id": "run-live-custom-view",
-                        "node_id": "sample_rows",
-                        "frame_id": "root",
-                        "frame_path": ["root"],
-                        "loop_node_id": None,
-                        "iteration_index": None,
-                        "event_type": "node.succeeded",
-                        "sequence": 1,
-                        "timestamp_ms": 1100,
-                        "payload": {
-                            "output": {
-                                "rows": [
-                                    {
-                                        "prompt_text": "Prompt A",
-                                        "reward": {"pangram": 0.9},
-                                    },
-                                    {
-                                        "prompt_text": "Prompt B",
-                                        "reward": {"pangram": 0.7},
-                                    },
-                                ]
-                            }
-                        },
-                    },
-                    {
-                        "record_id": "live:summary_node:succeeded",
-                        "run_id": "run-live-custom-view",
-                        "node_id": "summary_node",
-                        "frame_id": "root",
-                        "frame_path": ["root"],
-                        "loop_node_id": None,
-                        "iteration_index": None,
-                        "event_type": "node.succeeded",
-                        "sequence": 2,
-                        "timestamp_ms": 1101,
-                        "payload": {"output": {"run_label": "live-synthetic"}},
-                    },
-                ),
-                spans=(),
-            ).as_dict(),
-        )
-        self.assertEqual(update_response.status_code, 200)
 
         response = client.get(
             "/api/catalog/custom-live-view-entry/runs/run-live-custom-view/views/sample-quality"
@@ -1803,9 +1857,9 @@ class DashboardApiTest(unittest.TestCase):
             )
             self.assertEqual(indexed.manifest.project_id, "pangramanizer-training")
 
-    def test_remote_live_session_appears_in_run_queries_before_bundle_upload(self) -> None:
+    def test_remote_telemetry_run_appears_in_run_queries(self) -> None:
         project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
-        live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+        telemetry_store = InMemoryTelemetryStore()
         entry = default_dashboard_catalog()[0]
         remote_entry_payload = dict(entry.as_dict())
         remote_entry_payload["spec_id"] = "pangramanizer-smoke"
@@ -1834,82 +1888,60 @@ class DashboardApiTest(unittest.TestCase):
                 runs_dir=None,
                 frontend_dist=None,
                 remote_project_store=project_store,
-                remote_live_session_store=live_store,
-                remote_api_key="test-key",
+                remote_telemetry_store=telemetry_store,
             )
         )
-
-        start_response = client.post(
-            "/api/remote/live/sessions/start",
-            headers={"Authorization": "Bearer test-key"},
-            json=RemoteLiveSessionStartRequest(
-                project_id="pangramanizer",
-                graph_id="pangramanizer_training",
-                run_id="run-live-123",
-                invocation_name="pangram_real_smoke",
-                environment_name="prod",
-                catalog_entry_id="pangramanizer-smoke",
-                started_at_ms=1000,
-                graph={
-                    "graph_id": "pangramanizer_training",
-                    "metadata": {},
-                    "nodes": [{"node_id": "source", "kind": "actor", "label": "Source"}],
-                    "edges": [],
-                },
-                analysis={"error_count": 0, "warning_count": 0, "findings": []},
-                runtime_default_profile_name="real",
-                runtime_profile_names=("real",),
-            ).as_dict(),
-        )
-        self.assertEqual(start_response.status_code, 200)
-        update_response = client.post(
-            "/api/remote/live/sessions/run-live-123",
-            headers={"Authorization": "Bearer test-key"},
-            json=RemoteLiveSessionUpdateRequest(
-                graph_id="pangramanizer_training",
-                run_id="run-live-123",
-                updated_at_ms=1100,
-                records=(
-                    {
-                        "record_id": "run-live-123:1",
-                        "run_id": "run-live-123",
-                        "node_id": "source",
-                        "frame_id": "root",
-                        "frame_path": ["root"],
-                        "loop_node_id": None,
-                        "iteration_index": None,
-                        "event_type": "node.succeeded",
-                        "sequence": 1,
-                        "timestamp_ms": 1100,
-                        "payload": {
-                            "output": {
-                                "queue_summary": {
-                                    "auto_publish": 2,
-                                    "escalations": 1,
-                                }
+        self._seed_remote_telemetry_run(
+            telemetry_store,
+            graph_id="pangramanizer_training",
+            run_id="run-live-123",
+            created_at_ms=1000,
+            invocation_name="pangram_real_smoke",
+            project_id="pangramanizer",
+            environment_name="prod",
+            catalog_entry_id="pangramanizer-smoke",
+            runtime_default_profile_name="real",
+            runtime_profile_names=("real",),
+            graph={
+                "graph_id": "pangramanizer_training",
+                "metadata": {},
+                "nodes": [{"node_id": "source", "kind": "actor", "label": "Source"}],
+                "edges": [],
+            },
+            records=(
+                self._telemetry_record_row(
+                    graph_id="pangramanizer_training",
+                    run_id="run-live-123",
+                    record_id="run-live-123:1",
+                    sequence=1,
+                    timestamp_ms=1100,
+                    event_type="node.succeeded",
+                    node_id="source",
+                    frame_id="root",
+                    payload={
+                        "output": {
+                            "queue_summary": {
+                                "auto_publish": 2,
+                                "escalations": 1,
                             }
-                        },
+                        }
                     },
                 ),
-                spans=(
-                    {
-                        "span_id": "span-1:root:100:actor:source",
-                        "sequence": 1,
-                        "name": "actor:source",
-                        "start_time_ns": 100,
-                        "end_time_ns": 200,
-                        "duration_ns": 100,
-                        "attributes": {"mentalmodel.node.id": "source"},
-                        "frame_id": "root",
-                        "loop_node_id": None,
-                        "iteration_index": None,
-                        "error_type": None,
-                        "error_message": None,
-                    },
+            ),
+            spans=(
+                self._telemetry_span_row(
+                    graph_id="pangramanizer_training",
+                    run_id="run-live-123",
+                    span_key="span-1:root:100:actor:source",
+                    sequence=1,
+                    name="actor:source",
+                    start_time_ns=100,
+                    end_time_ns=200,
+                    frame_id="root",
+                    attributes={"mentalmodel.node_id": "source"},
                 ),
-            ).as_dict(),
+            ),
         )
-        self.assertEqual(update_response.status_code, 200)
 
         runs_response = client.get(
             "/api/runs",
@@ -1922,7 +1954,7 @@ class DashboardApiTest(unittest.TestCase):
         runs = runs_response.json()["runs"]
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["run_id"], "run-live-123")
-        self.assertEqual(runs[0]["source"], "remote-live")
+        self.assertEqual(runs[0]["source"], "remote")
 
         overview = client.get("/api/runs/pangramanizer_training/run-live-123/overview")
         self.assertEqual(overview.status_code, 200)
@@ -1937,7 +1969,7 @@ class DashboardApiTest(unittest.TestCase):
         self.assertEqual(records.status_code, 200)
         self.assertEqual(len(records.json()["items"]), 1)
 
-    def test_completed_bundle_replaces_remote_live_handle_in_run_queries(self) -> None:
+    def test_completed_bundle_replaces_remote_live_row_in_query_model(self) -> None:
         with (
             tempfile.TemporaryDirectory() as local_tmp,
             tempfile.TemporaryDirectory() as remote_tmp,
@@ -1960,8 +1992,9 @@ class DashboardApiTest(unittest.TestCase):
                 manifest_index=InMemoryManifestIndex(),
                 artifact_store=InMemoryArtifactStore(),
                 cache_dir=remote_root,
+                telemetry_store=InMemoryTelemetryStore(),
             )
-            live_store = RemoteLiveSessionStore(live_session_index=InMemoryLiveSessionIndex())
+            telemetry_store = cast(InMemoryTelemetryStore, remote_store._telemetry_store)
             project_store = RemoteProjectStore(project_index=InMemoryProjectIndex())
             project_store.link_project(
                 RemoteProjectLinkRequest(
@@ -1975,71 +2008,53 @@ class DashboardApiTest(unittest.TestCase):
                     runs_dir=None,
                     frontend_dist=None,
                     remote_run_store=remote_store,
+                    remote_telemetry_store=telemetry_store,
                     remote_project_store=project_store,
-                    remote_live_session_store=live_store,
                     remote_api_key="test-key",
                 )
             )
-
-            start = client.post(
-                "/api/remote/live/sessions/start",
-                headers={"Authorization": "Bearer test-key"},
-                json=RemoteLiveSessionStartRequest(
-                    project_id="mentalmodel-examples",
-                    graph_id="async_rl_demo",
-                    run_id=run_id,
-                    invocation_name="async_rl_demo",
-                    environment_name="prod",
-                    started_at_ms=1000,
-                    graph={
-                        "graph_id": "async_rl_demo",
-                        "metadata": {},
-                        "nodes": [
-                            {
-                                "node_id": "prompt_sampler",
-                                "kind": "actor",
-                                "label": "Prompt Sampler",
-                            }
-                        ],
-                        "edges": [],
-                    },
-                    analysis={"error_count": 0, "warning_count": 0, "findings": []},
-                ).as_dict(),
-            )
-            self.assertEqual(start.status_code, 200)
-            update = client.post(
-                f"/api/remote/live/sessions/{run_id}",
-                headers={"Authorization": "Bearer test-key"},
-                json=RemoteLiveSessionUpdateRequest(
-                    graph_id="async_rl_demo",
-                    run_id=run_id,
-                    updated_at_ms=1100,
-                    status=RemoteLiveSessionStatus.RUNNING,
-                    records=(
+            self._seed_remote_telemetry_run(
+                telemetry_store,
+                graph_id="async_rl_demo",
+                run_id=run_id,
+                created_at_ms=1000,
+                invocation_name="async_rl_demo",
+                project_id="mentalmodel-examples",
+                environment_name="prod",
+                graph={
+                    "graph_id": "async_rl_demo",
+                    "metadata": {},
+                    "nodes": [
                         {
-                            "record_id": f"{run_id}:1",
-                            "run_id": run_id,
                             "node_id": "prompt_sampler",
-                            "frame_id": "root",
-                            "frame_path": ["root"],
-                            "loop_node_id": None,
-                            "iteration_index": None,
-                            "event_type": "node.succeeded",
-                            "sequence": 1,
-                            "timestamp_ms": 1100,
-                            "payload": {"output": {"prompt_count": 8}},
-                        },
+                            "kind": "actor",
+                            "label": "Prompt Sampler",
+                        }
+                    ],
+                    "edges": [],
+                },
+                records=(
+                    self._telemetry_record_row(
+                        graph_id="async_rl_demo",
+                        run_id=run_id,
+                        record_id=f"{run_id}:1",
+                        sequence=1,
+                        timestamp_ms=1100,
+                        event_type="node.succeeded",
+                        node_id="prompt_sampler",
+                        frame_id="root",
+                        payload={"output": {"prompt_count": 8}},
                     ),
-                ).as_dict(),
+                ),
             )
-            self.assertEqual(update.status_code, 200)
 
             before = client.get(
                 "/api/runs",
                 params={"graph_id": "async_rl_demo"},
             )
             self.assertEqual(before.status_code, 200)
-            self.assertEqual(before.json()["runs"][0]["source"], "remote-live")
+            self.assertEqual(before.json()["runs"][0]["source"], "remote")
+            self.assertEqual(before.json()["runs"][0]["status"], "running")
 
             ingest = client.post(
                 "/api/remote/runs",
@@ -2056,20 +2071,24 @@ class DashboardApiTest(unittest.TestCase):
             runs = after.json()["runs"]
             self.assertEqual(len(runs), 1)
             self.assertEqual(runs[0]["run_id"], run_id)
-            self.assertEqual(runs[0]["source"], "persisted")
+            self.assertEqual(runs[0]["source"], "remote")
+            self.assertEqual(runs[0]["status"], "succeeded")
 
             overview = client.get(f"/api/runs/async_rl_demo/{run_id}/overview")
             self.assertEqual(overview.status_code, 200)
-            self.assertEqual(overview.json()["summary"]["source"], "persisted")
+            self.assertEqual(overview.json()["summary"]["source"], "remote")
             records = client.get(
                 f"/api/runs/async_rl_demo/{run_id}/records",
-                params={"limit": 2},
+                params={"limit": 2, "include_payload": "true"},
             )
             self.assertEqual(records.status_code, 200)
             self.assertGreater(records.json()["total_count"], 0)
+            self.assertIn("payload", records.json()["items"][0])
             spans = client.get(
                 f"/api/runs/async_rl_demo/{run_id}/spans",
                 params={"limit": 2},
             )
             self.assertEqual(spans.status_code, 200)
             self.assertIn("total_count", spans.json())
+            indexed_run = telemetry_store.get_run(graph_id="async_rl_demo", run_id=run_id)
+            self.assertGreater(indexed_run.record_count, 1)

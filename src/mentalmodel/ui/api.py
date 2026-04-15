@@ -15,14 +15,11 @@ from mentalmodel.pagination import PageSlice
 from mentalmodel.remote.backend import (
     RemoteBackendConfig,
     RemoteEventStore,
-    RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
 )
 from mentalmodel.remote.contracts import (
     ProjectCatalog,
-    RemoteLiveSessionStartRequest,
-    RemoteLiveSessionUpdateRequest,
     RemoteProjectCatalogPublishRequest,
     RemoteProjectLinkRequest,
     RemoteRunUploadReceipt,
@@ -33,6 +30,7 @@ from mentalmodel.remote.events import (
     RemoteOperationStatus,
 )
 from mentalmodel.remote.store import FileRemoteRunStore, RunBundleUpload
+from mentalmodel.remote.telemetry_store import ClickHouseTelemetryStore, TelemetryStore
 from mentalmodel.ui.catalog import DashboardCatalogEntry
 from mentalmodel.ui.service import DashboardService
 
@@ -45,8 +43,8 @@ def create_dashboard_app(
     project_catalogs: tuple[ProjectCatalog, ...] | None = None,
     remote_backend_config: RemoteBackendConfig | None = None,
     remote_run_store: RemoteRunStore | None = None,
+    remote_telemetry_store: TelemetryStore | None = None,
     remote_project_store: RemoteProjectStore | None = None,
-    remote_live_session_store: RemoteLiveSessionStore | None = None,
     remote_event_store: RemoteEventStore | None = None,
     remote_api_key: str | None = None,
 ) -> FastAPI:
@@ -70,13 +68,18 @@ def create_dashboard_app(
             else RemoteProjectStore.from_config(remote_backend_config)
         )
     )
-    configured_remote_live_store = (
-        remote_live_session_store
-        if remote_live_session_store is not None
+    configured_remote_telemetry_store = (
+        remote_telemetry_store
+        if remote_telemetry_store is not None
         else (
             None
-            if remote_backend_config is None
-            else RemoteLiveSessionStore.from_config(remote_backend_config)
+            if remote_backend_config is None or remote_backend_config.clickhouse_endpoint is None
+            else ClickHouseTelemetryStore.from_connection(
+                endpoint=remote_backend_config.clickhouse_endpoint,
+                database=remote_backend_config.clickhouse_database,
+                username=remote_backend_config.clickhouse_username,
+                password=remote_backend_config.clickhouse_password,
+            )
         )
     )
     configured_remote_event_store = (
@@ -93,8 +96,8 @@ def create_dashboard_app(
         catalog_entries=catalog_entries,
         project_catalogs=project_catalogs,
         remote_run_store=configured_remote_store,
+        remote_telemetry_store=configured_remote_telemetry_store,
         remote_project_store=configured_remote_project_store,
-        remote_live_session_store=configured_remote_live_store,
         remote_event_store=configured_remote_event_store,
     )
     ingest_store = (
@@ -267,12 +270,6 @@ def create_dashboard_app(
                     invocation_name=upload.manifest.invocation_name,
                     uploaded_at_ms=uploaded_at_ms,
                 )
-            if configured_remote_live_store is not None:
-                configured_remote_live_store.mark_bundle_committed(
-                    graph_id=upload.manifest.graph_id,
-                    run_id=upload.manifest.run_id,
-                    committed_at_ms=uploaded_at_ms,
-                )
             _record_remote_event(
                 configured_remote_event_store,
                 kind=RemoteOperationKind.RUN_UPLOAD,
@@ -283,16 +280,6 @@ def create_dashboard_app(
                 invocation_name=upload.manifest.invocation_name,
                 metadata={"artifact_count": len(upload.manifest.artifacts)},
             )
-            if configured_remote_live_store is not None:
-                _record_remote_event(
-                    configured_remote_event_store,
-                    kind=RemoteOperationKind.LIVE_COMMIT,
-                    status=RemoteOperationStatus.SUCCEEDED,
-                    project_id=upload.manifest.project_id,
-                    graph_id=upload.manifest.graph_id,
-                    run_id=upload.manifest.run_id,
-                    invocation_name=upload.manifest.invocation_name,
-                )
         except Exception as exc:  # pragma: no cover - thin API wrapper
             graph_id = None
             run_id = None
@@ -321,104 +308,6 @@ def create_dashboard_app(
             run_dir=str(run_dir),
             project_id=upload.manifest.project_id,
         ).as_dict()
-
-    @app.post("/api/remote/live/sessions/start", response_model=None)
-    def start_remote_live_session(
-        payload: Annotated[dict[str, object], Body()],
-        _auth: None = Depends(require_remote_auth),
-    ) -> object:
-        if configured_remote_live_store is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Remote live session start requires remote backend configuration.",
-            )
-        try:
-            request_payload = RemoteLiveSessionStartRequest.from_dict(payload)
-            if (
-                configured_remote_project_store is not None
-                and request_payload.project_id is not None
-            ):
-                configured_remote_project_store.get_project(
-                    project_id=request_payload.project_id
-                )
-            session = configured_remote_live_store.start_session(request_payload)
-            service.invalidate_remote_run(
-                graph_id=request_payload.graph_id,
-                run_id=request_payload.run_id,
-            )
-            _record_remote_event(
-                configured_remote_event_store,
-                kind=RemoteOperationKind.LIVE_START,
-                status=RemoteOperationStatus.SUCCEEDED,
-                project_id=request_payload.project_id,
-                graph_id=request_payload.graph_id,
-                run_id=request_payload.run_id,
-                invocation_name=request_payload.invocation_name,
-                metadata={"node_count": _payload_list_length(request_payload.graph, "nodes")},
-            )
-        except Exception as exc:  # pragma: no cover - thin API wrapper
-            _record_remote_event(
-                configured_remote_event_store,
-                kind=RemoteOperationKind.LIVE_START,
-                status=RemoteOperationStatus.FAILED,
-                project_id=_optional_payload_str(payload, "project_id"),
-                graph_id=_optional_payload_str(payload, "graph_id"),
-                run_id=_optional_payload_str(payload, "run_id"),
-                invocation_name=_optional_payload_str(payload, "invocation_name"),
-                error=exc,
-            )
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"session": session.as_dict()}
-
-    @app.post("/api/remote/live/sessions/{run_id}", response_model=None)
-    def update_remote_live_session(
-        run_id: str,
-        payload: Annotated[dict[str, object], Body()],
-        _auth: None = Depends(require_remote_auth),
-    ) -> object:
-        if configured_remote_live_store is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Remote live session update requires remote backend configuration.",
-            )
-        try:
-            request_payload = RemoteLiveSessionUpdateRequest.from_dict(payload)
-            if request_payload.run_id != run_id:
-                raise ValueError("Live session path run_id does not match payload.")
-            session = configured_remote_live_store.apply_update(request_payload)
-            service.invalidate_remote_run(
-                graph_id=request_payload.graph_id,
-                run_id=request_payload.run_id,
-            )
-            _record_remote_event(
-                configured_remote_event_store,
-                kind=RemoteOperationKind.LIVE_UPDATE,
-                status=RemoteOperationStatus.SUCCEEDED,
-                project_id=session.project_id,
-                graph_id=request_payload.graph_id,
-                run_id=request_payload.run_id,
-                invocation_name=session.invocation_name,
-                metadata={
-                    "record_count": len(request_payload.records),
-                    "span_count": len(request_payload.spans),
-                    "status": (
-                        None
-                        if request_payload.status is None
-                        else request_payload.status.value
-                    ),
-                },
-            )
-        except Exception as exc:  # pragma: no cover - thin API wrapper
-            _record_remote_event(
-                configured_remote_event_store,
-                kind=RemoteOperationKind.LIVE_UPDATE,
-                status=RemoteOperationStatus.FAILED,
-                graph_id=_optional_payload_str(payload, "graph_id"),
-                run_id=run_id,
-                error=exc,
-            )
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"session": session.as_dict()}
 
     @app.get("/api/remote/events", response_model=None)
     def list_remote_events(
@@ -734,11 +623,6 @@ def _record_remote_event(
 def _optional_payload_str(payload: dict[str, object], key: str) -> str | None:
     value = payload.get(key)
     return value if isinstance(value, str) else None
-
-
-def _payload_list_length(payload: dict[str, object], key: str) -> int:
-    value = payload.get(key)
-    return len(value) if isinstance(value, list) else 0
 
 
 def _catalog_entries_to_json(

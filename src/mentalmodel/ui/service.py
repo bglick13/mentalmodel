@@ -33,15 +33,14 @@ from mentalmodel.pagination import PageSlice, paginate_descending_sequence
 from mentalmodel.remote.backend import (
     RemoteCompletedRunSink,
     RemoteEventStore,
-    RemoteLiveSessionStore,
     RemoteProjectStore,
     RemoteRunStore,
 )
 from mentalmodel.remote.contracts import (
     ProjectCatalog,
-    RemoteLiveSessionRecord,
     RemoteProjectRecord,
 )
+from mentalmodel.remote.telemetry_store import TelemetryRunRecord, TelemetryStore
 from mentalmodel.remote.workspace import (
     ProjectRunTarget,
     build_project_run_target,
@@ -93,7 +92,6 @@ REMOTE_PROJECT_CACHE_TTL_MS = 2_000
 RUN_QUERY_CACHE_TTL_MS = 1_000
 TIMESERIES_CACHE_TTL_MS = 2_000
 METRIC_GROUPS_CACHE_TTL_MS = 2_000
-REMOTE_LIVE_SESSION_CACHE_TTL_MS = 1_000
 RUN_OVERVIEW_CACHE_TTL_MS = 1_000
 CATALOG_GRAPH_CACHE_TTL_MS = 30_000
 RUN_DETAIL_CACHE_TTL_MS = 1_000
@@ -279,15 +277,15 @@ class DashboardService:
         catalog_entries: Sequence[DashboardCatalogEntry] | None = None,
         project_catalogs: Sequence[ProjectCatalog] | None = None,
         remote_run_store: RemoteRunStore | None = None,
+        remote_telemetry_store: TelemetryStore | None = None,
         remote_project_store: RemoteProjectStore | None = None,
-        remote_live_session_store: RemoteLiveSessionStore | None = None,
         remote_event_store: RemoteEventStore | None = None,
         project_execution_worker: ProjectExecutionWorker | None = None,
     ) -> None:
         self.runs_dir = runs_dir
         self.remote_run_store = remote_run_store
+        self.remote_telemetry_store = remote_telemetry_store
         self.remote_project_store = remote_project_store
-        self.remote_live_session_store = remote_live_session_store
         self.remote_event_store = remote_event_store
         self._project_execution_worker = (
             project_execution_worker
@@ -325,9 +323,6 @@ class DashboardService:
         self._run_records_page_cache: dict[object, tuple[int, PageSlice[dict[str, JsonValue]]]] = {}
         self._run_spans_page_cache: dict[object, tuple[int, PageSlice[dict[str, JsonValue]]]] = {}
         self._node_detail_cache: dict[object, tuple[int, dict[str, JsonValue]]] = {}
-        self._remote_live_session_cache: dict[
-            tuple[str, str, bool], tuple[int, RemoteLiveSessionRecord]
-        ] = {}
 
     def list_catalog(self) -> tuple[DashboardCatalogEntry, ...]:
         now_ms = int(time.time() * 1000)
@@ -490,7 +485,6 @@ class DashboardService:
         self._run_records_page_cache.clear()
         self._run_spans_page_cache.clear()
         self._node_detail_cache.clear()
-        self._remote_live_session_cache.clear()
 
     def invalidate_remote_project_catalog(self) -> None:
         self._remote_projects_cache = None
@@ -543,11 +537,6 @@ class DashboardService:
         self._node_detail_cache = {
             key: value
             for key, value in self._node_detail_cache.items()
-            if not (isinstance(key, tuple) and key[:2] == (graph_id, run_id))
-        }
-        self._remote_live_session_cache = {
-            key: value
-            for key, value in self._remote_live_session_cache.items()
             if not (isinstance(key, tuple) and key[:2] == (graph_id, run_id))
         }
 
@@ -678,33 +667,33 @@ class DashboardService:
         cached = self._run_list_cache.get(cache_key)
         if cached is not None and cached[0] > now_ms:
             return cached[1]
-        summaries = (
-            self.remote_run_store.list_run_summaries(
+        if self.remote_telemetry_store is not None:
+            remote_runs = self.remote_telemetry_store.list_runs(
                 graph_id=graph_id,
                 invocation_name=invocation_name,
             )
-            if self.remote_run_store is not None
-            else list_run_summaries(
-                runs_dir=self.runs_dir,
-                graph_id=graph_id,
-                invocation_name=invocation_name,
-            )
-        )
-        persisted = {
-            summary.run_id: persisted_run_handle(summary)
-            for summary in summaries
-        }
-        remote_live = {
-            handle.run_id: handle
-            for handle in (
-                self._remote_live_run_handle(session)
-                for session in self._matching_remote_live_sessions(
+            persisted = {
+                run.run_id: _telemetry_run_handle(run) for run in remote_runs
+            }
+            ordered_run_ids = tuple(run.run_id for run in remote_runs)
+        else:
+            summaries = (
+                self.remote_run_store.list_run_summaries(
+                    graph_id=graph_id,
+                    invocation_name=invocation_name,
+                )
+                if self.remote_run_store is not None
+                else list_run_summaries(
+                    runs_dir=self.runs_dir,
                     graph_id=graph_id,
                     invocation_name=invocation_name,
                 )
             )
-            if handle is not None
-        }
+            persisted = {
+                summary.run_id: persisted_run_handle(summary)
+                for summary in summaries
+            }
+            ordered_run_ids = tuple(summary.run_id for summary in summaries)
         active = {
             handle.run_id: handle
             for handle in (
@@ -718,13 +707,9 @@ class DashboardService:
         }
         merged: list[DashboardRunHandle] = []
         seen: set[str] = set()
-        for summary in summaries:
-            merged.append(persisted[summary.run_id])
-            seen.add(summary.run_id)
-        for run_id, handle in remote_live.items():
-            if run_id not in seen:
-                merged.append(handle)
-                seen.add(run_id)
+        for run_id in ordered_run_ids:
+            merged.append(persisted[run_id])
+            seen.add(run_id)
         for run_id, handle in active.items():
             if run_id not in seen:
                 merged.append(handle)
@@ -741,16 +726,16 @@ class DashboardService:
             and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
         ):
             return self._graph_payload_for_entry(session.spec)
-        remote_live = self._remote_live_session_for_run(
-            graph_id=graph_id,
-            run_id=run_id,
-            include_payloads=False,
-        )
-        if (
-            remote_live is not None
-            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
-        ):
-            return _graph_payload_from_live_session(remote_live)
+        if self.remote_telemetry_store is not None:
+            try:
+                remote_run = self.remote_telemetry_store.get_run(
+                    graph_id=graph_id,
+                    run_id=run_id,
+                )
+                if remote_run.graph is not None:
+                    return remote_run.graph
+            except RunInspectionError:
+                pass
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         graph = load_run_graph(
             runs_dir=history_runs_dir,
@@ -789,25 +774,40 @@ class DashboardService:
             )
             self._prune_query_caches()
             return active_result
-        remote_live = self._remote_live_session_for_run(
+        if self.remote_telemetry_store is not None:
+            try:
+                remote_run = self.remote_telemetry_store.get_run(
+                    graph_id=graph_id,
+                    run_id=run_id,
+                )
+            except RunInspectionError:
+                remote_run = None
+        else:
+            remote_run = None
+        if remote_run is not None and not self._has_persisted_history(
             graph_id=graph_id,
             run_id=run_id,
-            include_payloads=False,
-        )
-        if (
-            remote_live is not None
-            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
         ):
-            assert self.remote_live_session_store is not None
+            telemetry_store = self.remote_telemetry_store
+            assert telemetry_store is not None
             live_result: dict[str, JsonValue] = {
-                "summary": self._remote_live_run_handle(remote_live).as_dict(),
+                "summary": _telemetry_run_handle(remote_run).as_dict(),
                 "verification": None,
                 "verification_success": None,
-                "runtime_error": remote_live.error,
-                "graph": _graph_payload_from_live_session(remote_live),
+                "runtime_error": remote_run.error_message,
+                "graph": (
+                    remote_run.graph
+                    if remote_run.graph is not None
+                    else {
+                        "graph_id": graph_id,
+                        "metadata": {},
+                        "nodes": [],
+                        "edges": [],
+                    }
+                ),
                 "metrics": [],
                 "invariants": _as_json_list(
-                    self.remote_live_session_store.list_invariants(
+                    telemetry_store.list_invariants(
                         graph_id=graph_id,
                         run_id=run_id,
                     )
@@ -898,13 +898,23 @@ class DashboardService:
                 view=view,
             )
             return _as_json_object(evaluated.as_dict())
-        remote_live = self._remote_live_session_for_run(graph_id=entry.graph_id, run_id=run_id)
         if (
-            remote_live is not None
+            self.remote_telemetry_store is not None
+            and self.remote_telemetry_store.contains_run(
+                graph_id=entry.graph_id,
+                run_id=run_id,
+            )
             and not self._has_persisted_history(graph_id=entry.graph_id, run_id=run_id)
         ):
+            records_page = self.remote_telemetry_store.get_records_page(
+                graph_id=entry.graph_id,
+                run_id=run_id,
+                cursor=None,
+                limit=10_000,
+                include_payload=True,
+            )
             evaluated = evaluate_custom_view_from_records(
-                records=list(remote_live.records),
+                records=cast(list[dict[str, object]], list(records_page.items)),
                 run_id=run_id,
                 view=view,
             )
@@ -974,19 +984,17 @@ class DashboardService:
             )
             self._prune_query_caches()
             return live_session_result
-        remote_live = self._remote_live_session_for_run(
-            graph_id=entry.graph_id,
-            run_id=run_id,
-            include_payloads=False,
-        )
         if (
-            remote_live is not None
+            self.remote_telemetry_store is not None
+            and self.remote_telemetry_store.contains_run(
+                graph_id=entry.graph_id,
+                run_id=run_id,
+            )
             and not self._has_persisted_history(graph_id=entry.graph_id, run_id=run_id)
         ):
-            assert self.remote_live_session_store is not None
             groups = evaluate_metric_groups(
                 groups=entry.metric_groups,
-                metric_rows=self.remote_live_session_store.list_metrics(
+                metric_rows=self.remote_telemetry_store.list_metrics(
                     graph_id=entry.graph_id,
                     run_id=run_id,
                     step_start=step_start,
@@ -1069,16 +1077,18 @@ class DashboardService:
                 for record in session.records
                 if node_id is None or record.get("node_id") == node_id
             )
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
-        if (
-            remote_live is not None
-            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        if self.remote_telemetry_store is not None and self.remote_telemetry_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
         ):
-            return tuple(
-                cast(dict[str, JsonValue], record)
-                for record in remote_live.records
-                if node_id is None or record.get("node_id") == node_id
-            )
+            return self.get_run_records_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=None,
+                limit=10_000,
+                node_id=node_id,
+                include_payload=True,
+            ).items
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_records(
             runs_dir=history_runs_dir,
@@ -1131,9 +1141,11 @@ class DashboardService:
             )
             self._prune_query_caches()
             return result
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
-        if remote_live is not None and self.remote_live_session_store is not None:
-            result = self.remote_live_session_store.get_records_page(
+        if self.remote_telemetry_store is not None and self.remote_telemetry_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
+        ):
+            result = self.remote_telemetry_store.get_records_page(
                 graph_id=graph_id,
                 run_id=run_id,
                 cursor=cursor,
@@ -1204,16 +1216,17 @@ class DashboardService:
                 for span in session.spans
                 if node_id is None or _span_node_id(span) == node_id
             )
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
-        if (
-            remote_live is not None
-            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        if self.remote_telemetry_store is not None and self.remote_telemetry_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
         ):
-            return tuple(
-                cast(dict[str, JsonValue], span)
-                for span in remote_live.spans
-                if node_id is None or _span_node_id(cast(dict[str, JsonValue], span)) == node_id
-            )
+            return self.get_run_spans_page(
+                graph_id=graph_id,
+                run_id=run_id,
+                cursor=None,
+                limit=10_000,
+                node_id=node_id,
+            ).items
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
         return load_run_spans(
             runs_dir=history_runs_dir,
@@ -1260,9 +1273,11 @@ class DashboardService:
             )
             self._prune_query_caches()
             return result
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
-        if remote_live is not None and self.remote_live_session_store is not None:
-            result = self.remote_live_session_store.get_spans_page(
+        if self.remote_telemetry_store is not None and self.remote_telemetry_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
+        ):
+            result = self.remote_telemetry_store.get_spans_page(
                 graph_id=graph_id,
                 run_id=run_id,
                 cursor=cursor,
@@ -1324,17 +1339,20 @@ class DashboardService:
             and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
         ):
             return self._active_run_replay_payload(session, loop_node_id=loop_node_id)
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
-        if (
-            remote_live is not None
-            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        if self.remote_telemetry_store is not None and self.remote_telemetry_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
         ):
+            remote_run = self.remote_telemetry_store.get_run(graph_id=graph_id, run_id=run_id)
             return _live_run_replay_payload(
                 graph_id=graph_id,
                 run_id=run_id,
-                invocation_name=remote_live.invocation_name,
-                success=remote_live.status.value == "succeeded",
-                records=remote_live.records,
+                invocation_name=remote_run.invocation_name,
+                success=remote_run.status == "succeeded",
+                records=cast(
+                    Sequence[dict[str, object]],
+                    self.get_run_records(graph_id=graph_id, run_id=run_id),
+                ),
                 loop_node_id=loop_node_id,
             )
         history_runs_dir = self._history_runs_dir(graph_id=graph_id, run_id=run_id)
@@ -1399,14 +1417,16 @@ class DashboardService:
             )
             self._prune_query_caches()
             return active_result
-        remote_live = self._remote_live_session_for_run(graph_id=graph_id, run_id=run_id)
-        if (
-            remote_live is not None
-            and not self._has_persisted_history(graph_id=graph_id, run_id=run_id)
+        if self.remote_telemetry_store is not None and self.remote_telemetry_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
         ):
             filtered_records = tuple(
-                cast(dict[str, JsonValue], record)
-                for record in remote_live.records
+                record
+                for record in self.get_run_records(
+                    graph_id=graph_id,
+                    run_id=run_id,
+                )
                 if record.get("node_id") == node_id
                 and (frame_id is None or record.get("frame_id") == frame_id)
             )
@@ -1419,15 +1439,15 @@ class DashboardService:
                 ),
                 "trace": {
                     "records": list(filtered_records),
-                    "spans": [
-                        cast(dict[str, JsonValue], span)
-                        for span in remote_live.spans
-                        if _span_node_id(cast(dict[str, JsonValue], span)) == node_id
-                        and (
-                            frame_id is None
-                            or span.get("frame_id") == frame_id
+                    "spans": list(
+                        span
+                        for span in self.get_run_spans(
+                            graph_id=graph_id,
+                            run_id=run_id,
                         )
-                    ],
+                        if _span_node_id(span) == node_id
+                        and (frame_id is None or span.get("frame_id") == frame_id)
+                    ),
                 },
                 "available_frames": _as_json_list(
                     _available_frames_from_records(records=filtered_records)
@@ -1510,19 +1530,6 @@ class DashboardService:
             )
         )
 
-    def _matching_remote_live_sessions(
-        self,
-        *,
-        graph_id: str | None = None,
-        invocation_name: str | None = None,
-    ) -> tuple[RemoteLiveSessionRecord, ...]:
-        if self.remote_live_session_store is None:
-            return ()
-        return self.remote_live_session_store.list_sessions(
-            graph_id=graph_id,
-            invocation_name=invocation_name,
-        )
-
     def _session_for_run(
         self,
         *,
@@ -1533,35 +1540,6 @@ class DashboardService:
             if session.run_id == run_id:
                 return session
         return None
-
-    def _remote_live_session_for_run(
-        self,
-        *,
-        graph_id: str,
-        run_id: str,
-        include_payloads: bool = True,
-    ) -> RemoteLiveSessionRecord | None:
-        if self.remote_live_session_store is None:
-            return None
-        now_ms = int(time.time() * 1000)
-        cache_key = (graph_id, run_id, include_payloads)
-        cached = self._remote_live_session_cache.get(cache_key)
-        if cached is not None and cached[0] > now_ms:
-            return cached[1]
-        try:
-            session = self.remote_live_session_store.get_session(
-                graph_id=graph_id,
-                run_id=run_id,
-                include_payloads=include_payloads,
-            )
-            self._remote_live_session_cache[cache_key] = (
-                now_ms + REMOTE_LIVE_SESSION_CACHE_TTL_MS,
-                session,
-            )
-            self._prune_query_caches()
-            return session
-        except RunInspectionError:
-            return None
 
     def _active_run_handle(
         self,
@@ -1607,43 +1585,12 @@ class DashboardService:
             ),
         )
 
-    def _remote_live_run_handle(
-        self,
-        session: RemoteLiveSessionRecord,
-    ) -> DashboardRunHandle:
-        return DashboardRunHandle(
-            schema_version=0,
-            graph_id=session.graph_id,
-            run_id=session.run_id,
-            created_at_ms=session.started_at_ms,
-            status=session.status.value,
-            success=(
-                True
-                if session.status.value == "succeeded"
-                else False if session.status.value == "failed" else None
-            ),
-            node_count=_graph_node_count(session.graph),
-            edge_count=_graph_edge_count(session.graph),
-            record_count=len(session.records),
-            output_count=_remote_live_output_count(session.records),
-            state_count=0,
-            invocation_name=session.invocation_name,
-            runtime_default_profile_name=session.runtime_default_profile_name,
-            runtime_profile_names=session.runtime_profile_names,
-            trace_mode="live",
-            trace_service_name="mentalmodel",
-            run_dir="",
-            source="remote-live",
-            availability=DashboardRunAvailability(
-                summary=True,
-                records=bool(session.records),
-                spans=bool(session.spans),
-                replay=bool(session.records),
-                custom_views=False,
-            ),
-        )
-
     def _has_persisted_history(self, *, graph_id: str, run_id: str) -> bool:
+        if self.remote_telemetry_store is not None and self.remote_telemetry_store.contains_run(
+            graph_id=graph_id,
+            run_id=run_id,
+        ):
+            return False
         runs_root = (
             self.runs_dir
             if self.remote_run_store is None
@@ -2267,15 +2214,25 @@ class DashboardService:
         rollup_ms = effective_rollup
 
         summaries = (
-            self.remote_run_store.list_run_summaries(
-                graph_id=graph_id,
-                invocation_name=invocation_name,
+            tuple(
+                _run_summary_from_telemetry(run)
+                for run in self.remote_telemetry_store.list_runs(
+                    graph_id=graph_id,
+                    invocation_name=invocation_name,
+                )
             )
-            if self.remote_run_store is not None
-            else list_run_summaries(
-                runs_dir=self.runs_dir,
-                graph_id=graph_id,
-                invocation_name=invocation_name,
+            if self.remote_telemetry_store is not None
+            else (
+                self.remote_run_store.list_run_summaries(
+                    graph_id=graph_id,
+                    invocation_name=invocation_name,
+                )
+                if self.remote_run_store is not None
+                else list_run_summaries(
+                    runs_dir=self.runs_dir,
+                    graph_id=graph_id,
+                    invocation_name=invocation_name,
+                )
             )
         )
         if run_id is not None:
@@ -2295,7 +2252,29 @@ class DashboardService:
         loop_counts = [0] * num_buckets
         unique_node_counts = [0] * num_buckets
 
-        if self.remote_run_store is not None and any(
+        if self.remote_telemetry_store is not None and any(
+            self.remote_telemetry_store.contains_run(
+                graph_id=summary.graph_id,
+                run_id=summary.run_id,
+            )
+            for summary in summaries
+        ):
+            bucket_rows = self.remote_telemetry_store.aggregate_record_timeseries(
+                graph_id=graph_id,
+                invocation_name=invocation_name,
+                since_ms=since_ms,
+                until_ms=until_ms,
+                rollup_ms=rollup_ms,
+                run_id=run_id,
+                node_id=node_id,
+            )
+            for bucket_index, record_count, loop_count, unique_nodes in bucket_rows:
+                if bucket_index < 0 or bucket_index >= num_buckets:
+                    continue
+                record_counts[bucket_index] = record_count
+                loop_counts[bucket_index] = loop_count
+                unique_node_counts[bucket_index] = unique_nodes
+        elif self.remote_run_store is not None and any(
             self.remote_run_store.contains_run(graph_id=summary.graph_id, run_id=summary.run_id)
             for summary in summaries
         ):
@@ -2430,10 +2409,6 @@ class DashboardService:
         )
         self._prune_cache_mapping(
             cast(dict[object, tuple[int, object]], self._node_detail_cache),
-            now_ms,
-        )
-        self._prune_cache_mapping(
-            cast(dict[object, tuple[int, object]], self._remote_live_session_cache),
             now_ms,
         )
 
@@ -2574,9 +2549,15 @@ def _span_sequence(span: dict[str, JsonValue]) -> int:
 
 
 def _span_node_id(span: dict[str, JsonValue]) -> str | None:
+    node_id = span.get("node_id")
+    if isinstance(node_id, str):
+        return node_id
     attributes = span.get("attributes")
     if not isinstance(attributes, dict):
         return None
+    value = attributes.get("mentalmodel.node_id")
+    if isinstance(value, str):
+        return value
     value = attributes.get("mentalmodel.node.id")
     return value if isinstance(value, str) else None
 
@@ -2588,6 +2569,9 @@ def _span_frame_id(span: dict[str, JsonValue]) -> str | None:
     attributes = span.get("attributes")
     if not isinstance(attributes, dict):
         return None
+    attr_value = attributes.get("mentalmodel.frame_id")
+    if isinstance(attr_value, str):
+        return attr_value
     attr_value = attributes.get("mentalmodel.frame.id")
     return attr_value if isinstance(attr_value, str) else None
 
@@ -2602,14 +2586,8 @@ def _graph_edge_count(graph: dict[str, object]) -> int:
     return len(edges) if isinstance(edges, list) else 0
 
 
-def _remote_live_output_count(records: Sequence[dict[str, object]]) -> int:
+def _output_count(records: Sequence[dict[str, object]]) -> int:
     return sum(1 for record in records if record.get("event_type") == "node.succeeded")
-
-
-def _graph_payload_from_live_session(
-    session: RemoteLiveSessionRecord,
-) -> dict[str, JsonValue]:
-    return _as_json_object(session.graph)
 
 
 def _live_run_replay_payload(
@@ -2685,6 +2663,63 @@ def _live_run_replay_payload(
         "events": _as_json_list(filtered_records),
         "node_summaries": _as_json_list(list(node_summaries.values())),
     }
+
+
+def _telemetry_run_handle(run: TelemetryRunRecord) -> DashboardRunHandle:
+    graph_payload = None if run.graph is None else cast(dict[str, object], run.graph)
+    return DashboardRunHandle(
+        schema_version=0,
+        graph_id=run.graph_id,
+        run_id=run.run_id,
+        created_at_ms=run.created_at_ms,
+        status=run.status,
+        success=run.success,
+        node_count=0 if graph_payload is None else _graph_node_count(graph_payload),
+        edge_count=0 if graph_payload is None else _graph_edge_count(graph_payload),
+        record_count=run.record_count,
+        output_count=run.output_count,
+        state_count=0,
+        invocation_name=run.invocation_name,
+        runtime_default_profile_name=run.runtime_default_profile_name,
+        runtime_profile_names=run.runtime_profile_names,
+        trace_mode="otlp",
+        trace_service_name="mentalmodel",
+        run_dir="",
+        source="remote",
+        availability=DashboardRunAvailability(
+            summary=True,
+            records=True,
+            spans=True,
+            replay=True,
+            custom_views=False,
+        ),
+    )
+
+
+def _run_summary_from_telemetry(run: TelemetryRunRecord) -> RunSummary:
+    graph_payload = None if run.graph is None else cast(dict[str, object], run.graph)
+    return RunSummary(
+        schema_version=0,
+        graph_id=run.graph_id,
+        run_id=run.run_id,
+        run_dir=Path("/remote") / run.graph_id / run.run_id,
+        created_at_ms=run.created_at_ms,
+        success=bool(run.success),
+        node_count=0 if graph_payload is None else _graph_node_count(graph_payload),
+        edge_count=0 if graph_payload is None else _graph_edge_count(graph_payload),
+        record_count=run.record_count,
+        output_count=run.output_count,
+        state_count=0,
+        trace_sink_configured=True,
+        trace_mode="otlp",
+        trace_otlp_endpoint=None,
+        trace_mirror_to_disk=False,
+        trace_capture_local_spans=False,
+        trace_service_name="mentalmodel",
+        invocation_name=run.invocation_name,
+        runtime_default_profile_name=run.runtime_default_profile_name,
+        runtime_profile_names=run.runtime_profile_names,
+    )
 
 
 def _invariants_from_live_records(
